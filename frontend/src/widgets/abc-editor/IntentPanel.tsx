@@ -2,7 +2,7 @@
 
 import { useCallback, useRef, useState } from 'react'
 import { useScoreStore } from '@/entities/session/store'
-import { editABC } from '@/shared/lib/api'
+import { chatUniversal } from '@/shared/lib/api'
 
 const INTENT_PRESETS = [
   { label: '转 G 大调', value: '转调到 G 大调' },
@@ -16,26 +16,29 @@ const INTENT_PRESETS = [
 ]
 
 /**
- * IntentPanel - 意图输入面板
- * 用户在此输入修改意图，触发 Agent 编排
+ * IntentPanel - 意图输入面板（小白模式）
+ * 统一调用 /chat 接口，LLM 自动识别意图（edit/query/audio...）
+ * 不再直接调用 /edit，避免 "no score in session" 500 错误
  */
 export function IntentPanel() {
   const [intent, setIntent] = useState('')
   const [isLoading, setIsLoading] = useState(false)
   const inputRef = useRef<HTMLTextAreaElement>(null)
 
-  // SSE 订阅由 page.tsx 统一管理，IntentPanel 只调用 REST
   const {
     sessionId,
     score,
     pipelineState,
-    updateABC,
     setPipelineState,
     appendLog,
     clearLogs,
   } = useScoreStore()
 
-  const canSubmit = !!sessionId && !!score && intent.trim().length > 0 && !isLoading && pipelineState !== 'running'
+  const canSubmit =
+    !!sessionId &&
+    intent.trim().length > 0 &&
+    !isLoading &&
+    pipelineState !== 'running'
 
   const handleSubmit = useCallback(async () => {
     if (!canSubmit || !sessionId) return
@@ -47,23 +50,19 @@ export function IntentPanel() {
     appendLog({ type: 'activity', text: `用户意图：${trimmedIntent}` })
 
     try {
-      // SSE 已由 page.tsx 持久订阅，事件会自动流入 store，无需在此订阅
-      const result = await editABC(sessionId, trimmedIntent)
-      updateABC(result.abc_notation, result.version, result.summary)
-      appendLog({
-        type: 'step',
-        text: `✓ ${result.summary}`,
-        status: 'succeeded',
-      })
+      // 统一走 /chat 接口，LLM 自动路由意图
+      // 无谱子时 LLM 会友好提示，不会 500
+      await chatUniversal(sessionId, { message: trimmedIntent })
       setIntent('')
+      // pipelineState 由 SSE pipeline.step 事件驱动更新
     } catch (e) {
-      const msg = e instanceof Error ? e.message : '修改失败'
+      const msg = e instanceof Error ? e.message : '请求失败'
       appendLog({ type: 'error', text: msg, status: 'failed' })
       setPipelineState('failed')
     } finally {
       setIsLoading(false)
     }
-  }, [canSubmit, sessionId, intent, clearLogs, setPipelineState, appendLog, updateABC])
+  }, [canSubmit, sessionId, intent, clearLogs, setPipelineState, appendLog])
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
@@ -74,14 +73,6 @@ export function IntentPanel() {
   const applyPreset = (value: string) => {
     setIntent(value)
     inputRef.current?.focus()
-  }
-
-  if (!score) {
-    return (
-      <div className="p-4 text-center text-gray-400 text-sm">
-        请先上传谱子
-      </div>
-    )
   }
 
   return (
@@ -107,7 +98,11 @@ export function IntentPanel() {
           value={intent}
           onChange={(e) => setIntent(e.target.value)}
           onKeyDown={handleKeyDown}
-          placeholder="描述你想要的修改，如：转调到 A 大调、改成爵士风格、加快节奏..."
+          placeholder={
+            score
+              ? '描述修改意图，如：转调到 A 大调、改成爵士风格...'
+              : '描述你想要的音乐，如：写一段抒情流行 ABC...'
+          }
           rows={3}
           disabled={isLoading}
           className="w-full px-3 py-2.5 text-sm rounded-lg border border-gray-200 resize-none focus:outline-none focus:ring-2 focus:ring-orange-300 focus:border-transparent disabled:opacity-60 placeholder:text-gray-300"
@@ -126,12 +121,20 @@ export function IntentPanel() {
         {isLoading ? (
           <>
             <span className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
-            AI 正在修改...
+            AI 处理中...
           </>
         ) : (
-          <>✨ 智能修改</>
+          <>✨ {score ? '智能修改' : 'AI 创作'}</>
         )}
       </button>
+
+      {/* 无谱子时的提示 */}
+      {!score && (
+        <p className="text-[11px] text-gray-400 text-center leading-relaxed">
+          💡 没有谱子也能用！AI 会直接创作 ABC 谱子，<br />
+          或者先在上方上传 Sky JSON 文件
+        </p>
+      )}
     </div>
   )
 }

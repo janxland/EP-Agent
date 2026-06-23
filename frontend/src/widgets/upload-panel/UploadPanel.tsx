@@ -9,7 +9,7 @@ import { createSession, convertJSON } from '@/shared/lib/api'
  * 支持拖拽上传和点击上传
  * 上传后自动创建 Session 并触发转换
  */
-export function UploadPanel() {
+export function UploadPanel({ compact = false }: { compact?: boolean }) {
   const [isDragging, setIsDragging] = useState(false)
   const [isLoading, setIsLoading] = useState(false)
   const [errorMsg, setErrorMsg] = useState<string | null>(null)
@@ -103,10 +103,11 @@ export function UploadPanel() {
   )
 
   return (
-    <div className="p-4">
+    <div className={compact ? 'px-3 py-2' : 'p-4'}>
       <label
         className={[
-          'flex flex-col items-center justify-center w-full h-36 rounded-xl border-2 border-dashed cursor-pointer transition-all',
+          'flex flex-col items-center justify-center w-full rounded-xl border-2 border-dashed cursor-pointer transition-all',
+          compact ? 'h-20' : 'h-36',
           isDragging
             ? 'border-orange-400 bg-orange-50'
             : 'border-gray-200 bg-gray-50 hover:border-orange-300 hover:bg-orange-50/50',
@@ -129,12 +130,16 @@ export function UploadPanel() {
             <span className="text-sm">正在转换...</span>
           </div>
         ) : (
-          <div className="flex flex-col items-center gap-2 text-gray-400">
-            <span className="text-3xl">🎼</span>
-            <span className="text-sm font-medium text-gray-600">
-              拖拽或点击上传 Sky JSON 谱子
+          <div className="flex flex-col items-center gap-1.5 text-gray-400">
+            <span className={compact ? 'text-xl' : 'text-3xl'}>🎼</span>
+            {!compact && (
+              <span className="text-sm font-medium text-gray-600">
+                拖拽或点击上传 Sky JSON 谱子
+              </span>
+            )}
+            <span className="text-xs text-gray-400">
+              {compact ? '上传 Sky JSON / TXT' : '.json / .txt 格式'}
             </span>
-            <span className="text-xs text-gray-400">.json / .txt 格式</span>
           </div>
         )}
       </label>

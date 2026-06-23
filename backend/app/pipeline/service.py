@@ -260,7 +260,43 @@ async def export_score(session_id: str, fmt: str, instrument: int = 0) -> tuple[
         raise ValueError(f"unsupported format: {fmt}")
 
 
-# ─── 用例5: 对话式音频生成 ────────────────────────────────────────────────────
+# ─── 用例5: 统一对话（意图路由）─────────────────────────────────────────────
+
+async def universal_chat(
+    session_id: str,
+    message: str,
+    attachment_content: str = "",
+    attachment_name: str = "",
+    attachment_b64: str = "",
+    publish=None,
+) -> dict:
+    """
+    统一对话用例：LLM 自动识别意图，路由到 convert/edit/audio/voice/query。
+    前端只需调用这一个接口，不需要区分场景。
+    """
+    from app.agentcore.universal_runner import universal_runner
+
+    if publish is None:
+        async def _noop(evt_type: str, payload: dict):
+            pass
+        publish = _noop
+
+    return await universal_runner.run(
+        session_id=session_id,
+        message=message,
+        attachment_content=attachment_content,
+        attachment_name=attachment_name,
+        attachment_b64=attachment_b64,
+        session_getter=get_session,
+        session_saver=save_session,
+        publish=publish,
+        convert_fn=convert,
+        edit_fn=edit,
+        audio_chat_fn=audio_chat,
+    )
+
+
+# ─── 用例6: 对话式音频生成 ────────────────────────────────────────────────────
 
 async def audio_chat(
     session_id: str,

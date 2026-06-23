@@ -133,8 +133,14 @@ export const useScoreStore = create<ScoreState>((set, get) => ({
     switch (event.type) {
       case 'pipeline.step': {
         const p = event.payload as PipelineStepPayload
-        set({ pipelineState: p.status === 'running' ? 'running' : p.status === 'succeeded' ? 'succeeded' : 'failed' })
-        if (p.display !== false) {
+        // pipelineState 跟随步骤状态变化
+        const nextState: PipelineState =
+          p.status === 'running' ? 'running'
+          : p.status === 'failed'  ? 'failed'
+          : 'succeeded'
+        set({ pipelineState: nextState })
+        // event.display === false 时跳过日志（后端标记的内部步骤）
+        if (event.display !== false) {
           appendLog({ type: 'step', text: p.text, status: p.status })
         }
         break

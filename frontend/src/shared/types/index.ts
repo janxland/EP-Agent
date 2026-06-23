@@ -120,6 +120,7 @@ export type AudioDomainValue = typeof AudioDomain[keyof typeof AudioDomain]
 export interface AudioChatRequest {
   message: string
   provider?: 'auto' | 'minimax' | 'suno'
+  audio_b64?: string   // 音色克隆时携带的源音频 base64
 }
 
 /** 对话式音频生成响应 */

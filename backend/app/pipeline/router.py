@@ -133,6 +133,35 @@ async def edit(session_id: str, req: EditRequest):
     except Exception as e:
         raise HTTPException(500, str(e))
 
+# ─── Universal Chat（统一对话接口，替代固定 /edit）────────────
+
+class UniversalChatRequest(BaseModel):
+    message: str
+    attachment_content: str = ""   # 附件文本内容（JSON/TXT 等）
+    attachment_name: str = ""      # 附件文件名
+    attachment_b64: str = ""       # 音频附件 base64（音色克隆用）
+
+@router.post("/sessions/{session_id}/chat")
+async def universal_chat(session_id: str, req: UniversalChatRequest):
+    """
+    统一对话接口：LLM 自动识别意图，路由到 convert/edit/audio/voice/query。
+    前端不需要区分接口，直接发消息即可。
+    """
+    try:
+        result = await service.universal_chat(
+            session_id=session_id,
+            message=req.message,
+            attachment_content=req.attachment_content,
+            attachment_name=req.attachment_name,
+            attachment_b64=req.attachment_b64,
+            publish=_make_publisher(session_id),
+        )
+        return result
+    except KeyError as e:
+        raise HTTPException(404, str(e))
+    except Exception as e:
+        raise HTTPException(500, str(e))
+
 # ─── Export ───────────────────────────────────────────────────
 
 class ExportRequest(BaseModel):

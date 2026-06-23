@@ -13,7 +13,7 @@ from app.pipeline.router import router
 from app.pipeline.audio_router import router as audio_router
 from app.pipeline.audio_chat_router import router as audio_chat_router
 
-app = FastAPI(title="ABC-Agent API", version="1.0.0")
+app = FastAPI(title="EP-Agent API", version="1.0.0")
 
 app.add_middleware(
     CORSMiddleware,

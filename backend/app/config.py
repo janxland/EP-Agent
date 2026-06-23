@@ -1,12 +1,11 @@
 import os
 from pathlib import Path
-
 from dotenv import load_dotenv
 
 # 项目根目录（backend/）
 _BACKEND_DIR = Path(__file__).resolve().parent.parent
 
-# 启动时自动加载 backend/.env，方便本地开发
+# 本地开发时自动读取 backend/.env
 load_dotenv(_BACKEND_DIR / ".env")
 
 
@@ -25,7 +24,6 @@ class Config:
             "SKILL_DIR",
             os.getenv("ABC_SKILLS_DIR", str(_BACKEND_DIR / "sky-music-tools"))
         )
-        # 如果传入的是 skills 根目录，则自动指向 sky-music-tools
         skill_dir_path = Path(self.SKILL_DIR)
         if skill_dir_path.name != "sky-music-tools" and (skill_dir_path / "sky-music-tools").is_dir():
             self.SKILL_DIR = str(skill_dir_path / "sky-music-tools")

@@ -220,6 +220,48 @@ export async function clearAudioHistory(sessionId: string): Promise<void> {
   })
 }
 
+// ─── Universal Chat（统一对话接口）──────────────────────────────────────────
+
+export interface UniversalChatRequest {
+  message: string
+  attachment_content?: string   // 附件文本内容（JSON/TXT 等，已解码）
+  attachment_name?: string      // 附件文件名
+  attachment_b64?: string       // 音频附件 base64（音色克隆用）
+}
+
+export interface UniversalChatResponse {
+  domain: string                // convert | edit | audio | voice | query | convert+edit
+  message: string               // AI 回复文本
+  abc_updated: boolean
+  audio_url?: string
+  voice_id?: string
+  [key: string]: unknown
+}
+
+/**
+ * 统一对话接口：LLM 自动识别意图，无需前端区分场景。
+ * - 粘贴 Sky JSON → domain=convert（自动转换）
+ * - 说"升高八度" → domain=edit（直接修改 ABC）
+ * - 说"生成中国风" → domain=audio（音频生成）
+ * - 说"克隆声音"+音频 → domain=voice（音色克隆）
+ * - 问"这首是什么调" → domain=query（直接回答）
+ */
+export async function chatUniversal(
+  sessionId: string,
+  req: UniversalChatRequest,
+): Promise<UniversalChatResponse> {
+  const res = await fetch(`${BASE_URL}/api/sessions/${sessionId}/chat`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(req),
+  })
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: res.statusText }))
+    throw new Error(err.detail ?? res.statusText)
+  }
+  return res.json()
+}
+
 // ─── Voice Clone（音色克隆）──────────────────────────────────────────────────
 
 export interface VoiceUploadResult {
