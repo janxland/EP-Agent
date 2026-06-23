@@ -1,0 +1,10 @@
+.DS_Store
+.venv/
+workspace/
+
+frontend/node_modules/
+frontend/.next/
+
+backend/.env
+
+*.log
