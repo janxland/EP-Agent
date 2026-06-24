@@ -11,12 +11,92 @@ import type {
   AudioGenerationResult,
 } from '@/shared/types'
 
-const BASE_URL = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:8082'
+// 优先使用环境变量；开发时留空走 next.config.js 代理，生产时由 NEXT_PUBLIC_API_URL 指定
+const BASE_URL = process.env.NEXT_PUBLIC_API_URL ?? ''
+
+// ─── Workspace ────────────────────────────────────────────────
+
+export interface WorkspaceDto {
+  id: string
+  name: string
+  description: string
+  created_at: string
+  updated_at: string
+  sessions?: SessionInfoDto[]
+}
+
+export interface SessionInfoDto {
+  id: string
+  workspace_id: string | null
+  title: string
+  score_title: string | null
+  score_key: string | null
+  score_bpm: number | null
+  score_notes: number | null
+  pipeline_state: string
+  created_at: string
+  updated_at: string
+  stale?: boolean
+}
+
+export async function listWorkspaces(): Promise<{ workspaces: WorkspaceDto[] }> {
+  const res = await fetch(`${BASE_URL}/api/workspaces`)
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
+}
+
+export async function createWorkspace(name: string, description = ''): Promise<WorkspaceDto> {
+  const res = await fetch(`${BASE_URL}/api/workspaces`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name, description }),
+  })
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
+}
+
+export async function renameWorkspace(wsId: string, name: string): Promise<void> {
+  const res = await fetch(`${BASE_URL}/api/workspaces/${wsId}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name }),
+  })
+  if (!res.ok) throw new Error(await res.text())
+}
+
+export async function deleteWorkspace(wsId: string): Promise<void> {
+  const res = await fetch(`${BASE_URL}/api/workspaces/${wsId}`, { method: 'DELETE' })
+  if (!res.ok && res.status !== 404) throw new Error(await res.text())
+}
+
+export async function deleteSession(sessionId: string): Promise<void> {
+  const res = await fetch(`${BASE_URL}/api/sessions/${sessionId}`, { method: 'DELETE' })
+  if (!res.ok && res.status !== 404) throw new Error(await res.text())
+}
+
+export async function renameSession(sessionId: string, title: string): Promise<void> {
+  const res = await fetch(`${BASE_URL}/api/sessions/${sessionId}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ title }),
+  })
+  if (!res.ok) throw new Error(await res.text())
+}
+
+export async function getSessionInfo(sessionId: string): Promise<SessionInfoDto> {
+  const res = await fetch(`${BASE_URL}/api/sessions/${sessionId}`)
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
+}
 
 // ─── Session ──────────────────────────────────────────────────
 
-export async function createSession(): Promise<{ session_id: string }> {
-  const res = await fetch(`${BASE_URL}/api/sessions`, { method: 'POST' })
+export async function createSession(workspaceId?: string, title = '新对话'): Promise<{ session_id: string; workspace_id: string | null; title: string }> {
+  const res = await fetch(`${BASE_URL}/api/sessions`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ workspace_id: workspaceId ?? '', title }),
+  })
   if (!res.ok) throw new Error(await res.text())
   return res.json()
 }
@@ -86,29 +166,70 @@ export async function exportScore(
 
 // ─── SSE Stream ───────────────────────────────────────────────
 
+/**
+ * 订阅 SSE 事件流，含自动重连机制。
+ *
+ * 关键设计（解决前端时序堵点）：
+ *   1. 断线自动重连：网络抖动或后端重启后，3s 内自动重建连接
+ *   2. 重连时后端会重新 replay abc.updated / message.history / todo.list，
+ *      前端去重逻辑确保不会重复显示历史消息
+ *   3. 主动销毁时（组件卸载）不再重连
+ *
+ * ⚠️ SSE 必须直连后端，不能走 Next.js rewrites 代理。
+ *    Next.js 的 rewrites 会缓冲整个响应后才转发，导致流式事件无法实时到达。
+ *    生产环境通过 NEXT_PUBLIC_BACKEND_URL 指定后端地址（nginx 反代时填内网地址）。
+ */
 export function subscribeToSession(
   sessionId: string,
   onEvent: (event: SSEEvent) => void,
   onError?: (err: Event) => void
 ): () => void {
-  const url = `${BASE_URL}/api/sessions/${sessionId}/stream`
-  const es = new EventSource(url)
+  // SSE 直连后端，绕过 Next.js rewrites 缓冲
+  const backendUrl = process.env.NEXT_PUBLIC_BACKEND_URL ?? 'http://localhost:8080'
+  const url = `${backendUrl}/api/sessions/${sessionId}/stream`
+  let es: EventSource | null = null
+  let destroyed = false
+  let retryTimer: ReturnType<typeof setTimeout> | null = null
+  let retryCount = 0
+  const MAX_RETRY = 10
+  const RETRY_BASE_MS = 2000   // 基础重连间隔 2s
+  const RETRY_MAX_MS  = 30000  // 最大重连间隔 30s
 
-  es.onmessage = (e) => {
-    try {
-      const event: SSEEvent = JSON.parse(e.data)
-      onEvent(event)
-    } catch {
-      // 忽略解析错误
+  function connect() {
+    if (destroyed) return
+    es = new EventSource(url)
+
+    es.onmessage = (e) => {
+      retryCount = 0   // 收到消息说明连接正常，重置重试计数
+      try {
+        const event: SSEEvent = JSON.parse(e.data)
+        onEvent(event)
+      } catch {
+        // 忽略解析错误（心跳注释行等非 JSON 数据）
+      }
+    }
+
+    es.onerror = (err) => {
+      if (onError) onError(err)
+      es?.close()
+      es = null
+      if (destroyed || retryCount >= MAX_RETRY) return
+      // 指数退避重连（2s → 4s → 8s → … → 30s）
+      const delay = Math.min(RETRY_BASE_MS * Math.pow(1.5, retryCount), RETRY_MAX_MS)
+      retryCount++
+      retryTimer = setTimeout(connect, delay)
     }
   }
 
-  if (onError) {
-    es.onerror = onError
-  }
+  connect()
 
-  // 返回取消订阅函数
-  return () => es.close()
+  // 返回取消订阅函数（组件卸载时调用）
+  return () => {
+    destroyed = true
+    if (retryTimer) { clearTimeout(retryTimer); retryTimer = null }
+    es?.close()
+    es = null
+  }
 }
 
 // ─── Audio Generation ─────────────────────────────────────────
@@ -218,6 +339,42 @@ export async function clearAudioHistory(sessionId: string): Promise<void> {
   await fetch(`${BASE_URL}/api/sessions/${sessionId}/audio/history`, {
     method: 'DELETE',
   })
+}
+
+// ─── Session History（历史消息/TODO 查询）──────────────────────────────────────
+
+export interface HistoryMessage {
+  id: string
+  session_id: string
+  role: 'user' | 'assistant' | 'tool'
+  content: string | null
+  tool_calls: string | null
+  tool_call_id: string | null
+  tool_name: string | null
+  created_at: string
+}
+
+export interface HistoryTodo {
+  id: string
+  session_id: string
+  title: string
+  detail: string
+  status: 'pending' | 'running' | 'done' | 'failed'
+  domain: string
+  summary: string
+  created_at: string
+}
+
+export async function getSessionMessages(sessionId: string): Promise<{ session_id: string; messages: HistoryMessage[] }> {
+  const res = await fetch(`${BASE_URL}/api/sessions/${sessionId}/messages`)
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
+}
+
+export async function getSessionTodos(sessionId: string): Promise<{ session_id: string; todos: HistoryTodo[] }> {
+  const res = await fetch(`${BASE_URL}/api/sessions/${sessionId}/todos`)
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
 }
 
 // ─── Universal Chat（统一对话接口）──────────────────────────────────────────

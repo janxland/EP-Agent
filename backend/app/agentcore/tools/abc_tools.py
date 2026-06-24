@@ -12,12 +12,13 @@ ABC 编辑工具集 - Agent 可直接调用的原子操作
 from __future__ import annotations
 import re
 import sys
+from pathlib import Path
 from app.agentcore.tools import tool
-from app.config import config
 
-# 注入 sky-music-tools 路径（工具层直接使用，不依赖 service.py）
-if config.SKILL_DIR not in sys.path:
-    sys.path.insert(0, config.SKILL_DIR)
+# sky-music-tools 已内置在 backend/sky-music-tools/，直接注入路径
+_SKY_TOOLS_DIR = str(Path(__file__).resolve().parent.parent.parent.parent / "sky-music-tools")
+if _SKY_TOOLS_DIR not in sys.path:
+    sys.path.insert(0, _SKY_TOOLS_DIR)
 
 
 # ─── 确定性工具（纯算法，不需要 LLM）────────────────────────
@@ -262,6 +263,41 @@ async def change_style(abc: str, style: str) -> str:
         return result.get("new_abc", abc)
     except Exception:
         return abc
+
+
+@tool
+def validate_abc(abc: str) -> dict:
+    """验证 ABC 谱是否符合 Sky 游戏 15 键范围（C4-C6），返回验证结果和超范围音符列表。
+    abc: 完整的 ABC Notation 字符串
+    """
+    # Sky 合法音符集合（C4-C6，含升降号）
+    SKY_NOTES = {
+        'C', 'D', 'E', 'F', 'G', 'A', 'B',          # 第4八度（大写）
+        'c', 'd', 'e', 'f', 'g', 'a', 'b',           # 第5八度（小写）
+        "c'",                                           # C6（最高音）
+        '^C','_D','^D','_E','^F','_G','^G','_A','^A','_B',  # 升降（第4八度）
+        '^c','_d','^d','_e','^f','_g','^g','_a','^a','_b',  # 升降（第5八度）
+    }
+    out_of_range: list[str] = []
+    warnings: list[str] = []
+
+    for line in abc.split('\n'):
+        if re.match(r'^[A-Za-z]:', line) or not line.strip():
+            continue
+        # 检查高八度标记（c'' 超出范围）
+        if "c''" in line or re.search(r"[a-gA-G]''", line):
+            out_of_range.append("存在超出 C6 的音符（双撇号）")
+        # 检查低八度标记（C, 超出范围）
+        if re.search(r'[A-G],', line):
+            out_of_range.append("存在低于 C4 的音符（逗号降八度）")
+
+    is_valid = len(out_of_range) == 0
+    return {
+        "valid": is_valid,
+        "out_of_range": out_of_range,
+        "warnings": warnings,
+        "message": "ABC 谱符合 Sky 15 键范围" if is_valid else f"发现 {len(out_of_range)} 处超范围音符，需要移八度处理",
+    }
 
 
 @tool

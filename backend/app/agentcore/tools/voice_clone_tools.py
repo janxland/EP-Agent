@@ -50,6 +50,23 @@ def _check_key() -> str | None:
         return "MINIMAX_API_KEY 未配置，请设置环境变量 MINIMAX_API_KEY"
     return None
 
+
+def _strip_dataurl(b64_or_dataurl: str) -> str:
+    """
+    剥离 DataURL 前缀，返回纯 base64 字符串。
+    支持两种格式：
+      - 纯 base64：直接返回
+      - DataURL：data:audio/mp3;base64,AAAA... → AAAA...
+    前端 FileReader.readAsDataURL() 返回 DataURL 格式，
+    后端 base64.b64decode() 只接受纯 base64，必须在工具层统一处理。
+    """
+    if b64_or_dataurl.startswith("data:"):
+        # data:audio/xxx;base64,<实际内容>
+        if ";base64," in b64_or_dataurl:
+            return b64_or_dataurl.split(";base64,", 1)[1]
+        # 极少数 data:audio/xxx,<URL编码内容>，不支持，返回原值让 b64decode 报错
+    return b64_or_dataurl
+
 def _validate_voice_id(voice_id: str) -> str | None:
     """校验 voice_id 规则，返回 None 表示合法，否则返回错误说明"""
     if not (8 <= len(voice_id) <= 256):
@@ -77,14 +94,16 @@ async def upload_voice_sample(audio_b64: str, filename: str = "sample.mp3") -> d
         return {"error": err}
 
     try:
-        audio_bytes = base64.b64decode(audio_b64)
+        audio_bytes = base64.b64decode(_strip_dataurl(audio_b64))
     except Exception as e:
-        return {"error": f"base64 解码失败: {e}"}
+        return {"error": f"base64 解码失败: {e}（请确认上传的是 mp3/wav/m4a 音频文件）"}
 
     if len(audio_bytes) > 20 * 1024 * 1024:
         return {"error": "文件大小超过 20MB 限制"}
 
     ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else "mp3"
+    if ext not in ("mp3", "m4a", "wav"):
+        return {"error": f"不支持的音频格式 .{ext}，请使用 mp3、m4a 或 wav 格式"}
     mime_map = {"mp3": "audio/mpeg", "m4a": "audio/mp4", "wav": "audio/wav"}
     mime = mime_map.get(ext, "audio/mpeg")
 
@@ -125,7 +144,7 @@ async def upload_prompt_audio(audio_b64: str, filename: str = "prompt.mp3") -> d
         return {"error": err}
 
     try:
-        audio_bytes = base64.b64decode(audio_b64)
+        audio_bytes = base64.b64decode(_strip_dataurl(audio_b64))
     except Exception as e:
         return {"error": f"base64 解码失败: {e}"}
 
@@ -257,7 +276,7 @@ async def list_cloned_voices(voice_type: str = "voice_cloning") -> dict:
 
     async with httpx.AsyncClient(timeout=30) as client:
         resp = await client.post(
-            "https://api.minimaxi.com/v1/get_voice",
+            "https://api.minimax.io/v1/get_voice",   # 修复：minimaxi.com → minimax.io
             headers=_json_headers(),
             json={"voice_type": voice_type},
         )

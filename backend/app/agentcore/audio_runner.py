@@ -347,8 +347,14 @@ class AudioChatRunner:
             except Exception:
                 pass
 
-        # voice_clone 域：有 voice_id 或查询成功即为成功（无需 audio_url）
-        is_voice_clone_ok = domain == "voice_clone" and bool(audio_record.get("voice_id"))
+        # voice_clone 域：克隆成功（有 voice_id）、TTS 成功（有 audio_url）、
+        # 或查询列表成功（list_voices 意图无 voice_id 也是成功）
+        intent = route_params.get("voice_clone_intent", "")
+        is_voice_clone_ok = domain == "voice_clone" and (
+            bool(audio_record.get("voice_id"))   # 克隆成功
+            or bool(audio_record.get("audio_url"))  # TTS 合成成功
+            or intent == "list_voices"              # 查询列表成功
+        )
         is_success = bool(audio_record["audio_url"]) or is_voice_clone_ok
         await publish("pipeline.step", {
             "step": "audio_agent",

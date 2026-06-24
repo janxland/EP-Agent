@@ -1,0 +1,213 @@
+"""
+DomainConfig — 意图域配置中心（单一来源）
+
+所有意图域的元数据在此统一定义，消除以下漂移：
+  - intent_router.py 的 _ROUTER_SYSTEM 意图域描述
+  - todo_manager.py 的 _TODO_SYSTEM TODO 模板
+  - universal_runner.py 的 _dispatch if/elif 分支
+  - 前端 TodoListCard / ChatPanel 的 DOMAIN_LABEL 映射
+
+扩展新意图域（如 sovits）只需在 DOMAIN_CONFIG 中添加一条记录，
+其他文件通过 get_domain / list_domains / build_router_prompt / build_todo_prompt
+动态读取，无需手动同步。
+"""
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+
+
+@dataclass
+class DomainMeta:
+    name: str            # 意图域标识（英文，与 SSE domain 字段一致）
+    label: str           # 中文名称（前端展示）
+    icon: str            # emoji 图标
+    description: str     # 路由器判断依据（注入 _ROUTER_SYSTEM）
+    todo_template: str   # TODO 规划模板（注入 _TODO_SYSTEM）
+    agent_class: str     # 对应 SubAgent 类名（universal_runner 动态加载）
+    tool_groups: list[str] = field(default_factory=list)  # 关联工具分组
+    requires_score: bool = False   # 是否需要已有谱子（edit 域）
+    enabled: bool = True           # 是否启用（False = 未配置/未部署时跳过）
+
+
+# ── 意图域注册表（按路由优先级排列）─────────────────────────────────────────────
+
+DOMAIN_CONFIG: dict[str, DomainMeta] = {
+
+    "convert": DomainMeta(
+        name="convert",
+        label="解析谱子",
+        icon="🎮",
+        description=(
+            "用户提供了 Sky 游戏谱子文件。判断依据：\n"
+            "  * 附件名含 .txt/.json 且内容含 songNotes/key/bpm/pitchLevel 等字段\n"
+            "  * 消息含 songNotes 字段或 JSON 数组格式谱子\n"
+            "  ⚠️ Sky 谱子常以 .txt 格式导出，不要因为扩展名是 .txt 就误判为 create！\n"
+            "  ⚠️ 只要附件内容含有 songNotes 字段，无论扩展名，必须路由到 convert！"
+        ),
+        todo_template="解析谱子文件 → 转换为 ABC → 加载完成",
+        agent_class="ConvertAgent",
+        tool_groups=["abc_edit"],
+    ),
+
+    "edit": DomainMeta(
+        name="edit",
+        label="编辑谱子",
+        icon="✏️",
+        description="修改已有谱子（转调/变速/风格/加花等），需已有谱子",
+        todo_template="理解编辑意图 → 调用编辑工具 → 验证结果",
+        agent_class="EditAgent",
+        tool_groups=["abc_edit"],
+        requires_score=True,
+    ),
+
+    "create": DomainMeta(
+        name="create",
+        label="创作谱子",
+        icon="🎵",
+        description=(
+            "从零创作 ABC 谱子（用户描述音乐风格/旋律/情感等，无附件谱子）。\n"
+            "注意：若有附件且含 songNotes，应路由到 convert 而非 create"
+        ),
+        todo_template="理解风格需求 → 创作 ABC 谱子 → 验证存储",
+        agent_class="CreateAgent",
+        tool_groups=["abc_edit"],
+    ),
+
+    "audio": DomainMeta(
+        name="audio",
+        label="生成音频",
+        icon="🎧",
+        description="生成/迭代音频（「生成配乐」/「再欢快一点」/「翻唱」等）",
+        todo_template="分析音频需求 → 生成音频",
+        agent_class="AudioAgent",
+        tool_groups=["audio"],
+    ),
+
+    "voice": DomainMeta(
+        name="voice",
+        label="音色克隆",
+        icon="🎤",
+        description="音色克隆/TTS（「克隆声音」/「用我的声音」/「查看音色」等）",
+        todo_template="分析音色需求 → 克隆/合成音频",
+        agent_class="AudioAgent",
+        tool_groups=["audio"],
+    ),
+
+    "query": DomainMeta(
+        name="query",
+        label="查询分析",
+        icon="🔍",
+        description="查询/分析谱子信息（「这首是什么调」/「有多少音符」等）",
+        todo_template="分析用户问题 → 查询谱子信息 → 回答",
+        agent_class="QueryAgent",
+        tool_groups=[],
+    ),
+
+    # ── H5 乐谱海报创作 ──────────────────────────────────────────────────────
+    "h5_create": DomainMeta(
+        name="h5_create",
+        label="H5 海报",
+        icon="🎨",
+        description=(
+            "生成 H5 乐谱分享海报（用户提供 MIDI/ABC/Sky JSON 文件，或描述乐曲）。\n"
+            "关键词：「H5」/「海报」/「分享」/「生成页面」/「MIDI 转海报」/「乐谱海报」\n"
+            "附件含 .mid/.midi/.abc 扩展名时优先路由到此域"
+        ),
+        todo_template="解析乐谱文件 → 生成 H5 结构 → 渲染播放器 → 保存文件",
+        agent_class="H5Agent",
+        tool_groups=["h5"],
+    ),
+
+    # ── H5 乐谱海报编辑 ──────────────────────────────────────────────────────
+    "h5_edit": DomainMeta(
+        name="h5_edit",
+        label="H5 编辑",
+        icon="🖌️",
+        description=(
+            "编辑已生成的 H5 乐谱海报（更换模板/修改标题/调整样式）。\n"
+            "关键词：「换个模板」/「改成暗色」/「修改标题」/「重新生成」"
+        ),
+        todo_template="读取已有 H5 → 应用修改 → 重新生成 → 保存",
+        agent_class="H5Agent",
+        tool_groups=["h5"],
+    ),
+
+    # ── 预留：GPT-SoVITS 高质量音色克隆 ────────────────────────────────────────
+    # 启用步骤：
+    #   1. 设置环境变量 SOVITS_BASE_URL
+    #   2. 新建 agents/sovits_agent.py（实现 run() 方法）
+    #   3. 将下方 enabled=False 改为 True
+    "sovits": DomainMeta(
+        name="sovits",
+        label="SoVITS 音色",
+        icon="🎙️",
+        description=(
+            "GPT-SoVITS 高质量音色克隆/TTS（需配置 SOVITS_BASE_URL）。\n"
+            "关键词：「SoVITS」/「高质量克隆」/「零样本TTS」"
+        ),
+        todo_template="上传参考音频 → 克隆音色 → 合成语音",
+        agent_class="SoVITSAgent",
+        tool_groups=["sovits"],
+        enabled=False,   # 未配置 SOVITS_BASE_URL 时跳过路由
+    ),
+}
+
+
+# ── 查询接口 ─────────────────────────────────────────────────────────────────
+
+def get_domain(name: str) -> DomainMeta | None:
+    """按名称获取意图域配置（不存在返回 None）。"""
+    return DOMAIN_CONFIG.get(name)
+
+
+def list_domains(enabled_only: bool = True) -> list[DomainMeta]:
+    """列出所有（或仅启用的）意图域。"""
+    domains = list(DOMAIN_CONFIG.values())
+    if enabled_only:
+        domains = [d for d in domains if d.enabled]
+    return domains
+
+
+def build_router_prompt() -> str:
+    """
+    动态生成 IntentRouter 的意图域描述段落。
+    intent_router.py 调用此函数构建 _ROUTER_SYSTEM，消除手动维护漂移。
+    """
+    lines = []
+    for d in list_domains(enabled_only=True):
+        # 多行 description 缩进对齐
+        desc_lines = d.description.strip().splitlines()
+        first = desc_lines[0]
+        rest  = "\n".join(f"    {l}" for l in desc_lines[1:])
+        entry = f"- {d.name:<10}: {first}"
+        if rest:
+            entry += "\n" + rest
+        lines.append(entry)
+    return "\n".join(lines)
+
+
+def build_todo_prompt() -> str:
+    """
+    动态生成 TodoManager 的意图域 TODO 模板段落。
+    todo_manager.py 调用此函数构建 _TODO_SYSTEM，消除手动维护漂移。
+    """
+    lines = []
+    for d in list_domains(enabled_only=True):
+        lines.append(f"- {d.name} 域：{d.todo_template}")
+    return "\n".join(lines)
+
+
+def to_frontend_map() -> list[dict]:
+    """
+    生成前端 DOMAIN_LABEL 格式的 JSON，供 /health/tools 端点返回。
+    前端从此接口动态获取意图域配置，消除前后端各自维护的漂移。
+    """
+    return [
+        {
+            "name":    d.name,
+            "label":   d.label,
+            "icon":    d.icon,
+            "enabled": d.enabled,
+        }
+        for d in list(DOMAIN_CONFIG.values())
+    ]

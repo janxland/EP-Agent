@@ -8,11 +8,13 @@ import json
 import tempfile
 import os
 import asyncio
+from pathlib import Path
 from app.agentcore.tools import tool
-from app.config import config
 
-if config.SKILL_DIR not in sys.path:
-    sys.path.insert(0, config.SKILL_DIR)
+# sky-music-tools 已内置在 backend/sky-music-tools/，直接注入路径
+_SKY_TOOLS_DIR = str(Path(__file__).resolve().parent.parent.parent.parent / "sky-music-tools")
+if _SKY_TOOLS_DIR not in sys.path:
+    sys.path.insert(0, _SKY_TOOLS_DIR)
 
 
 @tool
@@ -22,7 +24,7 @@ async def abc_to_sky_json(abc: str) -> str:
     返回 JSON 字符串（数组格式，包含 songNotes）
     """
     from tools.abc_to_json import abc_to_cuby_json
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     cuby = await loop.run_in_executor(None, abc_to_cuby_json, abc)
     return json.dumps([cuby], ensure_ascii=False, indent=2)
 
@@ -38,7 +40,7 @@ async def abc_to_midi_b64(abc: str, instrument: int = 0) -> str:
     from tools.parser import parse_game_score
     from tools.midi_writer import to_midi
 
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
 
     # ABC → CUBY JSON → Score 对象 → MIDI
     with tempfile.NamedTemporaryFile(mode='w', suffix='.json',

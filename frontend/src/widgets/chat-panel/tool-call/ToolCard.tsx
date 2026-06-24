@@ -7,57 +7,86 @@ import { useState, useEffect, useRef, memo } from 'react'
 interface ToolIconConfig { bg: string; emoji: string }
 
 const TOOL_ICON_MAP: Record<string, ToolIconConfig> = {
-  // 文件编辑（来自 coding）
-  read_files:       { bg: '#3FCCFF22', emoji: '📄' },
-  write_file:       { bg: '#285AFF22', emoji: '✏️' },
-  edit_file:        { bg: '#00CEB922', emoji: '🖊️' },
-  multi_edit_file:  { bg: '#00CEB922', emoji: '🖊️' },
-  delete_files:     { bg: '#FF3F5922', emoji: '🗑️' },
-  list_dir:         { bg: '#FD57B022', emoji: '📁' },
-  file_search:      { bg: '#FFAF3F22', emoji: '🔍' },
-  grep_search:      { bg: '#FF623F22', emoji: '🔎' },
-  shell_exec:       { bg: '#341F8E22', emoji: '⚡' },
-  // ABC 编辑工具
-  transpose_abc:        { bg: '#F59E0B22', emoji: '🎵' },
-  change_tempo:         { bg: '#F59E0B22', emoji: '🥁' },
-  change_style:         { bg: '#8B5CF622', emoji: '🎨' },
-  add_ornament:         { bg: '#10B98122', emoji: '🎶' },
-  analyze_abc:          { bg: '#3B82F622', emoji: '🔬' },
-  abc_to_sky_json:      { bg: '#06B6D422', emoji: '🎮' },
-  abc_to_midi_b64:      { bg: '#6366F122', emoji: '🎹' },
-  // 音频生成工具
-  generate_audio_suno:      { bg: '#A855F722', emoji: '🎸' },
-  generate_audio_minimax:   { bg: '#3B82F622', emoji: '🎼' },
-  generate_cover_minimax:   { bg: '#EC489922', emoji: '🎤' },
-  generate_lyrics_minimax:  { bg: '#F97316 22', emoji: '📝' },
-  abc_to_audio_prompt:      { bg: '#14B8A622', emoji: '🔊' },
-  evolve_audio_prompt:      { bg: '#8B5CF622', emoji: '🔄' },
-  diff_audio_params:        { bg: '#6B728022', emoji: '📊' },
-  // 音色克隆工具
-  upload_voice_sample:        { bg: '#9333EA22', emoji: '🎙️' },
-  upload_prompt_audio:        { bg: '#9333EA22', emoji: '🎙️' },
-  clone_voice_minimax:        { bg: '#7C3AED22', emoji: '🧬' },
-  list_cloned_voices:         { bg: '#6D28D922', emoji: '📋' },
-  synthesize_speech_minimax:  { bg: '#5B21B622', emoji: '🔈' },
+  // ── Universal Runner 路由工具 ──────────────────────────────────────────────
+  intent_router:      { bg: '#F97316 22', emoji: '🧭' },
+  convert_sky_json:   { bg: '#06B6D422', emoji: '🎮' },
+  abc_editor:         { bg: '#F59E0B22', emoji: '✏️' },
+  abc_composer:       { bg: '#8B5CF622', emoji: '🎵' },
+  audio_generator:    { bg: '#A855F722', emoji: '🎧' },
+  voice_clone:        { bg: '#7C3AED22', emoji: '🎤' },
+  // ── 文件编辑（来自 coding）────────────────────────────────────────────────
+  read_files:         { bg: '#3FCCFF22', emoji: '📄' },
+  write_file:         { bg: '#285AFF22', emoji: '✏️' },
+  edit_file:          { bg: '#00CEB922', emoji: '🖊️' },
+  multi_edit_file:    { bg: '#00CEB922', emoji: '🖊️' },
+  delete_files:       { bg: '#FF3F5922', emoji: '🗑️' },
+  list_dir:           { bg: '#FD57B022', emoji: '📁' },
+  file_search:        { bg: '#FFAF3F22', emoji: '🔍' },
+  grep_search:        { bg: '#FF623F22', emoji: '🔎' },
+  shell_exec:         { bg: '#341F8E22', emoji: '⚡' },
+  // ── ABC 编辑工具 ──────────────────────────────────────────────────────────
+  transpose_abc:      { bg: '#F59E0B22', emoji: '🎵' },
+  change_tempo:       { bg: '#F59E0B22', emoji: '🥁' },
+  change_style:       { bg: '#8B5CF622', emoji: '🎨' },
+  add_ornament:       { bg: '#10B98122', emoji: '🎶' },
+  analyze_abc:        { bg: '#3B82F622', emoji: '🔬' },
+  abc_to_sky_json:    { bg: '#06B6D422', emoji: '🎮' },
+  abc_to_midi_b64:    { bg: '#6366F122', emoji: '🎹' },
+  // ── 音频生成工具 ──────────────────────────────────────────────────────────
+  generate_audio_suno:     { bg: '#A855F722', emoji: '🎸' },
+  generate_audio_minimax:  { bg: '#3B82F622', emoji: '🎼' },
+  generate_cover_minimax:  { bg: '#EC489922', emoji: '🎤' },
+  generate_lyrics_minimax: { bg: '#F9731622', emoji: '📝' },
+  abc_to_audio_prompt:     { bg: '#14B8A622', emoji: '🔊' },
+  evolve_audio_prompt:     { bg: '#8B5CF622', emoji: '🔄' },
+  diff_audio_params:       { bg: '#6B728022', emoji: '📊' },
+  // ── 音色克隆工具 ──────────────────────────────────────────────────────────
+  upload_voice_sample:       { bg: '#9333EA22', emoji: '🎙️' },
+  upload_prompt_audio:       { bg: '#9333EA22', emoji: '🎙️' },
+  clone_voice_minimax:       { bg: '#7C3AED22', emoji: '🧬' },
+  list_cloned_voices:        { bg: '#6D28D922', emoji: '📋' },
+  synthesize_speech_minimax: { bg: '#5B21B622', emoji: '🔈' },
 }
 
 const TOOL_LABELS: Record<string, string> = {
-  // 文件编辑
-  read_files: '读取文件', write_file: '写入文件', edit_file: '编辑文件',
-  multi_edit_file: '批量编辑', delete_files: '删除文件', list_dir: '列出目录',
-  file_search: '搜索文件', grep_search: '内容检索', shell_exec: '执行命令',
-  // ABC 编辑
-  transpose_abc: '转调', change_tempo: '调整速度', change_style: '风格转换',
-  add_ornament: '添加装饰音', analyze_abc: '分析谱子',
-  abc_to_sky_json: '生成 Sky JSON', abc_to_midi_b64: '生成 MIDI',
-  // 音频生成
-  generate_audio_suno: 'Suno 生成音乐', generate_audio_minimax: 'MiniMax 生成音乐',
-  generate_cover_minimax: 'MiniMax 翻唱', generate_lyrics_minimax: 'MiniMax 生成歌词',
-  abc_to_audio_prompt: '提取音频 Prompt', evolve_audio_prompt: '进化音频 Prompt',
-  diff_audio_params: '对比生成参数',
-  // 音色克隆
-  upload_voice_sample: '上传音色样本', upload_prompt_audio: '上传增强样本',
-  clone_voice_minimax: 'MiniMax 克隆音色', list_cloned_voices: '查询已克隆音色',
+  // ── Universal Runner 路由工具 ──────────────────────────────────────────────
+  intent_router:    '意图识别',
+  convert_sky_json: '解析 Sky 谱子',
+  abc_editor:       'ABC 谱子编辑',
+  abc_composer:     'ABC 谱子创作',
+  audio_generator:  '音频生成',
+  voice_clone:      '音色克隆',
+  // ── 文件编辑 ──────────────────────────────────────────────────────────────
+  read_files:      '读取文件',
+  write_file:      '写入文件',
+  edit_file:       '编辑文件',
+  multi_edit_file: '批量编辑',
+  delete_files:    '删除文件',
+  list_dir:        '列出目录',
+  file_search:     '搜索文件',
+  grep_search:     '内容检索',
+  shell_exec:      '执行命令',
+  // ── ABC 编辑 ──────────────────────────────────────────────────────────────
+  transpose_abc:   '转调',
+  change_tempo:    '调整速度',
+  change_style:    '风格转换',
+  add_ornament:    '添加装饰音',
+  analyze_abc:     '分析谱子',
+  abc_to_sky_json: '生成 Sky JSON',
+  abc_to_midi_b64: '生成 MIDI',
+  // ── 音频生成 ──────────────────────────────────────────────────────────────
+  generate_audio_suno:     'Suno 生成音乐',
+  generate_audio_minimax:  'MiniMax 生成音乐',
+  generate_cover_minimax:  'MiniMax 翻唱',
+  generate_lyrics_minimax: 'MiniMax 生成歌词',
+  abc_to_audio_prompt:     '提取音频 Prompt',
+  evolve_audio_prompt:     '进化音频 Prompt',
+  diff_audio_params:       '对比生成参数',
+  // ── 音色克隆 ──────────────────────────────────────────────────────────────
+  upload_voice_sample:       '上传音色样本',
+  upload_prompt_audio:       '上传增强样本',
+  clone_voice_minimax:       'MiniMax 克隆音色',
+  list_cloned_voices:        '查询已克隆音色',
   synthesize_speech_minimax: '克隆音色合成语音',
 }
 

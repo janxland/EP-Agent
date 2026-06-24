@@ -1,5 +1,17 @@
 'use client'
 
+/**
+ * @deprecated IntentPanel 已被 ChatPanel 完全覆盖，功能重复。
+ *
+ * 原设计为「小白模式」独立意图输入面板，现已由 ChatPanel 统一承接：
+ *   - 快捷意图预设 → ChatPanel 顶部快捷操作栏
+ *   - 意图输入框   → ChatPanel 底部消息输入框
+ *   - AI 路由逻辑  → 统一走 /chat 接口，由 LLM 自动识别意图
+ *
+ * 此组件暂时保留以防回退，后续版本将移除。
+ * 请勿在新功能中引用此组件。
+ */
+
 import { useCallback, useRef, useState } from 'react'
 import { useScoreStore } from '@/entities/session/store'
 import { chatUniversal } from '@/shared/lib/api'

@@ -27,6 +27,7 @@
 from __future__ import annotations
 import inspect
 import asyncio
+import typing as _typing
 from typing import Any, Callable
 
 # ─── 注册表 ───────────────────────────────────────────────────────────────────
@@ -108,7 +109,7 @@ async def call_tool(name: str, arguments: dict) -> Any:
     if asyncio.iscoroutinefunction(fn):
         return await fn(**arguments)
     else:
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         return await loop.run_in_executor(None, lambda: fn(**arguments))
 
 
@@ -124,13 +125,56 @@ _PY_TO_JSON = {
 }
 
 
+def _resolve_type_name(py_type) -> str:
+    """
+    将 Python 类型注解解析为 JSON Schema 类型字符串。
+    支持：
+      - 普通类型：str, int, float, bool, dict, list
+      - Optional[X]  → 取 X 的类型（忽略 None）
+      - Union[X, None] / X | None → 同上
+      - Literal["a","b"] → 保留 enum，类型取第一个值的类型
+    """
+    if py_type is None:
+        return "string"
+
+    # 处理 Optional[X] / Union[X, None]
+    origin = getattr(py_type, "__origin__", None)
+    if origin is not None:
+        # Union (包含 Optional)
+        if origin is getattr(_typing, "Union", None):
+            args = [a for a in py_type.__args__ if a is not type(None)]
+            if args:
+                return _resolve_type_name(args[0])
+            return "string"
+        # Literal
+        if origin is getattr(_typing, "Literal", None):
+            first = py_type.__args__[0] if py_type.__args__ else ""
+            return _PY_TO_JSON.get(type(first).__name__, "string")
+        # list / dict generics
+        raw_origin = getattr(origin, "__name__", str(origin))
+        return _PY_TO_JSON.get(raw_origin, "string")
+
+    # Python 3.10+ X | None 语法 → types.UnionType
+    try:
+        import types as _types
+        if isinstance(py_type, _types.UnionType):
+            args = [a for a in py_type.__args__ if a is not type(None)]
+            if args:
+                return _resolve_type_name(args[0])
+            return "string"
+    except AttributeError:
+        pass
+
+    raw = getattr(py_type, "__name__", str(py_type))
+    return _PY_TO_JSON.get(raw, "string")
+
+
 def _build_parameters(fn: Callable) -> dict:
     sig = inspect.signature(fn)
-    hints = {}
     try:
         hints = fn.__annotations__
     except Exception:
-        pass
+        hints = {}
 
     properties: dict[str, dict] = {}
     required: list[str] = []
@@ -150,22 +194,20 @@ def _build_parameters(fn: Callable) -> dict:
             continue
 
         py_type = hints.get(pname, None)
-        type_name = "string"
-        if py_type is not None:
-            raw = getattr(py_type, "__name__", str(py_type))
-            type_name = _PY_TO_JSON.get(raw, "string")
+        type_name = _resolve_type_name(py_type)
 
         prop: dict = {"type": type_name}
         if pname in param_docs:
             prop["description"] = param_docs[pname]
 
-        # 枚举值
-        if hasattr(py_type, "__args__"):
+        # Literal 枚举值
+        origin = getattr(py_type, "__origin__", None)
+        if origin is getattr(_typing, "Literal", None):
             prop["enum"] = list(py_type.__args__)
 
         properties[pname] = prop
 
-        # 没有默认值 = required
+        # 没有默认值 = required（Optional 有默认值 None 时不算 required）
         if param.default is inspect.Parameter.empty:
             required.append(pname)
 

@@ -1,6 +1,44 @@
 'use client'
 
-import { Fragment, memo, useMemo } from 'react'
+import React, { Fragment, memo, useMemo } from 'react'
+
+// ─── 轻量 Markdown 渲染（无外部依赖）────────────────────────────────────────
+// 支持：**粗体**、`行内代码`、[链接](url)、换行
+function renderMarkdown(text: string): React.ReactNode[] {
+  const nodes: React.ReactNode[] = []
+  // 按换行先分行
+  const lines = text.split('\n')
+  lines.forEach((line, lineIdx) => {
+    if (lineIdx > 0) nodes.push(<br key={`br-${lineIdx}`} />)
+    // 逐段解析行内语法
+    const parts = line.split(/(\*\*[^*]+\*\*|`[^`]+`|\[[^\]]+\]\([^)]+\))/g)
+    parts.forEach((part, i) => {
+      if (part.startsWith('**') && part.endsWith('**')) {
+        nodes.push(<strong key={`${lineIdx}-b-${i}`}>{part.slice(2, -2)}</strong>)
+      } else if (part.startsWith('`') && part.endsWith('`')) {
+        nodes.push(
+          <code key={`${lineIdx}-c-${i}`}
+            className="px-1 py-0.5 bg-gray-100 rounded text-[11px] font-mono text-orange-600">
+            {part.slice(1, -1)}
+          </code>
+        )
+      } else {
+        const linkMatch = part.match(/^\[([^\]]+)\]\(([^)]+)\)$/)
+        if (linkMatch) {
+          nodes.push(
+            <a key={`${lineIdx}-l-${i}`} href={linkMatch[2]} target="_blank" rel="noopener noreferrer"
+              className="text-orange-500 underline hover:text-orange-700 transition-colors">
+              {linkMatch[1]}
+            </a>
+          )
+        } else if (part) {
+          nodes.push(<span key={`${lineIdx}-t-${i}`}>{part}</span>)
+        }
+      }
+    })
+  })
+  return nodes
+}
 import type {
   ChatMessage,
   ChatAssistantMessage,
@@ -102,10 +140,10 @@ const AssistantBubble = memo(function AssistantBubble({
           </details>
         )}
 
-        {/* 文本气泡 */}
+        {/* 文本气泡（支持 Markdown 渲染：**粗体**、`代码`、[链接](url)）*/}
         {hasContent && (
           <div className="rounded-2xl rounded-tl-sm border border-gray-100 bg-white px-3.5 py-2.5 text-sm leading-relaxed text-gray-800 shadow-sm">
-            {m.content}
+            {renderMarkdown(m.content ?? '')}
             {streaming && (
               <span className="inline-block w-0.5 h-[1em] bg-gray-400 ml-0.5 animate-pulse align-text-bottom" />
             )}

@@ -141,7 +141,7 @@ export function AudioChatInput({
         <input
           ref={fileInputRef}
           type="file"
-          accept="audio/*"
+          accept="audio/mpeg,audio/mp4,audio/wav,.mp3,.m4a,.wav"
           className="hidden"
           onChange={handleFileChange}
         />
@@ -273,7 +273,7 @@ export function AudioChatInput({
 
       {/* 提示文字 */}
       <p className="text-xs text-gray-300 text-right">
-        Enter 发送 · Shift+Enter 换行{allowAttachment ? ' · 📎 附加音频克隆音色' : ''}
+        Enter 发送 · Shift+Enter 换行{allowAttachment ? ' · 📎 附加音频（mp3/m4a/wav）' : ''}
       </p>
     </div>
   )

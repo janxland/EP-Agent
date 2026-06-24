@@ -19,15 +19,10 @@ class Config:
             or "https://api.openai.com/v1"
         )
         self.LLM_MODEL: str = os.getenv("LLM_MODEL") or os.getenv("SILICONFLOW_MODEL", "gpt-4o-mini")
-        # 默认使用内嵌的 sky-music-tools，支持环境变量覆盖
-        self.SKILL_DIR: str = os.getenv(
-            "SKILL_DIR",
-            os.getenv("ABC_SKILLS_DIR", str(_BACKEND_DIR / "sky-music-tools"))
-        )
-        skill_dir_path = Path(self.SKILL_DIR)
-        if skill_dir_path.name != "sky-music-tools" and (skill_dir_path / "sky-music-tools").is_dir():
-            self.SKILL_DIR = str(skill_dir_path / "sky-music-tools")
         self.WORKSPACE_DIR: str = os.getenv("ABC_WORKSPACE_DIR", str(_BACKEND_DIR / "workspace"))
+
+        # H5 海报输出目录（与 h5_tools.py / main.py 共享同一配置源）
+        self.H5_OUTPUT_DIR: str = os.getenv("H5_OUTPUT_DIR", "/tmp/ep_agent_h5")
 
         # HOST / PORT 从 ADDR 解析（正确的实例属性方式）
         parts = self.ADDR.rsplit(":", 1)
@@ -43,11 +38,14 @@ class Config:
         self.MINIMAX_API_KEY: str  = os.getenv("MINIMAX_API_KEY", "")
         self.MINIMAX_BASE_URL: str = os.getenv("MINIMAX_BASE_URL", "https://api.minimax.io/v1")
 
+        # GPT-SoVITS（自部署服务，可选）
+        # 部署参考：https://github.com/RVC-Boss/GPT-SoVITS
+        self.SOVITS_BASE_URL: str = os.getenv("SOVITS_BASE_URL", "")
+        self.SOVITS_API_KEY: str  = os.getenv("SOVITS_API_KEY", "")
+
     def validate(self):
         if not self.LLM_API_KEY:
             raise ValueError("LLM_API_KEY is required")
-        if not self.SKILL_DIR:
-            raise ValueError("SKILL_DIR is required")
         # 音频 API Key 为可选项，未配置时工具返回友好错误
 
 

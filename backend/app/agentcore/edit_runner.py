@@ -1,147 +1,237 @@
 """
-ABC Edit Runner — LLM 直接输出新 ABC
+ABC Edit Runner — 纯 ABC 编辑逻辑层（v3.1 整合版）
 
-核心设计理念：
-  ABC 编辑是音乐创作行为，不是程序操作。
-  转调、变速、风格转换、加花、重写旋律——这些都是 LLM 的强项，
-  不应该用工具去"计算"，工具计算出来的音乐没有艺术性。
+架构变更（v3.1）：
+  v3.0 问题：DirectEditRunner 内嵌独立 ReAct Loop，绕过了 TodoManager 和 finish_gate。
+  v3.1 修复：
+    - 移除独立 ReAct Loop，改用 ReactExecutor（统一 ReAct 执行器）
+    - EditAgent（agents/edit_agent.py）在外层统一管理 TODO 状态
+    - 此文件只保留 ABC 编辑专用逻辑：
+        * _build_system_prompt()：热加载 score-editor.agent
+        * _build_user_prompt()：构造用户消息（注入谱子上下文）
+        * run_edit()：对外暴露的唯一接口，返回 {abc, summary, ...}
 
-流程：
-  用户意图 + 当前 ABC + 谱子元数据
-    → LLM（音乐专家 System Prompt）
-    → 直接输出修改后的完整 ABC + 摘要
-    → 可选：abc_to_sky_json / abc_to_midi_b64（纯格式转换）
+职责（单一）：
+  - 构造 ABC 编辑专用 system/user prompt
+  - 调用 ReactExecutor 执行 ReAct Loop
+  - 提取 ABC 和 SUMMARY（委托给 abc_utils）
+  - OutputAdapter：按 scene 追加格式转换（sky_json / midi_b64）
 
-工具使用原则：
-  ✅ analyze_abc   — 帮 LLM 理解谱子结构（可选，意图复杂时使用）
-  ✅ abc_to_sky_json — 输出格式转换（OutputAdapter）
-  ✅ abc_to_midi_b64 — 输出格式转换（OutputAdapter）
-  ❌ transpose_abc、change_tempo、change_style — 废弃，LLM 直接做
+不负责：
+  - TODO 状态管理（由 EditAgent 负责）
+  - session 读写（由 EditAgent 负责）
+  - finish_gate 检查（由 EditAgent 负责）
 """
 from __future__ import annotations
-import importlib
-import json
-import pkgutil
-import re
-import sys
-from pathlib import Path
+
 from typing import Callable, Awaitable, Literal
 
-from app.agentcore.llm import complete, complete_with_tools
-from app.pipeline.domain import ScoreMeta
+from app.agentcore.agent_loader import load_agent_prompt
+from app.agentcore.abc_utils import extract_abc_and_summary
+from app.agentcore.react_executor import ReactExecutor
+from app.agentcore.todo_manager import TodoManager
 from app.agentcore.tools import get_tool_schemas, call_tool
+from app.pipeline.domain import ScoreMeta
 
 Publisher = Callable[[str, dict], Awaitable[None]]
 Scene = Literal["editor", "player", "daw", "raw"]
 
-# ─── 自动扫描注册 tools/ 目录 ─────────────────────────────────────────────────
-_tools_pkg = "app.agentcore.tools"
-_tools_dir = Path(__file__).parent / "tools"
-for _mod_info in pkgutil.iter_modules([str(_tools_dir)]):
-    _full_name = f"{_tools_pkg}.{_mod_info.name}"
-    if _full_name not in sys.modules:
-        importlib.import_module(_full_name)
+MAX_EDIT_ROUNDS = 5  # edit 域最多 5 轮 ReAct
+                     # 简单修改(1轮) / 分析+修改(2轮) / 转调+验证+修正(3轮) / 复杂风格改编(4-5轮)
 
-# ─── System Prompt ────────────────────────────────────────────────────────────
+# ── tools/ 扫描已由 universal_runner.py 在模块加载时统一完成，此处无需重复扫描 ──
+# （edit_runner 始终由 EditAgent 调用，而 EditAgent 由 universal_runner 调度，
+#   此时 tools/ 已全部注册到 sys.modules，重复扫描是冗余 IO）
 
-_SYSTEM = """你是一位精通 ABC Notation 的专业音乐编辑助手，服务于 Sky: Children of the Light 游戏玩家。
+# ── ReAct 补充 Prompt ─────────────────────────────────────────────────────────
 
-## 你的核心能力
-你直接用音乐家的耳朵和大脑来修改谱子——不依赖外部工具计算，而是凭借对音乐理论的深刻理解直接输出正确的 ABC。
+_REACT_SUPPLEMENT = """
+## ReAct 工作模式补充
 
-## ABC Notation 关键规则
+你在 ReAct 循环中工作（最多 3 轮）：
+1. **Thought**：理解意图，思考策略
+2. **Action**：必要时调用 analyze_abc（分析结构）或 validate_abc（验证范围）
+3. **Observation**：查看工具结果，调整策略
+4. **Output**：finish_reason=stop 时输出最终 ABC + SUMMARY
 
-### Header 字段
-- `X:` 序号（保持原值）
-- `T:` 标题
-- `C:` 作曲者
-- `M:` 拍号（如 4/4、3/4、6/8）
-- `L:` 默认音符时值（如 1/8）
-- `Q:` 速度（如 Q:1/4=120，只改数字）
-- `K:` 调号（如 K:C、K:G、K:Am、K:Bb）
+可用工具：
+- `analyze_abc`：分析 ABC 结构（调号/速度/音符数/音域）→ 复杂意图时先分析
+- `validate_abc`：验证是否在 Sky C4-C6 范围内 → 转调后验证
 
-### 音符语法
-- 大写 C D E F G A B = 第4八度
-- 小写 c d e f g a b = 第5八度
-- `'` 后缀升八度（c' = 第6八度），`,` 后缀降八度
-- `^` 前缀升半音，`_` 前缀降半音，`=` 还原
-- 时值：1=默认，2=两倍，/2=一半，3/2=附点，4=四倍
-- 休止符：`z`（有时值），`x`（不发声）
-- 小节线：`|`，双小节线：`||`，重复：`|:`...`:|`
-- 连线：`(3` 三连音，`-` 延音线
-
-### 转调规则（你直接计算，不调工具）
-- 每升高半音：C→^C/Db→D→^D/Eb→E→F→^F/Gb→G→^G/Ab→A→^A/Bb→B→c
-- 升号调（G/D/A/E/B/F#/C#）用 `^`，降号调（F/Bb/Eb/Ab/Db/Gb/Cb）用 `_`
-- 八度关系：大写第4八度，小写第5八度，`'`继续升
-
-### Sky 游戏限制（重要！）
-- Sky 乐器只有 15 个键：C D E F G A B c d e f g a b c'（C4 到 C6）
-- 转调时需确保音符落在这个范围内，超出则移八度
-- 不使用复杂和弦，保持单声部旋律
-
-## 修改原则
-1. **精确执行意图**：用户说转调就转调，说加快就改 Q: 字段
-2. **保持音乐性**：修改后旋律仍然流畅自然，符合音乐逻辑
-3. **风格修改靠创造力**：加花、装饰音、节奏变化——用你的音乐审美来决定
-4. **不丢音符**：除非用户明确要求删减，否则保持音符完整性
-5. **保持格式**：Header 格式不变，小节线位置尽量不变
-
-## 输出格式（严格遵守）
-
-修改后直接输出完整 ABC，然后另起一行输出摘要，格式如下：
-
-```
-X:1
-T:标题
-...（完整 ABC 内容）...
-
-SUMMARY: 一句话中文摘要，说明做了什么修改
-```
-
-**绝对不要**输出 JSON、代码块标记（```）、解释性文字，只输出 ABC + SUMMARY 行。
+**简单修改（改速度/简单转调）可直接输出，无需调工具。**
 """
 
-# ─── ABC 提取 ─────────────────────────────────────────────────────────────────
 
-def _extract_abc_and_summary(text: str, fallback_abc: str) -> tuple[str, str]:
+def _build_system_prompt() -> str:
+    """从 score-editor.agent 热加载 system prompt（支持热更新）。"""
+    try:
+        base = load_agent_prompt("score-editor", sections=["role", "static_context"])
+        return base + _REACT_SUPPLEMENT
+    except FileNotFoundError:
+        return (
+            "你是精通 ABC Notation 的音乐编辑助手，服务于 Sky: Children of the Light。\n"
+            "直接输出修改后的完整 ABC + SUMMARY 行，不输出 JSON 或代码块。"
+            + _REACT_SUPPLEMENT
+        )
+
+
+def _build_user_prompt(
+    intent: str,
+    meta: ScoreMeta,
+    current_abc: str,
+    context_summary: str = "",
+) -> str:
+    """构造编辑任务的用户消息（注入谱子上下文）。"""
+    parts = [
+        f"用户意图：{intent}",
+        f"谱子信息：标题={meta.title}，调号={meta.key}，"
+        f"BPM={meta.bpm:.0f}，拍号={meta.time_sig_num}/{meta.time_sig_den}，"
+        f"音符数={meta.note_count}",
+    ]
+    if context_summary:
+        parts.append(f"历史上下文：{context_summary}")
+    parts.append(f"\n当前 ABC 谱：\n{current_abc}")
+    return "\n".join(parts)
+
+
+async def run_edit(
+    current_abc: str,
+    intent: str,
+    meta: ScoreMeta,
+    context_summary: str,
+    publish: Publisher,
+    todo_mgr: TodoManager,
+    scene: Scene = "editor",
+) -> dict:
     """
-    从 LLM 输出中提取 ABC 正文和 SUMMARY。
-    策略：
-      1. 找到 X: 开头的行，到 SUMMARY: 行之前为 ABC
-      2. SUMMARY: 行之后为摘要
-      3. 如果找不到，返回原 ABC + 原文作摘要
+    执行 ABC 编辑（v3.1：使用 ReactExecutor，不再内嵌 ReAct Loop）。
+
+    参数：
+      current_abc    — 当前 ABC 谱子
+      intent         — 用户编辑意图
+      meta           — 谱子元数据
+      context_summary — 历史操作摘要
+      publish        — 事件推送函数
+      todo_mgr       — 外层 TodoManager（由 EditAgent 传入，统一管理 TODO）
+      scene          — 输出场景（editor/player/daw/raw）
+
+    返回：
+      {
+        "abc":          str,       # 修改后的 ABC
+        "summary":      str,       # 中文摘要
+        "tool_calls":   [...],     # 所有工具调用记录
+        "sky_json":     str|None,
+        "midi_b64":     str|None,
+        "react_rounds": int,
+      }
     """
-    # 清理可能的 markdown 代码块
-    text = re.sub(r'```[a-z]*\n?', '', text).strip()
+    await publish("pipeline.step", {
+        "step":   "edit_start",
+        "status": "running",
+        "text":   f"正在理解意图：{intent}",
+    })
 
-    # 提取 SUMMARY
-    summary = ""
-    summary_match = re.search(r'SUMMARY:\s*(.+?)$', text, re.MULTILINE | re.IGNORECASE)
-    if summary_match:
-        summary = summary_match.group(1).strip()
-        # 移除 SUMMARY 行
-        text = text[:summary_match.start()].strip()
+    # ── 构造 messages ─────────────────────────────────────────────────────────
+    tools = get_tool_schemas("abc_edit") + get_tool_schemas("output")
+    # 同时注册 analyze_abc 工具（复杂编辑时 LLM 可选择先分析）
+    try:
+        analyze_tools = get_tool_schemas("analyze")
+        tools = analyze_tools + tools
+    except Exception:
+        pass  # analyze 工具组不存在时不影响主流程
+    messages = [
+        {"role": "system", "content": _build_system_prompt()},
+        {"role": "user",   "content": _build_user_prompt(intent, meta, current_abc, context_summary)},
+    ]
 
-    # 找 ABC 正文（X: 开头）
-    abc_match = re.search(r'^X:\s*\d', text, re.MULTILINE)
-    if abc_match:
-        abc = text[abc_match.start():].strip()
-        # 确保 ABC 有效（至少有 K: 字段）
-        if 'K:' in abc:
-            return abc, summary or "修改完成"
+    await publish("pipeline.step", {
+        "step":   "react_loop",
+        "status": "running",
+        "text":   "ReAct 编辑循环启动...",
+    })
 
-    # 兜底：返回原 ABC
-    return fallback_abc, summary or text[:100] or "修改完成"
+    # ── 委托 ReactExecutor 执行 ReAct Loop ───────────────────────────────────
+    # todo_mgr 由外层 EditAgent 传入，ReactExecutor 负责 complete_one 纪律
+    # 创作型意图（重写/改编/风格转换/时长扩展）用更高 temperature 激发创意
+    # 参数型意图（转调/变速）保持低 temperature 确保准确性
+    _CREATIVE_INTENTS = ["重写", "改编", "风格", "流行", "爵士", "中国风",
+                         "古典", "延长", "分钟", "扩展", "新旋律", "创作"]
+    temperature = 0.7 if any(kw in intent for kw in _CREATIVE_INTENTS) else 0.2
+
+    exec_result = await ReactExecutor().run(
+        messages=messages,
+        tools=tools,
+        publish=publish,
+        todo_manager=todo_mgr,
+        max_rounds=MAX_EDIT_ROUNDS,
+        temperature=temperature,
+    )
+
+    raw = exec_result.get("content", "")
+    react_rounds = exec_result.get("rounds", 1)
+    sky_json = exec_result.get("extra", {}).get("sky_json")
+    midi_b64 = exec_result.get("extra", {}).get("midi_b64")
+
+    # ── 提取 ABC + SUMMARY ───────────────────────────────────────────────────
+    _FALLBACK = current_abc
+    new_abc, summary = extract_abc_and_summary(raw, _FALLBACK)
+
+    await publish("pipeline.step", {
+        "step":   "react_loop",
+        "status": "succeeded",
+        "text":   f"编辑完成（{react_rounds} 轮 ReAct）：{summary}",
+    })
+
+    # ── OutputAdapter：按 scene 追加格式转换（若 ReAct 中未调用）────────────
+    if scene in ("player", "raw") and not sky_json:
+        await publish("pipeline.step", {
+            "step": "output_adapt", "status": "running",
+            "text": "正在生成 Sky JSON...",
+        })
+        try:
+            sky_json = await call_tool("abc_to_sky_json", {"abc": new_abc})
+            await publish("pipeline.step", {
+                "step": "output_adapt", "status": "succeeded",
+                "text": "Sky JSON 生成完成",
+            })
+        except Exception as e:
+            await publish("pipeline.step", {
+                "step": "output_adapt", "status": "failed",
+                "text": f"Sky JSON 生成失败: {e}",
+            })
+
+    if scene in ("daw", "raw") and not midi_b64:
+        await publish("pipeline.step", {
+            "step": "output_adapt", "status": "running",
+            "text": "正在生成 MIDI...",
+        })
+        try:
+            midi_b64 = await call_tool("abc_to_midi_b64", {"abc": new_abc})
+            await publish("pipeline.step", {
+                "step": "output_adapt", "status": "succeeded",
+                "text": "MIDI 生成完成",
+            })
+        except Exception as e:
+            await publish("pipeline.step", {
+                "step": "output_adapt", "status": "failed",
+                "text": f"MIDI 生成失败: {e}",
+            })
+
+    return {
+        "abc":          new_abc,
+        "summary":      summary,
+        "tool_calls":   exec_result.get("tool_calls", []),
+        "sky_json":     sky_json,
+        "midi_b64":     midi_b64,
+        "react_rounds": react_rounds,
+    }
 
 
-# ─── Runner ───────────────────────────────────────────────────────────────────
+# ── 向后兼容：保留 edit_agent_runner 引用（service.py 可能直接调用）────────────
+# 新代码请直接调用 run_edit()，此别名将在后续版本移除
 
-class DirectEditRunner:
-    """
-    LLM 直接输出 ABC 的编辑 Runner。
-    不使用 abc_edit 分组工具，LLM 凭音乐理解直接生成。
-    """
+class _LegacyEditRunner:
+    """向后兼容包装器，将旧的 .run() 接口映射到新的 run_edit()。"""
 
     async def run(
         self,
@@ -152,118 +242,22 @@ class DirectEditRunner:
         publish: Publisher,
         scene: Scene = "editor",
     ) -> dict:
-        """
-        执行 LLM 直接编辑，返回：
-          {
-            "abc": str,           # 修改后的 ABC
-            "summary": str,       # 中文摘要
-            "tool_calls": [...],  # 仅包含 OutputAdapter 工具调用记录
-            "sky_json": str|None,
-            "midi_b64": str|None,
-          }
-        """
-        tool_call_records: list[dict] = []
-
-        await publish("pipeline.step", {
-            "step": "edit_start",
-            "status": "running",
-            "text": f"正在理解意图：{intent}",
-        })
-
-        # ── 构造 User Prompt ──────────────────────────────────────────────────
-        user_prompt = (
-            f"用户意图：{intent}\n\n"
-            f"谱子信息：标题={meta.title}，调号={meta.key}，"
-            f"BPM={meta.bpm:.0f}，拍号={meta.time_sig_num}/{meta.time_sig_den}，"
-            f"音符数={meta.note_count}\n"
+        """兼容旧接口（无 todo_mgr 参数），创建临时 TodoManager。"""
+        import logging
+        logging.getLogger("ep_agent").warning(
+            "[edit_runner] edit_agent_runner.run() 已废弃，请使用 run_edit() + EditAgent"
         )
-        if context_summary:
-            user_prompt += f"历史上下文：{context_summary}\n"
-        user_prompt += f"\n当前 ABC 谱：\n{current_abc}"
-
-        messages = [
-            {"role": "system", "content": _SYSTEM},
-            {"role": "user",   "content": user_prompt},
-        ]
-
-        await publish("pipeline.step", {
-            "step": "llm_edit",
-            "status": "running",
-            "text": "LLM 正在修改谱子...",
-        })
-
-        # ── LLM 直接生成新 ABC ────────────────────────────────────────────────
-        try:
-            response = await complete(messages)
-            raw_output = response if isinstance(response, str) else response.get("content", "")
-        except Exception as e:
-            await publish("pipeline.step", {
-                "step": "llm_edit",
-                "status": "failed",
-                "text": f"LLM 调用失败: {e}",
-            })
-            raise
-
-        # ── 提取 ABC + 摘要 ───────────────────────────────────────────────────
-        new_abc, summary = _extract_abc_and_summary(raw_output, current_abc)
-
-        await publish("pipeline.step", {
-            "step": "llm_edit",
-            "status": "succeeded",
-            "text": summary,
-        })
-
-        # ── OutputAdapter：按场景追加格式转换 ────────────────────────────────
-        sky_json: str | None = None
-        midi_b64: str | None = None
-
-        if scene in ("player", "raw"):
-            await publish("pipeline.step", {
-                "step": "output_adapt",
-                "status": "running",
-                "text": "正在生成 Sky JSON...",
-            })
-            try:
-                sky_json = await call_tool("abc_to_sky_json", {"abc": new_abc})
-                await publish("pipeline.step", {
-                    "step": "output_adapt",
-                    "status": "succeeded",
-                    "text": "Sky JSON 生成完成",
-                })
-            except Exception as e:
-                await publish("pipeline.step", {
-                    "step": "output_adapt",
-                    "status": "failed",
-                    "text": f"Sky JSON 生成失败: {e}",
-                })
-
-        if scene in ("daw", "raw"):
-            await publish("pipeline.step", {
-                "step": "output_adapt",
-                "status": "running",
-                "text": "正在生成 MIDI...",
-            })
-            try:
-                midi_b64 = await call_tool("abc_to_midi_b64", {"abc": new_abc})
-                await publish("pipeline.step", {
-                    "step": "output_adapt",
-                    "status": "succeeded",
-                    "text": "MIDI 生成完成",
-                })
-            except Exception as e:
-                await publish("pipeline.step", {
-                    "step": "output_adapt",
-                    "status": "failed",
-                    "text": f"MIDI 生成失败: {e}",
-                })
-
-        return {
-            "abc":        new_abc,
-            "summary":    summary,
-            "tool_calls": tool_call_records,
-            "sky_json":   sky_json,
-            "midi_b64":   midi_b64,
-        }
+        # 创建临时 TodoManager（兼容旧调用路径）
+        tmp_todo_mgr = TodoManager()
+        return await run_edit(
+            current_abc=current_abc,
+            intent=intent,
+            meta=meta,
+            context_summary=context_summary,
+            publish=publish,
+            todo_mgr=tmp_todo_mgr,
+            scene=scene,
+        )
 
 
-edit_agent_runner = DirectEditRunner()
+edit_agent_runner = _LegacyEditRunner()

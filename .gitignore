@@ -8,3 +8,5 @@ frontend/.next/
 backend/.env
 
 *.log
+
+.env

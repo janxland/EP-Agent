@@ -147,8 +147,56 @@ export const useScoreStore = create<ScoreState>((set, get) => ({
       }
 
       case 'abc.updated': {
-        const p = event.payload as ABCUpdatedPayload
+        const p = event.payload as ABCUpdatedPayload & { meta?: Record<string, unknown> }
         updateABC(p.abc, p.version, p.summary)
+        // 同步 score.meta（文件树依赖此字段）
+        if (p.meta) {
+          const meta = p.meta
+          set((s) => ({
+            score: s.score
+              ? {
+                  ...s.score,
+                  abc_notation: p.abc,
+                  version: p.version,
+                  meta: {
+                    title:       (meta.title as string)       ?? s.score.meta?.title ?? '',
+                    composer:    (meta.composer as string)    ?? s.score.meta?.composer ?? '',
+                    bpm:         (meta.bpm as number)         ?? s.score.meta?.bpm ?? 120,
+                    key:         (meta.key as string)         ?? s.score.meta?.key ?? 'C',
+                    note_count:  (meta.note_count as number)  ?? s.score.meta?.note_count ?? 0,
+                    pitch_level: (meta.pitch_level as number) ?? s.score.meta?.pitch_level ?? 0,
+                    time_sig_num:  (meta.time_sig as { num: number } | undefined)?.num ?? s.score.meta?.time_sig_num ?? 4,
+                    time_sig_den:  (meta.time_sig as { den: number } | undefined)?.den ?? s.score.meta?.time_sig_den ?? 4,
+                    duration_ms: s.score.meta?.duration_ms ?? 0,
+                    raw_bpm:     s.score.meta?.raw_bpm ?? (meta.bpm as number) ?? 120,
+                    arranged_by:   s.score.meta?.arranged_by ?? '',
+                    transcribed_by: s.score.meta?.transcribed_by ?? '',
+                  },
+                }
+              : {
+                  id: `score_${Date.now()}`,
+                  title: (meta.title as string) ?? '',
+                  source_json: '',
+                  source_file: '',
+                  abc_notation: p.abc,
+                  version: p.version,
+                  meta: {
+                    title:         (meta.title as string) ?? '',
+                    composer:      '',
+                    arranged_by:   '',
+                    transcribed_by: '',
+                    bpm:           (meta.bpm as number) ?? 120,
+                    raw_bpm:       (meta.bpm as number) ?? 120,
+                    key:           (meta.key as string) ?? 'C',
+                    pitch_level:   (meta.pitch_level as number) ?? 0,
+                    time_sig_num:  (meta.time_sig as { num: number } | undefined)?.num ?? 4,
+                    time_sig_den:  (meta.time_sig as { den: number } | undefined)?.den ?? 4,
+                    note_count:    (meta.note_count as number) ?? 0,
+                    duration_ms:   0,
+                  },
+                },
+          }))
+        }
         if (p.summary) {
           appendLog({ type: 'activity', text: `✓ ${p.summary}` })
         }

@@ -30,6 +30,7 @@ function isValidABC(abc: string): boolean {
 export function ABCRenderer({ abc, title, className }: ABCRendererProps) {
   const containerRef = useRef<HTMLDivElement>(null)
   const [error, setError] = useState<string | null>(null)
+  const [isLoading, setIsLoading] = useState(false)
 
   useEffect(() => {
     // 空值或格式不完整：清空容器，不尝试渲染
@@ -40,6 +41,7 @@ export function ABCRenderer({ abc, title, className }: ABCRendererProps) {
     }
 
     setError(null)
+    setIsLoading(true)
 
     // 动态加载 abcjs（避免 SSR 问题）
     import('abcjs')
@@ -59,10 +61,13 @@ export function ABCRenderer({ abc, title, className }: ABCRendererProps) {
         } catch (e) {
           // abcjs 内部解析错误（如不规范的 ABC 语法）
           setError(e instanceof Error ? e.message : 'ABC 渲染失败，请检查谱子格式')
+        } finally {
+          setIsLoading(false)
         }
       })
       .catch(() => {
         setError('abcjs 加载失败，请检查网络或刷新页面')
+        setIsLoading(false)
       })
   }, [abc])
 
@@ -95,7 +100,36 @@ export function ABCRenderer({ abc, title, className }: ABCRendererProps) {
       {title && (
         <p className="text-xs text-gray-500 mb-1 px-4">{title}</p>
       )}
-      <div ref={containerRef} className="w-full overflow-x-auto" />
+
+      {/* Loading 骨架屏：abcjs 动态 import 期间显示占位符 */}
+      {isLoading && (
+        <div className="w-full px-4 py-6 space-y-3 animate-pulse">
+          {/* 模拟五线谱横线 */}
+          {[0, 1, 2, 3, 4].map((i) => (
+            <div key={i} className="flex items-center gap-2">
+              <div className="w-3 h-2 bg-gray-200 rounded" />
+              <div className="flex-1 h-px bg-gray-200" />
+            </div>
+          ))}
+          {/* 模拟音符占位 */}
+          <div className="flex items-end gap-3 px-2 pt-2">
+            {[32, 24, 40, 28, 36, 20, 44, 30, 38, 26].map((h, i) => (
+              <div
+                key={i}
+                className="w-2.5 rounded-full bg-gray-200"
+                style={{ height: h }}
+              />
+            ))}
+          </div>
+          <p className="text-[10px] text-gray-300 text-center pt-1">乐谱渲染中...</p>
+        </div>
+      )}
+
+      {/* 实际渲染容器：loading 时隐藏（避免闪烁），渲染完成后显示 */}
+      <div
+        ref={containerRef}
+        className={['w-full overflow-x-auto transition-opacity duration-300', isLoading ? 'opacity-0 h-0 overflow-hidden' : 'opacity-100'].join(' ')}
+      />
     </div>
   )
 }

@@ -56,7 +56,8 @@ export function AudioPanel() {
   // ── 核心发送逻辑 ──────────────────────────────────────────────────────────────
   const handleSend = useCallback(async (message: string, attachment?: AudioAttachment) => {
     if (!sessionId) {
-      setError('请先上传谱子文件')
+      // 音色克隆不需要谱子，通用提示
+      setError('请先创建或加载一个会话')
       return
     }
     setIsGenerating(true)
@@ -112,8 +113,11 @@ export function AudioPanel() {
   }, [abcNotation, handleSend])
 
   // ── 生成中文案：区分音乐生成 vs 音色克隆 ─────────────────────────────────────
-  const generatingLabel = isFirstTime ? 'AI 正在生成音乐...' : 'AI 正在处理...'
-  const generatingEta   = provider === 'suno' ? '约 1-3 分钟' : '约 30-60 秒'
+  // 区分音色克隆场景的文案
+  const lastDomain      = history[history.length - 1]?.domain ?? ''
+  const isVoiceClone    = isVoiceCloneIntent(history[history.length - 1]?.user_message ?? '')
+  const generatingLabel = isVoiceClone ? '正在克隆音色...' : isFirstTime ? 'AI 正在生成音乐...' : 'AI 正在处理...'
+  const generatingEta   = isVoiceClone ? '约 10-30 秒' : provider === 'suno' ? '约 1-3 分钟' : '约 30-60 秒'
 
   return (
     <div className="p-4 space-y-4">

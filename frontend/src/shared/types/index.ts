@@ -6,11 +6,19 @@
 export interface ScoreMeta {
   title: string
   composer: string
+  arranged_by?: string
+  transcribed_by?: string
   bpm: number
+  raw_bpm?: number
   key: string
-  time_sig: { num: number; den: number }
+  /** 嵌套格式（前端 API 响应使用） */
+  time_sig?: { num: number; den: number }
+  /** 扁平格式（session/store.ts 内部使用，与后端 DB 字段对齐） */
+  time_sig_num?: number
+  time_sig_den?: number
   note_count: number
   pitch_level: number
+  duration_ms?: number
 }
 
 export interface Score {
@@ -139,7 +147,13 @@ export type SSEEventType =
   | 'activity.update'
   | 'message.delta'
   | 'message.completed'
+  | 'message.history'   // replay：刷新后后端推送的历史对话消息
   | 'tool.call'
+  | 'todo.list'
+  | 'todo.update'
+  | 'todo.append'
+  | 'role.active'        // 角色激活（切换角色/刷新恢复/降级后补推）
+  | 'h5.ready'           // H5 海报生成完成（含 url_path/file_path/size_kb）
   | 'error'
 
 export interface SSEEvent {

@@ -36,6 +36,17 @@ const emptyStream = (): StreamState => ({
 
 // ─── Store 类型 ───────────────────────────────────────────────────────────────
 
+// ─── TODO 项类型 ────────────────────────────────────────────────────────────
+
+export interface TodoItem {
+  id: string
+  title: string
+  detail: string
+  status: 'pending' | 'running' | 'done' | 'failed' | 'skipped'
+  /** 衍生子任务时，记录父任务 id（顶层任务无此字段） */
+  parent_id?: string
+}
+
 interface ChatStoreState {
   /** 已落库的对话消息（user / assistant / tool） */
   messages: ChatMessage[]
@@ -49,8 +60,28 @@ interface ChatStoreState {
   currentStep: string | null
   /** 错误信息 */
   errorMessage: string | null
+  /** 当前轮次的 TODO 列表 */
+  todos: TodoItem[]
+  /** TODO 摘要 */
+  todoSummary: string
+  /** 当前意图域（来自 todo.list 事件的 domain 字段） */
+  todoDomain: string
+  /** 当前激活的角色 ID（来自 role.active SSE 事件） */
+  activeRoleId: string
+  /** 当前激活的角色名称（前端展示用） */
+  activeRoleName: string
+  /** 当前激活的角色图标 */
+  activeRoleIcon: string
+  /** 当前激活的角色主题色 */
+  activeRoleColor: string
+  /** 角色是否已从服务端恢复（防止重复 fetch） */
+  _roleRestored: boolean
 
   // ── Actions ──
+  /** 从 /api/sessions/{id}/role 恢复角色状态（刷新后调用） */
+  restoreRoleFromSession: (sessionId: string) => Promise<void>
+  /** 直接设置角色（切换后立即更新） */
+  setActiveRole: (roleId: string, roleName: string, icon: string, color: string) => void
   setMessages: (messages: ChatMessage[]) => void
   addMessage: (message: ChatMessage) => void
   /** 乐观插入用户消息（发送时立即显示） */
@@ -72,6 +103,13 @@ interface ChatStoreState {
   /** 重置运行时状态（不清空 messages） */
   resetRuntime: () => void
   setCurrentStep: (step: string | null) => void
+  setTodos: (todos: TodoItem[], summary?: string, domain?: string) => void
+  updateTodo: (id: string, status: TodoItem['status']) => void
+  /** 追加子 TODO（todo.append 事件，不覆盖现有列表） */
+  appendTodos: (parentId: string, newTodos: TodoItem[]) => void
+
+  /** 角色切换欢迎语直接注入对话框（修复：原来用 window.dispatchEvent 但无监听者） */
+  addGreetingMessage: (greeting: string, roleName: string, roleIcon: string) => void
 
   // ── SSE 统一入口（对接 EP-Agent 后端 SSE 格式）──
   handleSSEEvent: (event: SSEEvent) => void
@@ -91,11 +129,49 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
   status: 'idle',
   currentStep: null,
   errorMessage: null,
+  todos: [],
+  todoSummary: '',
+  todoDomain: '',
+  activeRoleId: 'abc_expert',
+  activeRoleName: 'Sky 乐谱专家',
+  activeRoleIcon: '🎵',
+  activeRoleColor: 'orange',
+  _roleRestored: false,
 
-  setMessages: (messages) => set({ messages }),
+  setMessages: (messages) => {
+    // 合并去重：用传入的列表作为基础，保留 store 中 id 不重复的消息
+    // 防止 HTTP 拉取与 SSE replay 竞态互相覆盖
+    const incoming = messages
+    set((s) => {
+      if (s.messages.length === 0) {
+        // store 为空时直接设置（最常见路径，避免多余遍历）
+        return { messages: incoming }
+      }
+      const existingIds = new Set(incoming.map((m) => m.id))
+      // 保留 store 中 incoming 未包含的消息（SSE replay 已注入的），追加到末尾
+      const extra = s.messages.filter((m) => !existingIds.has(m.id))
+      if (extra.length === 0) return { messages: incoming }
+      // 合并：incoming（HTTP 历史，有序）+ extra（SSE 新增），按 createdAt 排序
+      const merged = [...incoming, ...extra].sort((a, b) =>
+        (a.createdAt ?? '').localeCompare(b.createdAt ?? '')
+      )
+      return { messages: merged }
+    })
+  },
 
   addMessage: (message) =>
     set((s) => ({ messages: [...s.messages, message] })),
+
+  addGreetingMessage: (greeting, roleName, roleIcon) => {
+    const msg: ChatAssistantMessage = {
+      id: newMsgId(),
+      role: 'assistant',
+      content: `${roleIcon} **${roleName}** 已就绪\n\n${greeting}`,
+      createdAt: new Date().toISOString(),
+      kind: 'turn',
+    }
+    set((s) => ({ messages: [...s.messages, msg] }))
+  },
 
   addOptimisticUserMessage: (content) => {
     const msg: ChatUserMessage = {
@@ -182,6 +258,12 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
       currentStep: null,
       streaming: emptyStream(),
       activeStreamTurnId: null,
+      // 新轮次开始时清空上一轮 TODO，避免旧卡片残留
+      todos: [],
+      todoSummary: '',
+      todoDomain: '',
+      // 注意：不重置 activeRole*，角色状态跨轮次保持
+      // 不重置 _roleRestored，避免每轮都重新 fetch
     }),
 
   finishRun: () => {
@@ -201,9 +283,61 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
       currentStep: null,
       streaming: emptyStream(),
       activeStreamTurnId: null,
+      // session 切换时清空 TODO，避免旧卡片残留到新 session 第一次发消息前
+      todos: [],
+      todoSummary: '',
+      todoDomain: '',
+      // session 切换时重置角色恢复标记，确保新 session 的角色从服务端重新加载
+      _roleRestored: false,
+    }),
+
+  restoreRoleFromSession: async (sessionId) => {
+    // 已恢复过就不重复 fetch
+    if (get()._roleRestored) return
+    try {
+      const res = await fetch(`/api/sessions/${sessionId}/role`)
+      if (!res.ok) return
+      const data = await res.json()
+      if (data.role_id) {
+        set({
+          activeRoleId:    data.role_id,
+          activeRoleName:  data.role_name  ?? 'Sky 乐谱专家',
+          activeRoleIcon:  data.icon       ?? '🎵',
+          activeRoleColor: data.color      ?? 'orange',
+          _roleRestored:   true,
+        })
+      }
+    } catch {
+      // 静默失败，保持默认角色
+    }
+  },
+
+  setActiveRole: (roleId, roleName, icon, color) =>
+    set({
+      activeRoleId:    roleId,
+      activeRoleName:  roleName,
+      activeRoleIcon:  icon,
+      activeRoleColor: color,
+      _roleRestored:   true,
     }),
 
   setCurrentStep: (step) => set({ currentStep: step }),
+
+  setTodos: (todos, summary, domain) => set({ todos, todoSummary: summary ?? '', todoDomain: domain ?? '' }),
+
+  updateTodo: (id, status) =>
+    set((s) => ({
+      todos: s.todos.map((t) => (t.id === id ? { ...t, status } : t)),
+    })),
+
+  appendTodos: (parentId, newTodos) =>
+    set((s) => ({
+      // 去重：已存在相同 id 的子任务不重复追加
+      todos: [
+        ...s.todos,
+        ...newTodos.filter((n) => !s.todos.some((t) => t.id === n.id)),
+      ],
+    })),
 
   // ── SSE 事件统一处理 ───────────────────────────────────────────────────────
   //
@@ -220,6 +354,36 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
             appendToolCallChunk, commitStreamMessage, addMessage, failRun } = get()
 
     switch (event.type) {
+
+      // ── TODO 列表（Agent 意图规划）────────────────────────────────────────
+      case 'todo.list': {
+        const p = event.payload as { todos: TodoItem[]; summary?: string; domain?: string }
+        set({ todos: p.todos ?? [], todoSummary: p.summary ?? '', todoDomain: p.domain ?? '' })
+        break
+      }
+
+      case 'todo.update': {
+        const p = event.payload as { id: string; status: TodoItem['status'] }
+        set((s) => ({
+          todos: s.todos.map((t) => (t.id === p.id ? { ...t, status: p.status } : t)),
+        }))
+        break
+      }
+
+      // ── 动态子任务衍生（todo.append）─────────────────────────────────────
+      // 后端在执行某步骤时发现需要拆分，追加子任务到前端列表。
+      // 不覆盖现有 todos，只追加新子任务（带 parent_id 用于缩进展示）。
+      case 'todo.append': {
+        const p = event.payload as { parent_id: string; todos: TodoItem[] }
+        const newTodos = (p.todos ?? []).map((t) => ({ ...t, parent_id: p.parent_id }))
+        set((s) => ({
+          todos: [
+            ...s.todos,
+            ...newTodos.filter((n) => !s.todos.some((t) => t.id === n.id)),
+          ],
+        }))
+        break
+      }
 
       // ── 步骤进度 ──────────────────────────────────────────────────────────
       case 'pipeline.step': {
@@ -245,6 +409,37 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
       case 'message.completed': {
         commitStreamMessage()
         set({ status: 'completed', currentStep: null })
+        break
+      }
+
+      // ── 历史消息回放（刷新后 SSE replay，不触发 running 状态）────────────
+      // 后端 SSE 连接建立时推送 message.history 事件，前端直接追加到 messages
+      // 不经过 streaming 流程，不影响当前 status，实现无感知历史恢复。
+      case 'message.history': {
+        const p = event.payload as { role: string; content: string; msg_id?: string }
+        if (!p.content?.trim()) break
+        const existing = get().messages
+        // 去重：msg_id 非空时才做 id 比对，避免空 id 误匹配
+        const msgId = p.msg_id || `hist_${Date.now()}_${Math.random().toString(36).slice(2)}`
+        if (p.msg_id && p.msg_id.length > 0 && existing.some((m) => m.id === p.msg_id)) break
+        if (p.role === 'user') {
+          const userMsg: ChatUserMessage = {
+            id: msgId,
+            role: 'user',
+            content: p.content,
+            createdAt: event.timestamp,
+          }
+          set((s) => ({ messages: [...s.messages, userMsg] }))
+        } else if (p.role === 'assistant') {
+          const assistantMsg: ChatAssistantMessage = {
+            id: msgId,
+            role: 'assistant',
+            content: p.content,
+            createdAt: event.timestamp,
+            kind: 'turn',
+          }
+          set((s) => ({ messages: [...s.messages, assistantMsg] }))
+        }
         break
       }
 
@@ -288,14 +483,62 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
         break
       }
 
-      // ── abc.updated（谱子更新，同时视为本轮完成）─────────────────────────
+      // ── abc.updated（谱子更新，scoreStore 处理，chatStore 不干预）────────
+      // 谱子更新事件由 scoreStore（entities/session/store.ts）处理 ABC 和 meta 同步。
+      // chatStore 不 commit/complete，避免提前截断流式输出。
+      // 流程结束信号统一来自 message.completed。
       case 'abc.updated': {
-        // 谱子更新说明 edit 流程完成，commit 并结束
-        commitStreamMessage()
-        set((s) => s.status === 'running'
-          ? { status: 'completed', currentStep: null }
-          : {}
-        )
+        // chatStore 不处理此事件，仅 scoreStore 处理
+        break
+      }
+
+      // ── 角色激活（每轮对话开始时后端推送当前角色）──────────────────────────
+      // universal_runner 在路由完成后推送 role.active 事件，
+      // 前端顶栏据此实时展示当前激活的专家角色。
+      case 'role.active': {
+        const p = event.payload as {
+          role_id: string; role_name: string; icon: string; color: string
+        }
+        set({
+          activeRoleId:    p.role_id   ?? 'abc_expert',
+          activeRoleName:  p.role_name ?? 'Sky 乐谱专家',
+          activeRoleIcon:  p.icon      ?? '🎵',
+          activeRoleColor: p.color     ?? 'orange',
+        })
+        break
+      }
+
+      // ── H5 海报生成完成 ───────────────────────────────────────────────────
+      // H5Agent 生成并保存 HTML 文件后推送此事件。
+      // chat.store 将结果以 assistant 消息形式呈现（含可点击链接）。
+      // 前端可据此展示"查看/下载 H5"按钮。
+      case 'h5.ready': {
+        const p = event.payload as {
+          title?: string
+          url_path?: string
+          file_path?: string
+          size_kb?: number
+          template?: string
+        }
+        const title    = p.title    ?? 'H5 乐谱海报'
+        const urlPath  = p.url_path ?? ''
+        const sizeKb   = p.size_kb  ? `${p.size_kb} KB` : ''
+        const template = p.template ?? 'apple_dark'
+        const content  = [
+          `🎨 **${title}** 已生成`,
+          urlPath ? `📎 [点击预览 H5 海报](${urlPath})` : '',
+          sizeKb  ? `📦 文件大小：${sizeKb}` : '',
+          `🖼️ 模板：${template}`,
+        ].filter(Boolean).join('\n')
+
+        const h5Msg: ChatAssistantMessage = {
+          id: newMsgId(),
+          role: 'assistant',
+          content,
+          createdAt: new Date().toISOString(),
+          kind: 'turn',
+        }
+        set((s) => ({ messages: [...s.messages, h5Msg] }))
         break
       }
 
@@ -307,8 +550,13 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
       }
 
       // 其他事件（connected、activity.update 等）忽略
-      default:
+      // checkSSEAlignment 在开发模式下警告未处理的事件类型
+      default: {
+        import('@/shared/lib/sse-alignment').then(({ checkSSEAlignment }) => {
+          checkSSEAlignment(event.type)
+        })
         break
+      }
     }
   },
 }))
