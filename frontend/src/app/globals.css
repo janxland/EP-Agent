@@ -1,0 +1,97 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    /* ── 标准 shadcn/Radix 语义 token（hsl 裸值，Tailwind v3 消费为 hsl(var(...))）── */
+    --background:           0 0% 100%;
+    --foreground:           0 0% 6%;
+
+    --card:                 0 0% 100%;
+    --card-foreground:      0 0% 6%;
+
+    --popover:              0 0% 100%;
+    --popover-foreground:   0 0% 6%;
+
+    --primary:              24 95% 53%;     /* orange-500 */
+    --primary-foreground:   0 0% 100%;
+
+    --secondary:            0 0% 96%;
+    --secondary-foreground: 0 0% 6%;
+
+    --muted:                0 0% 96%;
+    --muted-foreground:     0 0% 45%;
+
+    --accent:               34 100% 97%;    /* orange-50 */
+    --accent-foreground:    17 88% 40%;     /* orange-800 */
+
+    --destructive:          0 84% 60%;
+    --destructive-foreground: 0 0% 100%;
+
+    --border:               0 0% 90%;
+    --input:                0 0% 90%;
+    --ring:                 24 95% 53%;
+
+    --radius:               0.5rem;
+  }
+}
+
+/* ── 基础重置 ────────────────────────────────────────────────────────────────── */
+*, *::before, *::after {
+  box-sizing: border-box;
+}
+
+html, body {
+  height: 100%;
+}
+
+/* ── abcjs 乐谱渲染样式 ──────────────────────────────────────────────────────── */
+.abcjs-container svg {
+  max-width: 100%;
+  height: auto;
+}
+
+/* abcjs 默认黑色笔画，确保在白底上清晰可见 */
+.abcjs-note_selected { fill: #ea580c !important; }  /* orange-600 高亮选中音符 */
+
+/* ── 动画：TODO 子任务入场 ───────────────────────────────────────────────────── */
+@keyframes fadeSlideIn {
+  from {
+    opacity: 0;
+    transform: translateY(-6px) scaleY(0.95);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scaleY(1);
+  }
+}
+
+/* ── 动画：TODO 步骤完成闪光（running → done）────────────────────────────────── */
+@keyframes doneFlash {
+  0%   { background-color: rgb(240 253 244); box-shadow: 0 0 0 3px rgb(134 239 172 / 0.4); }
+  40%  { background-color: rgb(220 252 231); box-shadow: 0 0 0 5px rgb(134 239 172 / 0.2); }
+  100% { background-color: transparent;      box-shadow: none; }
+}
+
+/* ── 动画：角色切换面板入场 ──────────────────────────────────────────────────── */
+@keyframes slideUpFade {
+  from { opacity: 0; transform: translateY(12px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+/* ── 滚动条美化（Webkit）────────────────────────────────────────────────────── */
+::-webkit-scrollbar {
+  width: 4px;
+  height: 4px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: rgb(0 0 0 / 0.1);
+  border-radius: 2px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgb(0 0 0 / 0.2);
+}
