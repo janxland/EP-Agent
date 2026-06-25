@@ -20,6 +20,7 @@ from typing import Callable, Awaitable
 
 from app.agentcore.todo_manager import TodoManager, assert_finish_gate
 from app.agentcore.react_executor import stream_text
+from app.agentcore.abc_utils import parse_abc_header, count_notes
 
 Publisher = Callable[[str, dict], Awaitable[None]]
 
@@ -46,6 +47,7 @@ class EditAgent:
         todo_mgr: TodoManager,
         session_getter: Callable,
         session_saver: Callable,
+        workspace_id: str = "",     # 工作区 ID，留空时自动从 DB 查询
     ) -> dict:
         # ── 从 session 取当前谱子 ─────────────────────────────────────────────
         sess = session_getter(session_id)
@@ -79,6 +81,15 @@ class EditAgent:
             "arguments": {"intent": message[:100]},
         })
 
+        # ── 自动查询 workspace_id（若调用方未传）────────────────────────────
+        if not workspace_id:
+            try:
+                from app.pipeline import db as _db_ref
+                _si = _db_ref.get_session_info(session_id)
+                workspace_id = (_si or {}).get("workspace_id") or ""
+            except Exception:
+                pass
+
         # ── 调用 run_edit()（v3.1：直接调用，不再透传 edit_fn）──────────────
         try:
             from app.agentcore.edit_runner import run_edit
@@ -90,6 +101,8 @@ class EditAgent:
                 publish=publish,
                 todo_mgr=todo_mgr,
                 scene="editor",
+                session_id=session_id,  # 落库 tool message
+                workspace_id=workspace_id,  # 注入 workspace_id 供 abc_to_midi 使用
             )
         except Exception as e:
             await publish("tool.call", {
@@ -121,7 +134,6 @@ class EditAgent:
         # ── 落库 + 推送 abc.updated ───────────────────────────────────────────
         try:
             from app.pipeline.domain import Score, ScoreMeta
-            from app.agentcore.abc_utils import parse_abc_header, count_notes
 
             header = parse_abc_header(new_abc)
             new_meta = ScoreMeta(
@@ -140,18 +152,53 @@ class EditAgent:
         except Exception:
             pass
 
-        # 落库由 service.universal_chat 在 SubAgent 返回后统一执行（避免双写）
-        # SubAgent 只操作内存 session（session_saver），不直接调用 db 层
+        # ── 自动写入工作区文件（.sky/<title>.abc）─────────────────────────────
+        try:
+            from app.pipeline import db as _db_ref
+            _si = _db_ref.get_session_info(session_id)
+            _ws_id = (_si or {}).get("workspace_id") or ""
+            if _ws_id:
+                from app.agentcore.tools.workspace_tools import save_score_to_workspace_impl
+                _new_header = parse_abc_header(new_abc)
+                _save_result = save_score_to_workspace_impl(
+                    workspace_id=_ws_id,
+                    abc_notation=new_abc,
+                    title=_new_header["title"] or "score",
+                    overwrite=True,
+                )
+                # 写入重要记忆：ABC 文件路径（供 H5Agent 等跨轮次感知）
+                try:
+                    from app.agentcore.session_context import remember_workspace_file
+                    remember_workspace_file(session_id, _save_result["path"],
+                                           _new_header["title"] or "score")
+                except Exception:
+                    pass
+                await publish("workspace.file_saved", {
+                    "workspace_id": _ws_id,
+                    "path":         _save_result["path"],
+                    "type":         "abc",
+                    "title":        _new_header["title"],
+                })
+        except Exception:
+            pass
 
+        # 从新 ABC 重新解析 header（转调/变速后 key/bpm 已变，必须用新值）
+        new_header = parse_abc_header(new_abc)
         await publish("abc.updated", {
             "abc":     new_abc,
             "version": 2,
             "summary": summary,
             "meta": {
-                "title":      getattr(meta, "title", ""),
-                "key":        getattr(meta, "key", "C"),
-                "bpm":        getattr(meta, "bpm", 120.0),
-                "note_count": getattr(meta, "note_count", 0),
+                "title":       new_header["title"] or getattr(meta, "title", ""),
+                "key":         new_header["key"],          # ← 转调后新调号
+                "bpm":         new_header["bpm"],          # ← 变速后新 BPM
+                "note_count":  count_notes(new_abc),       # ← Body 音符数（已修复）
+                "time_sig":    {
+                    "num": new_header["time_sig_num"],
+                    "den": new_header["time_sig_den"],
+                },
+                "pitch_level": getattr(meta, "pitch_level", 0),
+                "composer":    getattr(meta, "composer", ""),
             },
         })
 

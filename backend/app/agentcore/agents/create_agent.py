@@ -24,7 +24,7 @@ from app.agentcore.todo_manager import TodoManager, assert_finish_gate
 from app.agentcore.react_executor import stream_text
 from app.agentcore.abc_utils import (
     extract_abc_and_summary, parse_abc_header, count_notes,
-    check_duration_requirement, detect_duplicate_lines,
+    check_duration_requirement, detect_duplicate_lines, check_rhythm_variety,
 )
 from app.agentcore.agent_loader import load_agent_prompt
 
@@ -143,11 +143,17 @@ class CreateAgent:
             session_time_sig_num=session_time_sig_num,
         )
 
+        # 创作场景必须用高 temperature，否则 LLM 输出极度保守、旋律平淡
+        # 改编模式（有 base_abc）用 0.85，从零创作用 0.92
+        create_temperature = 0.85 if base_abc else 0.92
         try:
-            resp = await llm_complete([
-                {"role": "system", "content": system},
-                {"role": "user",   "content": user_prompt},
-            ])
+            resp = await llm_complete(
+                [
+                    {"role": "system", "content": system},
+                    {"role": "user",   "content": user_prompt},
+                ],
+                temperature=create_temperature,
+            )
             raw = resp if isinstance(resp, str) else resp.get("content", "")
         except Exception as e:
             await publish("tool.call", {
@@ -176,6 +182,11 @@ class CreateAgent:
             new_abc, summary, raw, system, user_prompt, message, publish
         )
 
+        # ── 节奏多样性检测 + 自动修正（防止全八分音符单调输出）──────────────────
+        new_abc, summary = await self._fix_rhythm_monotone(
+            new_abc, summary, system, user_prompt, publish
+        )
+
         # ── 时长验证：用户指定分钟数时检查小节数是否满足要求 ─────────────────────
         dur_match = re.search(r'(\d+(?:\.\d+)?)\s*分钟', message)
         if dur_match:
@@ -196,19 +207,22 @@ class CreateAgent:
                     extend_hint = _calc_duration_hint(
                         required_mins, actual_bpm, actual_header["time_sig_num"]
                     )
-                    resp3 = await llm_complete([
-                        {"role": "system",    "content": system},
-                        {"role": "user",      "content": user_prompt},
-                        {"role": "assistant", "content": raw},
-                        {"role": "user",      "content": (
-                            f"你的作品只有约 {actual} 小节（约 {dur_check['actual_seconds']:.0f} 秒），"
-                            f"但用户要求 {required_mins} 分钟（需要约 {required} 小节）。\n"
-                            f"{extend_hint}\n"
-                            f"请在现有旋律基础上继续扩展，补充约 {shortage} 小节。\n"
-                            f"⚠️ 新增的每一行旋律必须与已有行不同，禁止重复已有旋律行。\n"
-                            f"重新输出完整 ABC + SUMMARY 行。"
-                        )},
-                    ])
+                    resp3 = await llm_complete(
+                        [
+                            {"role": "system",    "content": system},
+                            {"role": "user",      "content": user_prompt},
+                            {"role": "assistant", "content": raw},
+                            {"role": "user",      "content": (
+                                f"你的作品只有约 {actual} 小节（约 {dur_check['actual_seconds']:.0f} 秒），"
+                                f"但用户要求 {required_mins} 分钟（需要约 {required} 小节）。\n"
+                                f"{extend_hint}\n"
+                                f"请在现有旋律基础上继续扩展，补充约 {shortage} 小节。\n"
+                                f"⚠️ 新增的每一行旋律必须与已有行不同，禁止重复已有旋律行。\n"
+                                f"重新输出完整 ABC + SUMMARY 行。"
+                            )},
+                        ],
+                        temperature=0.88,
+                    )
                     raw3 = resp3 if isinstance(resp3, str) else resp3.get("content", "")
                     abc3, sum3 = extract_abc_and_summary(raw3, new_abc)
                     if "K:" in abc3 and count_notes(abc3) > count_notes(new_abc):
@@ -243,6 +257,39 @@ class CreateAgent:
         except Exception:
             pass
 
+        # ── 自动写入工作区文件（.sky/<title>.abc）─────────────────────────────
+        # 谱子是工作区资产，跨会话共享，类似 Cursor 的工作区文件概念
+        _ws_file_path = ""
+        try:
+            from app.pipeline import db as _db_ref
+            _si = _db_ref.get_session_info(session_id)
+            _ws_id = (_si or {}).get("workspace_id") or ""
+            if _ws_id:
+                from app.agentcore.tools.workspace_tools import save_score_to_workspace_impl
+                _save_result = save_score_to_workspace_impl(
+                    workspace_id=_ws_id,
+                    abc_notation=new_abc,
+                    title=header["title"] or "score",
+                    overwrite=True,
+                )
+                _ws_file_path = _save_result["path"]
+                # 写入重要记忆：ABC 文件路径（供 H5Agent 等跨轮次感知）
+                try:
+                    from app.agentcore.session_context import remember_workspace_file
+                    remember_workspace_file(session_id, _ws_file_path,
+                                           header["title"] or "score")
+                except Exception:
+                    pass
+                # 通知前端文件树刷新
+                await publish("workspace.file_saved", {
+                    "workspace_id": _ws_id,
+                    "path":         _ws_file_path,
+                    "type":         "abc",
+                    "title":        header["title"],
+                })
+        except Exception:
+            pass
+
         await publish("tool.call", {
             "call_id":        create_call_id,
             "tool":           "abc_composer",
@@ -253,9 +300,17 @@ class CreateAgent:
         if len(exec_ids) > 1:
             await todo_mgr.complete_one(exec_ids[1], publish)
 
+        # 读取实际版本号（改编时 session 中可能已有多个版本）
+        _version = 1
+        try:
+            _sv = session_getter(session_id)
+            if _sv and _sv.score:
+                _version = _sv.score.latest_version()
+        except Exception:
+            pass
         await publish("abc.updated", {
             "abc":     new_abc,
-            "version": 1,
+            "version": _version,
             "summary": summary,
             "meta": {
                 "title":       header["title"],
@@ -371,16 +426,19 @@ class CreateAgent:
                     "text": f"ABC 验证发现问题，正在自动修正：{issues}",
                 })
                 try:
-                    resp2 = await llm_complete([
-                        {"role": "system",    "content": system},
-                        {"role": "user",      "content": user_prompt},
-                        {"role": "assistant", "content": raw},
-                        {"role": "user",      "content": (
-                            f"你生成的 ABC 存在问题：{issues}\n"
-                            "请修正所有超出 Sky C4-C6 范围的音符（移八度处理），"
-                            "重新输出完整 ABC + SUMMARY 行。"
-                        )},
-                    ])
+                    resp2 = await llm_complete(
+                        [
+                            {"role": "system",    "content": system},
+                            {"role": "user",      "content": user_prompt},
+                            {"role": "assistant", "content": raw},
+                            {"role": "user",      "content": (
+                                f"你生成的 ABC 存在问题：{issues}\n"
+                                "请修正所有超出 Sky C4-C6 范围的音符（移八度处理），"
+                                "重新输出完整 ABC + SUMMARY 行。"
+                            )},
+                        ],
+                        temperature=0.3,  # 修正时用低 temperature 确保精确性
+                    )
                     raw2 = resp2 if isinstance(resp2, str) else resp2.get("content", "")
                     abc2, sum2 = extract_abc_and_summary(raw2, abc)
                     if "K:" in abc2:
@@ -391,6 +449,69 @@ class CreateAgent:
                     })
                 except Exception:
                     pass
+        except Exception:
+            pass
+        return abc, summary
+
+    async def _fix_rhythm_monotone(
+        self,
+        abc: str,
+        summary: str,
+        system: str,
+        user_prompt: str,
+        publish: Publisher,
+    ) -> tuple[str, str]:
+        """
+        检测节奏单调性（全八分音符行占比 > 30%）并要求 LLM 重写。
+        防止 LLM 输出「CDEDCDEF|GABCDEFG」这类毫无节奏变化的谱子。
+        """
+        try:
+            result = check_rhythm_variety(abc)
+            variety_ratio = result.get("variety_ratio", 1.0)
+            monotone_count = result.get("monotone_count", 0)
+            total = result.get("total_body_lines", 0)
+
+            if variety_ratio >= 0.7 or total < 4:
+                return abc, summary  # 节奏多样性足够，无需修正
+
+            mono_lines = result.get("monotone_lines", [])[:5]
+            mono_desc = "\n".join(
+                f"  - 第{i+1}行：{preview}" for i, preview in mono_lines
+            )
+            await publish("pipeline.step", {
+                "step": "create_rhythm_fix", "status": "running",
+                "text": f"节奏单调（{monotone_count}/{total} 行纯八分音符），正在修正...",
+            })
+            resp = await llm_complete(
+                [
+                    {"role": "system", "content": system},
+                    {"role": "user",   "content": user_prompt},
+                    {"role": "assistant", "content": abc},
+                    {"role": "user", "content": (
+                        f"你的谱子有 {monotone_count} 行是纯八分音符（节奏单调），违反了禁令4：\n"
+                        f"{mono_desc}\n\n"
+                        f"请修改这些行，在每行混用至少2种时值：\n"
+                        f"- 四分音符 C2（重量感）、附点八分 C3/2 C/2（律动感）\n"
+                        f"- 长音 C4/C6（呼吸点）、休止符 z2/z4（留白）\n"
+                        f"保持旋律骨干音不变，只改节奏型。重新输出完整 ABC + SUMMARY 行。"
+                    )},
+                ],
+                temperature=0.75,
+            )
+            raw_fix = resp if isinstance(resp, str) else resp.get("content", "")
+            abc_fix, sum_fix = extract_abc_and_summary(raw_fix, abc)
+            if "K:" in abc_fix:
+                result2 = check_rhythm_variety(abc_fix)
+                if result2.get("variety_ratio", 0) > variety_ratio:
+                    await publish("pipeline.step", {
+                        "step": "create_rhythm_fix", "status": "succeeded",
+                        "text": f"节奏多样性已提升（{variety_ratio:.0%}→{result2['variety_ratio']:.0%}）",
+                    })
+                    return abc_fix, sum_fix
+            await publish("pipeline.step", {
+                "step": "create_rhythm_fix", "status": "failed",
+                "text": "节奏修正效果有限，保留原版",
+            })
         except Exception:
             pass
         return abc, summary
@@ -428,19 +549,22 @@ class CreateAgent:
         )
 
         try:
-            resp_fix = await llm_complete([
-                {"role": "system",    "content": system},
-                {"role": "user",      "content": user_prompt},
-                {"role": "assistant", "content": raw},
-                {"role": "user",      "content": (
-                    f"你的 ABC 谱存在 {dup_count} 对重复旋律行，这会导致音乐听起来是在循环主旋律：\n"
-                    f"{dup_desc}\n\n"
-                    f"请重写整首曲子，确保每一行旋律都是独特的。\n"
-                    f"使用动机发展手法（倒影、增值、减值、移调、节奏变形）让每行都不同，"
-                    f"而不是重复已有旋律。\n"
-                    f"行数保持不变，重新输出完整 ABC + SUMMARY 行。"
-                )},
-            ])
+            resp_fix = await llm_complete(
+                [
+                    {"role": "system",    "content": system},
+                    {"role": "user",      "content": user_prompt},
+                    {"role": "assistant", "content": raw},
+                    {"role": "user",      "content": (
+                        f"你的 ABC 谱存在 {dup_count} 对重复旋律行，这会导致音乐听起来是在循环主旋律：\n"
+                        f"{dup_desc}\n\n"
+                        f"请重写整首曲子，确保每一行旋律都是独特的。\n"
+                        f"使用动机发展手法（倒影、增值、减值、移调、节奏变形）让每行都不同，"
+                        f"而不是重复已有旋律。\n"
+                        f"行数保持不变，重新输出完整 ABC + SUMMARY 行。"
+                    )},
+                ],
+                temperature=0.88,  # 重写时保持高创意度
+            )
             raw_fix = resp_fix if isinstance(resp_fix, str) else resp_fix.get("content", "")
             abc_fix, sum_fix = extract_abc_and_summary(raw_fix, abc)
             if "K:" in abc_fix:

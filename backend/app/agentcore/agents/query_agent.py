@@ -44,6 +44,35 @@ class QueryAgent:
         )
         system_parts = [base_prompt]
 
+        # ── 注入工作区文件记忆（让 QueryAgent 能回答「我的文件在哪里」类问题）──
+        try:
+            from app.agentcore.session_context import is_context_set, ctx_get_session
+            if is_context_set():
+                _sess_mem = ctx_get_session(session_id)
+                if _sess_mem:
+                    _extra = _sess_mem.extra if isinstance(_sess_mem.extra, dict) else {}
+                    _ws_files = _extra.get("workspace_files", {})
+                    _memory   = _extra.get("memory", {})
+                    _mem_lines = []
+                    # workspace_files：规则写入的文件路径
+                    for ftype, flist in _ws_files.items():
+                        for f in flist[:3]:  # 每类最多 3 条，防 context 膨胀
+                            _mem_lines.append(f"  - [{ftype}] {f['path']}")
+                    # memory.key_files：LLM 压缩后的高价值文件
+                    for f in _memory.get("key_files", [])[:5]:
+                        _path = f.get('path', '')
+                        if _path and not any(_path in l for l in _mem_lines):
+                            _mem_lines.append(f"  - [{f.get('type','?')}] {_path}")
+                    if _mem_lines:
+                        system_parts.append(
+                            "工作区已知文件（可直接引用路径回答用户）：\n" + "\n".join(_mem_lines)
+                        )
+                    # memory.summary：对话摘要
+                    if _memory.get("summary"):
+                        system_parts.append(f"历史摘要：{_memory['summary']}")
+        except Exception:
+            pass
+
         # 注入谱子上下文
         if sess and sess.score:
             m = sess.score.meta

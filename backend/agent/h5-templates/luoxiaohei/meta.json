@@ -1,0 +1,30 @@
+{
+  "name": "luoxiaohei",
+  "label": "罗小黑",
+  "desc": "深夜猫咪，星空背景，月光紫/温暖橙，萤火虫粒子",
+  "mood": "cozy night healing",
+  "intent_keys": [
+    "罗小黑",
+    "猫",
+    "治愈",
+    "轻音乐",
+    "温暖",
+    "夜晚",
+    "星空",
+    "森林",
+    "宁静"
+  ],
+  "extra_vars": {
+    "CAT_EMOJI": "猫咪表情（默认🐱）",
+    "NIGHT_MOOD": "夜晚氛围描述（如：深夜的宁静）"
+  },
+  "theme_preset": {
+    "ACCENT_COLOR": "#7C5CBF",
+    "BG_COLOR": "#0D0B1A",
+    "CARD_BG": "rgba(20,16,36,0.93)",
+    "TEXT_COLOR": "#EDE8F5",
+    "TEXT_SUB": "rgba(200,180,230,0.58)",
+    "GRADIENT": "linear-gradient(180deg, #0D0B1A 0%, #1A1530 50%, #0D0B1A 100%)",
+    "ABC_SVG_FILTER": "invert(1) sepia(0.3) brightness(0.85)"
+  }
+}

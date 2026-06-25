@@ -93,6 +93,23 @@ DOMAIN_CONFIG: dict[str, DomainMeta] = {
         tool_groups=["audio"],
     ),
 
+    # ── GPT-SoVITS 音色克隆（本地部署优先，MiniMax 降级）────────────────────────
+    "sovits": DomainMeta(
+        name="sovits",
+        label="音色克隆",
+        icon="🎙️",
+        description=(
+            "音色克隆 / 语音合成（GPT-SoVITS 本地 + MiniMax 降级）。\n"
+            "关键词：「克隆声音」/「用我的声音」/「音色克隆」/「语音合成」/\n"
+            "        「TTS」/「文字转语音」/「合成语音」/「声音克隆」/\n"
+            "        「GPT-SoVITS」/「SoVITS」/「查看音色模型」\n"
+            "附件含 .wav/.mp3/.m4a 且用户提到「克隆」/「声音」时优先路由到此域"
+        ),
+        todo_template="检查服务状态 → 克隆/合成音色 → 保存音频文件",
+        agent_class="VoiceCloneAgent",
+        tool_groups=["sovits", "audio"],
+    ),
+
     "query": DomainMeta(
         name="query",
         label="查询分析",
@@ -134,24 +151,6 @@ DOMAIN_CONFIG: dict[str, DomainMeta] = {
         tool_groups=["h5"],
     ),
 
-    # ── 预留：GPT-SoVITS 高质量音色克隆 ────────────────────────────────────────
-    # 启用步骤：
-    #   1. 设置环境变量 SOVITS_BASE_URL
-    #   2. 新建 agents/sovits_agent.py（实现 run() 方法）
-    #   3. 将下方 enabled=False 改为 True
-    "sovits": DomainMeta(
-        name="sovits",
-        label="SoVITS 音色",
-        icon="🎙️",
-        description=(
-            "GPT-SoVITS 高质量音色克隆/TTS（需配置 SOVITS_BASE_URL）。\n"
-            "关键词：「SoVITS」/「高质量克隆」/「零样本TTS」"
-        ),
-        todo_template="上传参考音频 → 克隆音色 → 合成语音",
-        agent_class="SoVITSAgent",
-        tool_groups=["sovits"],
-        enabled=False,   # 未配置 SOVITS_BASE_URL 时跳过路由
-    ),
 }
 
 

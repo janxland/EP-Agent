@@ -62,7 +62,7 @@ class AudioAgent:
 
         try:
             if use_sovits:
-                result = await self._run_sovits(message, publish, todo_mgr)
+                result = await self._run_sovits(message, publish, todo_mgr, session_id=session_id)
             else:
                 result = await audio_chat_fn(
                     session_id=session_id,
@@ -116,6 +116,7 @@ class AudioAgent:
         message: str,
         publish: Publisher,
         todo_mgr: TodoManager,
+        session_id: str = "",
     ) -> dict:
         """使用 ReactExecutor + sovits 工具组执行语音合成。"""
         from app.agentcore.tools import get_tool_schemas
@@ -136,6 +137,7 @@ class AudioAgent:
             publish=publish,
             todo_manager=todo_mgr,
             max_rounds=3,
+            session_id=session_id,  # 落库 tool message
         )
         return {
             "summary":  exec_result.get("content") or "语音合成完成",

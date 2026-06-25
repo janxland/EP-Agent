@@ -1,0 +1,791 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>MIDI Player</title>
+  <script src="https://cdn.tailwindcss.com/3.4.17"></script>
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.7.2/css/all.min.css" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=SF+Pro+Display:wght@300;400;500;600&family=Noto+Sans+SC:wght@300;400;500;600&display=swap" rel="stylesheet" />
+  <script src="https://cdn.jsdelivr.net/npm/tone@14/build/Tone.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@tonejs/midi@2.0.28/build/Midi.js"></script>
+  <style>
+    * { -webkit-font-smoothing: antialiased; box-sizing: border-box; }
+    body {
+      font-family: -apple-system, 'SF Pro Display', 'Noto Sans SC', sans-serif;
+      background: #f5f5f7;
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      margin: 0;
+      padding: 20px;
+    }
+
+    /* ── 磨砂玻璃卡片 ── */
+    .glass-card {
+      background: rgba(255,255,255,0.85);
+      backdrop-filter: blur(40px) saturate(180%);
+      -webkit-backdrop-filter: blur(40px) saturate(180%);
+      border: 1px solid rgba(255,255,255,0.6);
+      border-radius: 28px;
+      box-shadow:
+        0 2px 1px rgba(0,0,0,0.02),
+        0 8px 24px rgba(0,0,0,0.06),
+        0 32px 64px rgba(0,0,0,0.08);
+    }
+
+    /* ── 专辑封面旋转 ── */
+    .album-art {
+      transition: transform 0.4s cubic-bezier(0.34,1.56,0.64,1);
+    }
+    .album-art.spinning {
+      animation: spin 8s linear infinite;
+    }
+    @keyframes spin {
+      from { transform: rotate(0deg); }
+      to   { transform: rotate(360deg); }
+    }
+
+    /* ── 进度条 ── */
+    .progress-track {
+      background: rgba(0,0,0,0.08);
+      border-radius: 100px;
+      height: 4px;
+      cursor: pointer;
+      position: relative;
+      overflow: visible;
+    }
+    .progress-fill {
+      background: linear-gradient(90deg, #ff6b35, #ff9500);
+      border-radius: 100px;
+      height: 100%;
+      transition: width 0.1s linear;
+      position: relative;
+    }
+    .progress-fill::after {
+      content: '';
+      position: absolute;
+      right: -6px;
+      top: 50%;
+      transform: translateY(-50%);
+      width: 12px;
+      height: 12px;
+      background: #fff;
+      border: 2px solid #ff6b35;
+      border-radius: 50%;
+      box-shadow: 0 1px 4px rgba(255,107,53,0.4);
+      opacity: 0;
+      transition: opacity 0.2s;
+    }
+    .progress-track:hover .progress-fill::after {
+      opacity: 1;
+    }
+
+    /* ── 控制按钮 ── */
+    .ctrl-btn {
+      display: flex; align-items: center; justify-content: center;
+      border: none; background: none; cursor: pointer;
+      transition: transform 0.15s cubic-bezier(0.34,1.56,0.64,1), opacity 0.15s;
+      -webkit-tap-highlight-color: transparent;
+      outline: none;
+    }
+    .ctrl-btn:active { transform: scale(0.88) !important; }
+    .ctrl-btn:hover  { opacity: 0.75; }
+
+    .play-btn {
+      width: 64px; height: 64px;
+      background: linear-gradient(145deg, #ff6b35, #ff9500);
+      border-radius: 50%;
+      box-shadow: 0 4px 16px rgba(255,107,53,0.4), 0 1px 2px rgba(0,0,0,0.1);
+      transition: transform 0.15s cubic-bezier(0.34,1.56,0.64,1),
+                  box-shadow 0.15s;
+    }
+    .play-btn:hover {
+      transform: scale(1.06);
+      box-shadow: 0 6px 24px rgba(255,107,53,0.5), 0 1px 2px rgba(0,0,0,0.1);
+      opacity: 1 !important;
+    }
+    .play-btn:active { transform: scale(0.94) !important; }
+
+    /* ── 音轨列表 ── */
+    .track-item {
+      transition: background 0.15s;
+      border-radius: 12px;
+      cursor: pointer;
+    }
+    .track-item:hover  { background: rgba(0,0,0,0.04); }
+    .track-item.active { background: rgba(255,107,53,0.08); }
+
+    /* ── 音量滑块 ── */
+    input[type=range] {
+      -webkit-appearance: none;
+      height: 4px;
+      background: rgba(0,0,0,0.08);
+      border-radius: 100px;
+      outline: none;
+    }
+    input[type=range]::-webkit-slider-thumb {
+      -webkit-appearance: none;
+      width: 16px; height: 16px;
+      background: #fff;
+      border: 2px solid #ff6b35;
+      border-radius: 50%;
+      cursor: pointer;
+      box-shadow: 0 1px 4px rgba(0,0,0,0.15);
+    }
+
+    /* ── 波形可视化 ── */
+    #waveform-canvas {
+      border-radius: 12px;
+      background: rgba(0,0,0,0.03);
+    }
+
+    /* ── 上传区域 ── */
+    .upload-zone {
+      border: 2px dashed rgba(0,0,0,0.12);
+      border-radius: 20px;
+      transition: border-color 0.2s, background 0.2s;
+      cursor: pointer;
+    }
+    .upload-zone:hover, .upload-zone.drag-over {
+      border-color: #ff6b35;
+      background: rgba(255,107,53,0.04);
+    }
+
+    /* ── 渐入动画 ── */
+    @keyframes fadeUp {
+      from { opacity: 0; transform: translateY(16px); }
+      to   { opacity: 1; transform: translateY(0); }
+    }
+    .fade-up { animation: fadeUp 0.5s cubic-bezier(0.34,1.56,0.64,1) both; }
+    .fade-up-2 { animation: fadeUp 0.5s 0.1s cubic-bezier(0.34,1.56,0.64,1) both; }
+    .fade-up-3 { animation: fadeUp 0.5s 0.2s cubic-bezier(0.34,1.56,0.64,1) both; }
+
+    /* ── 渐变背景 ── */
+    .bg-gradient-blob {
+      position: fixed; inset: 0; z-index: -1;
+      overflow: hidden;
+    }
+    .blob {
+      position: absolute;
+      border-radius: 50%;
+      filter: blur(80px);
+      opacity: 0.35;
+      animation: float 12s ease-in-out infinite;
+    }
+    .blob-1 { width: 500px; height: 500px; background: #ffb347; top: -100px; left: -100px; animation-delay: 0s; }
+    .blob-2 { width: 400px; height: 400px; background: #ff6b35; bottom: -80px; right: -80px; animation-delay: -4s; }
+    .blob-3 { width: 300px; height: 300px; background: #ffd700; top: 40%; left: 40%; animation-delay: -8s; }
+    @keyframes float {
+      0%, 100% { transform: translate(0,0) scale(1); }
+      33%       { transform: translate(30px,-20px) scale(1.05); }
+      66%       { transform: translate(-20px,30px) scale(0.95); }
+    }
+
+    /* ── 标签切换 ── */
+    .tab-btn { transition: all 0.2s; }
+    .tab-btn.active {
+      background: rgba(255,107,53,0.12);
+      color: #ff6b35;
+    }
+
+    /* ── 音符粒子 ── */
+    .note-particle {
+      position: fixed;
+      pointer-events: none;
+      font-size: 20px;
+      animation: noteFloat 2s ease-out forwards;
+      z-index: 100;
+    }
+    @keyframes noteFloat {
+      0%   { opacity: 1; transform: translateY(0) scale(1); }
+      100% { opacity: 0; transform: translateY(-120px) scale(0.5); }
+    }
+  </style>
+</head>
+<body>
+
+<!-- 背景渐变 -->
+<div class="bg-gradient-blob">
+  <div class="blob blob-1"></div>
+  <div class="blob blob-2"></div>
+  <div class="blob blob-3"></div>
+</div>
+
+<!-- 主卡片 -->
+<div class="glass-card w-full max-w-sm p-6 fade-up" id="main-card">
+
+  <!-- 顶部标题栏 -->
+  <div class="flex items-center justify-between mb-5">
+    <div>
+      <p class="text-[10px] font-semibold text-gray-400 uppercase tracking-[0.15em]">Now Playing</p>
+      <h1 class="text-lg font-semibold text-gray-800 leading-tight mt-0.5" id="song-title">选择 MIDI 文件</h1>
+      <p class="text-xs text-gray-400 mt-0.5" id="song-meta">— 轨道 0 · 0 BPM</p>
+    </div>
+    <!-- 标签切换 -->
+    <div class="flex bg-black/5 rounded-xl p-0.5 gap-0.5">
+      <button class="tab-btn active text-[10px] font-semibold px-2.5 py-1.5 rounded-[10px] text-gray-500" data-tab="player">
+        <i class="fa-solid fa-music text-[9px] mr-1"></i>播放
+      </button>
+      <button class="tab-btn text-[10px] font-semibold px-2.5 py-1.5 rounded-[10px] text-gray-500" data-tab="tracks">
+        <i class="fa-solid fa-list text-[9px] mr-1"></i>轨道
+      </button>
+    </div>
+  </div>
+
+  <!-- ── 播放器视图 ── -->
+  <div id="view-player">
+
+    <!-- 专辑封面 -->
+    <div class="flex justify-center mb-6">
+      <div class="relative">
+        <div class="w-44 h-44 rounded-3xl overflow-hidden shadow-2xl album-art" id="album-art-wrap">
+          <!-- 动态封面 -->
+          <canvas id="album-canvas" width="176" height="176" class="w-full h-full"></canvas>
+        </div>
+        <!-- 唱针装饰 -->
+        <div class="absolute -right-3 top-1/2 -translate-y-1/2 w-6 h-6 bg-white rounded-full shadow-lg flex items-center justify-center" id="needle-dot">
+          <div class="w-2 h-2 rounded-full bg-orange-400"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 波形可视化 -->
+    <div class="mb-4">
+      <canvas id="waveform-canvas" width="320" height="48" class="w-full"></canvas>
+    </div>
+
+    <!-- 进度条 -->
+    <div class="mb-3">
+      <div class="progress-track" id="progress-track">
+        <div class="progress-fill" id="progress-fill" style="width:0%"></div>
+      </div>
+      <div class="flex justify-between mt-1.5">
+        <span class="text-[10px] text-gray-400 font-mono" id="time-current">0:00</span>
+        <span class="text-[10px] text-gray-400 font-mono" id="time-total">0:00</span>
+      </div>
+    </div>
+
+    <!-- 控制按钮 -->
+    <div class="flex items-center justify-between px-2 mb-5">
+      <!-- 随机 -->
+      <button class="ctrl-btn w-9 h-9" id="btn-shuffle" title="随机">
+        <i class="fa-solid fa-shuffle text-gray-400 text-base" id="icon-shuffle"></i>
+      </button>
+      <!-- 上一首 -->
+      <button class="ctrl-btn w-10 h-10" id="btn-prev" title="上一首">
+        <i class="fa-solid fa-backward-step text-gray-700 text-xl"></i>
+      </button>
+      <!-- 播放/暂停 -->
+      <button class="ctrl-btn play-btn" id="btn-play" title="播放">
+        <i class="fa-solid fa-play text-white text-xl pl-0.5" id="icon-play"></i>
+      </button>
+      <!-- 下一首 -->
+      <button class="ctrl-btn w-10 h-10" id="btn-next" title="下一首">
+        <i class="fa-solid fa-forward-step text-gray-700 text-xl"></i>
+      </button>
+      <!-- 循环 -->
+      <button class="ctrl-btn w-9 h-9" id="btn-loop" title="循环">
+        <i class="fa-solid fa-repeat text-gray-400 text-base" id="icon-loop"></i>
+      </button>
+    </div>
+
+    <!-- 音量控制 -->
+    <div class="flex items-center gap-3 mb-5">
+      <i class="fa-solid fa-volume-low text-gray-400 text-sm shrink-0"></i>
+      <input type="range" id="volume-slider" min="0" max="100" value="80" class="flex-1" />
+      <i class="fa-solid fa-volume-high text-gray-400 text-sm shrink-0"></i>
+    </div>
+
+    <!-- 上传区域 -->
+    <div class="upload-zone flex flex-col items-center justify-center py-4 px-3 text-center" id="upload-zone">
+      <i class="fa-solid fa-cloud-arrow-up text-2xl text-orange-300 mb-2"></i>
+      <p class="text-xs font-medium text-gray-500">拖拽或点击上传 MIDI 文件</p>
+      <p class="text-[10px] text-gray-300 mt-0.5">.mid · .midi</p>
+      <input type="file" id="file-input" accept=".mid,.midi" class="hidden" />
+    </div>
+
+  </div>
+
+  <!-- ── 轨道列表视图 ── -->
+  <div id="view-tracks" class="hidden">
+    <div id="track-list" class="space-y-1 max-h-80 overflow-y-auto pr-1">
+      <div class="text-center py-10 text-gray-300">
+        <i class="fa-solid fa-music text-3xl mb-3 block opacity-40"></i>
+        <p class="text-xs">加载 MIDI 文件后显示轨道</p>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<!-- 音符粒子容器 -->
+<div id="particles"></div>
+
+<script>
+// ══════════════════════════════════════════════
+// 状态
+// ══════════════════════════════════════════════
+const state = {
+  midi: null,
+  synths: [],
+  part: null,
+  isPlaying: false,
+  duration: 0,
+  startTime: 0,
+  pauseOffset: 0,
+  loop: false,
+  shuffle: false,
+  volume: 0.8,
+  animFrame: null,
+  albumHue: 220,
+  tracks: [],          // { name, notes, muted, color }
+  activeTrackIdx: -1,
+}
+
+// ══════════════════════════════════════════════
+// DOM 引用
+// ══════════════════════════════════════════════
+const $ = id => document.getElementById(id)
+const elTitle    = $('song-title')
+const elMeta     = $('song-meta')
+const elProgress = $('progress-fill')
+const elCurrent  = $('time-current')
+const elTotal    = $('time-total')
+const elPlay     = $('btn-play')
+const elIconPlay = $('icon-play')
+const elAlbum    = $('album-art-wrap')
+const albumCanvas = $('album-canvas')
+const waveCanvas  = $('waveform-canvas')
+const trackList   = $('track-list')
+
+const albumCtx = albumCanvas.getContext('2d')
+const waveCtx  = waveCanvas.getContext('2d')
+
+// ══════════════════════════════════════════════
+// 工具函数
+// ══════════════════════════════════════════════
+function fmtTime(sec) {
+  const m = Math.floor(sec / 60)
+  const s = Math.floor(sec % 60)
+  return `${m}:${s.toString().padStart(2,'0')}`
+}
+
+function hslColor(h, s=70, l=55) {
+  return `hsl(${h},${s}%,${l}%)`
+}
+
+// ══════════════════════════════════════════════
+// 专辑封面动态绘制
+// ══════════════════════════════════════════════
+function drawAlbum(hue, playing) {
+  const w = albumCanvas.width, h = albumCanvas.height
+  albumCtx.clearRect(0,0,w,h)
+
+  // 背景渐变
+  const bg = albumCtx.createLinearGradient(0,0,w,h)
+  bg.addColorStop(0, hslColor(hue, 60, 30))
+  bg.addColorStop(1, hslColor(hue+40, 70, 20))
+  albumCtx.fillStyle = bg
+  albumCtx.fillRect(0,0,w,h)
+
+  // 同心圆装饰
+  for (let i = 5; i > 0; i--) {
+    albumCtx.beginPath()
+    albumCtx.arc(w/2, h/2, (w/2)*i/5, 0, Math.PI*2)
+    albumCtx.strokeStyle = `rgba(255,255,255,${0.04*i})`
+    albumCtx.lineWidth = 1
+    albumCtx.stroke()
+  }
+
+  // 中心音符图标
+  albumCtx.font = '52px serif'
+  albumCtx.textAlign = 'center'
+  albumCtx.textBaseline = 'middle'
+  albumCtx.fillStyle = 'rgba(255,255,255,0.9)'
+  albumCtx.fillText('♪', w/2, h/2)
+
+  // 光晕
+  const glow = albumCtx.createRadialGradient(w/2,h/2,10,w/2,h/2,70)
+  glow.addColorStop(0, 'rgba(255,255,255,0.15)')
+  glow.addColorStop(1, 'rgba(255,255,255,0)')
+  albumCtx.fillStyle = glow
+  albumCtx.fillRect(0,0,w,h)
+}
+
+drawAlbum(220, false)
+
+// ══════════════════════════════════════════════
+// 波形绘制（静态 + 动态）
+// ══════════════════════════════════════════════
+let waveData = []
+
+function buildWaveData(midi) {
+  const allNotes = midi.tracks.flatMap(t => t.notes)
+  if (!allNotes.length) return
+  const dur = midi.duration || 1
+  const bins = 80
+  waveData = new Array(bins).fill(0)
+  allNotes.forEach(n => {
+    const idx = Math.min(bins-1, Math.floor((n.time/dur)*bins))
+    waveData[idx] = Math.max(waveData[idx], n.velocity)
+  })
+  // 平滑
+  for (let i=1; i<bins-1; i++) {
+    waveData[i] = (waveData[i-1]*0.25 + waveData[i]*0.5 + waveData[i+1]*0.25)
+  }
+}
+
+function drawWave(progress=0) {
+  const w = waveCanvas.width, h = waveCanvas.height
+  waveCtx.clearRect(0,0,w,h)
+  if (!waveData.length) {
+    // 空状态占位波
+    waveCtx.strokeStyle = 'rgba(0,0,0,0.06)'
+    waveCtx.lineWidth = 1.5
+    waveCtx.beginPath()
+    for (let i=0; i<w; i++) {
+      const y = h/2 + Math.sin(i*0.15)*4
+      i===0 ? waveCtx.moveTo(i,y) : waveCtx.lineTo(i,y)
+    }
+    waveCtx.stroke()
+    return
+  }
+  const bins = waveData.length
+  const barW = w / bins
+  const progressX = progress * w
+
+  waveData.forEach((v, i) => {
+    const x = i * barW
+    const barH = Math.max(2, v * h * 0.85)
+    const y = (h - barH) / 2
+    const isPast = x < progressX
+    waveCtx.fillStyle = isPast
+      ? `rgba(255,107,53,${0.5+v*0.5})`
+      : `rgba(0,0,0,${0.08+v*0.1})`
+    const r = Math.min(barW*0.4, 3)
+    waveCtx.beginPath()
+    waveCtx.roundRect(x+1, y, barW-2, barH, r)
+    waveCtx.fill()
+  })
+}
+
+drawWave(0)
+
+// ══════════════════════════════════════════════
+// 音符粒子特效
+// ══════════════════════════════════════════════
+const notes = ['♩','♪','♫','♬','𝅗𝅥']
+function spawnParticle() {
+  const el = document.createElement('div')
+  el.className = 'note-particle'
+  el.textContent = notes[Math.floor(Math.random()*notes.length)]
+  el.style.cssText = `
+    left:${20+Math.random()*60}%;
+    bottom:${20+Math.random()*20}%;
+    color:hsl(${20+Math.random()*20},90%,60%);
+    font-size:${14+Math.random()*12}px;
+  `
+  $('particles').appendChild(el)
+  setTimeout(() => el.remove(), 2000)
+}
+
+// ══════════════════════════════════════════════
+// Tone.js 播放引擎
+// ══════════════════════════════════════════════
+async function loadAndPlay(buffer) {
+  await stopAll()
+
+  // 解析 MIDI
+  const midi = new Midi(buffer)
+  state.midi = midi
+  state.duration = midi.duration
+  state.albumHue = 10 + Math.floor(Math.random()*60)
+
+  // 更新 UI
+  const name = midi.name || '未知曲目'
+  const bpm  = Math.round(midi.header.tempos[0]?.bpm ?? 120)
+  const trackCount = midi.tracks.filter(t=>t.notes.length).length
+  elTitle.textContent = name || '跳楼机'
+  elMeta.textContent  = `— ${trackCount} 轨道 · ${bpm} BPM`
+  elTotal.textContent = fmtTime(midi.duration)
+
+  drawAlbum(state.albumHue, false)
+  buildWaveData(midi)
+  drawWave(0)
+  buildTrackList(midi)
+
+  // 创建 Synths
+  state.synths = []
+  const now = Tone.now() + 0.1
+
+  midi.tracks.forEach((track, ti) => {
+    if (!track.notes.length) return
+    const synth = new Tone.PolySynth(Tone.Synth, {
+      oscillator: { type: 'triangle' },
+      envelope: { attack:0.02, decay:0.1, sustain:0.5, release:0.8 },
+      volume: Tone.gainToDb(state.volume * 0.6),
+    }).toDestination()
+    state.synths.push(synth)
+
+    track.notes.forEach(note => {
+      synth.triggerAttackRelease(
+        note.name,
+        note.duration,
+        now + note.time,
+        note.velocity
+      )
+    })
+  })
+
+  state.startTime = Tone.now() + 0.1
+  state.pauseOffset = 0
+  state.isPlaying = true
+  updatePlayBtn(true)
+  elAlbum.classList.add('spinning')
+  startProgressLoop()
+
+  // 播放结束回调
+  const endTime = state.startTime + midi.duration + 0.5
+  Tone.Transport.scheduleOnce(() => {
+    if (state.loop) {
+      loadAndPlay(buffer)
+    } else {
+      onEnded()
+    }
+  }, endTime)
+
+  // 粒子特效
+  const particleInterval = setInterval(() => {
+    if (!state.isPlaying) { clearInterval(particleInterval); return }
+    spawnParticle()
+  }, 800)
+}
+
+async function stopAll() {
+  if (state.animFrame) cancelAnimationFrame(state.animFrame)
+  state.synths.forEach(s => { try { s.releaseAll(); s.dispose() } catch{} })
+  state.synths = []
+  Tone.Transport.cancel()
+  state.isPlaying = false
+  state.pauseOffset = 0
+}
+
+function onEnded() {
+  state.isPlaying = false
+  state.pauseOffset = 0
+  updatePlayBtn(false)
+  elAlbum.classList.remove('spinning')
+  elProgress.style.width = '0%'
+  elCurrent.textContent = '0:00'
+  if (state.animFrame) cancelAnimationFrame(state.animFrame)
+}
+
+// ══════════════════════════════════════════════
+// 进度动画循环
+// ══════════════════════════════════════════════
+function startProgressLoop() {
+  function loop() {
+    if (!state.isPlaying) return
+    const elapsed = Tone.now() - state.startTime
+    const pct = Math.min(1, elapsed / state.duration)
+    elProgress.style.width = (pct*100).toFixed(2) + '%'
+    elCurrent.textContent = fmtTime(Math.min(elapsed, state.duration))
+    drawWave(pct)
+    state.animFrame = requestAnimationFrame(loop)
+  }
+  state.animFrame = requestAnimationFrame(loop)
+}
+
+// ══════════════════════════════════════════════
+// UI 更新
+// ══════════════════════════════════════════════
+function updatePlayBtn(playing) {
+  elIconPlay.className = playing
+    ? 'fa-solid fa-pause text-white text-xl'
+    : 'fa-solid fa-play text-white text-xl pl-0.5'
+}
+
+// ══════════════════════════════════════════════
+// 轨道列表
+// ══════════════════════════════════════════════
+const TRACK_COLORS = [
+  '#ff6b35','#ff9500','#34c759','#007aff','#5856d6','#ff2d55','#af52de','#00c7be'
+]
+function buildTrackList(midi) {
+  trackList.innerHTML = ''
+  const tracks = midi.tracks.filter(t=>t.notes.length)
+  if (!tracks.length) {
+    trackList.innerHTML = '<p class="text-xs text-center text-gray-300 py-6">无可用轨道</p>'
+    return
+  }
+  tracks.forEach((t, i) => {
+    const color = TRACK_COLORS[i % TRACK_COLORS.length]
+    const div = document.createElement('div')
+    div.className = 'track-item flex items-center gap-3 px-3 py-2.5'
+    div.innerHTML = `
+      <div class="w-2.5 h-2.5 rounded-full shrink-0" style="background:${color}"></div>
+      <div class="flex-1 min-w-0">
+        <p class="text-xs font-medium text-gray-700 truncate">${t.name || `轨道 ${i+1}`}</p>
+        <p class="text-[10px] text-gray-400">${t.notes.length} 音符</p>
+      </div>
+      <span class="text-[10px] text-gray-300 font-mono">${t.instrument?.name ?? 'Piano'}</span>
+    `
+    trackList.appendChild(div)
+  })
+}
+
+// ══════════════════════════════════════════════
+// 文件加载
+// ══════════════════════════════════════════════
+let lastBuffer = null
+
+async function handleFile(file) {
+  if (!file || !file.name.match(/\.midi?$/i)) return
+  const buf = await file.arrayBuffer()
+  lastBuffer = buf
+  elTitle.textContent = file.name.replace(/\.midi?$/i,'')
+  await Tone.start()
+  await loadAndPlay(buf)
+}
+
+// ══════════════════════════════════════════════
+// 事件绑定
+// ══════════════════════════════════════════════
+
+// 文件上传
+const uploadZone = $('upload-zone')
+const fileInput  = $('file-input')
+
+uploadZone.addEventListener('click', () => fileInput.click())
+fileInput.addEventListener('change', e => handleFile(e.target.files[0]))
+
+uploadZone.addEventListener('dragover', e => {
+  e.preventDefault()
+  uploadZone.classList.add('drag-over')
+})
+uploadZone.addEventListener('dragleave', () => uploadZone.classList.remove('drag-over'))
+uploadZone.addEventListener('drop', e => {
+  e.preventDefault()
+  uploadZone.classList.remove('drag-over')
+  handleFile(e.dataTransfer.files[0])
+})
+
+// 播放/暂停（简化：重新播放）
+elPlay.addEventListener('click', async () => {
+  await Tone.start()
+  if (state.isPlaying) {
+    // 暂停：停止所有 synth 但记录进度
+    state.synths.forEach(s => { try { s.releaseAll() } catch{} })
+    state.isPlaying = false
+    updatePlayBtn(false)
+    elAlbum.classList.remove('spinning')
+    if (state.animFrame) cancelAnimationFrame(state.animFrame)
+  } else {
+    // 恢复：重新从头播放（Tone.js PolySynth 不支持暂停续播，从头重放）
+    if (lastBuffer) {
+      await loadAndPlay(lastBuffer)
+    }
+  }
+})
+
+// 停止（上一首 = 重新开始）
+$('btn-prev').addEventListener('click', async () => {
+  if (!lastBuffer) return
+  await Tone.start()
+  await loadAndPlay(lastBuffer)
+})
+
+// 下一首（无列表时重播）
+$('btn-next').addEventListener('click', async () => {
+  if (!lastBuffer) return
+  await Tone.start()
+  await loadAndPlay(lastBuffer)
+})
+
+// 循环
+$('btn-loop').addEventListener('click', () => {
+  state.loop = !state.loop
+  $('icon-loop').style.color = state.loop ? '#ff6b35' : ''
+})
+
+// 随机（无列表时仅视觉反馈）
+$('btn-shuffle').addEventListener('click', () => {
+  state.shuffle = !state.shuffle
+  $('icon-shuffle').style.color = state.shuffle ? '#ff6b35' : ''
+})
+
+// 音量
+$('volume-slider').addEventListener('input', e => {
+  state.volume = e.target.value / 100
+  state.synths.forEach(s => {
+    try { s.volume.value = Tone.gainToDb(state.volume * 0.6) } catch{}
+  })
+})
+
+// 进度条点击跳转（重新播放到指定位置，简化实现）
+$('progress-track').addEventListener('click', async e => {
+  if (!lastBuffer || !state.duration) return
+  const rect = e.currentTarget.getBoundingClientRect()
+  const pct = (e.clientX - rect.left) / rect.width
+  await Tone.start()
+  // 重新加载并快进（通过 scheduleOnce 延迟触发）
+  await stopAll()
+  const midi = new Midi(lastBuffer)
+  state.midi = midi
+  state.duration = midi.duration
+  const skipTo = pct * midi.duration
+  state.synths = []
+  const now = Tone.now() + 0.1
+
+  midi.tracks.forEach(track => {
+    if (!track.notes.length) return
+    const synth = new Tone.PolySynth(Tone.Synth, {
+      oscillator: { type: 'triangle' },
+      envelope: { attack:0.02, decay:0.1, sustain:0.5, release:0.8 },
+      volume: Tone.gainToDb(state.volume * 0.6),
+    }).toDestination()
+    state.synths.push(synth)
+    track.notes.forEach(note => {
+      if (note.time < skipTo) return
+      synth.triggerAttackRelease(note.name, note.duration, now + (note.time - skipTo), note.velocity)
+    })
+  })
+
+  state.startTime = now - skipTo
+  state.isPlaying = true
+  updatePlayBtn(true)
+  elAlbum.classList.add('spinning')
+  startProgressLoop()
+})
+
+// 标签切换
+document.querySelectorAll('.tab-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'))
+    btn.classList.add('active')
+    const tab = btn.dataset.tab
+    $('view-player').classList.toggle('hidden', tab !== 'player')
+    $('view-tracks').classList.toggle('hidden', tab !== 'tracks')
+  })
+})
+
+// ══════════════════════════════════════════════
+// 初始化封面动画循环
+// ══════════════════════════════════════════════
+let hueShift = 0
+function animateAlbum() {
+  if (!state.isPlaying) {
+    requestAnimationFrame(animateAlbum)
+    return
+  }
+  hueShift = (hueShift + 0.3) % 360
+  drawAlbum(state.albumHue + hueShift * 0.1, true)
+  requestAnimationFrame(animateAlbum)
+}
+animateAlbum()
+</script>
+</body>
+</html>

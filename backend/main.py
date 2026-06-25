@@ -12,7 +12,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
 from app.config import config
-from app.pipeline.router import router
+from app.pipeline.router import router, _WS_FILE_ROOT
 from app.pipeline.audio_router import router as audio_router
 from app.pipeline.audio_chat_router import router as audio_chat_router
 from app.pipeline.db import init_db
@@ -53,6 +53,11 @@ app.include_router(audio_chat_router)
 # save_h5_file 工具将 HTML 保存到 _H5_OUTPUT_DIR，
 # 前端通过 /h5/{filename}.html 直接访问生成的海报页面。
 app.mount("/h5", StaticFiles(directory=str(_H5_OUTPUT_DIR), html=True), name="h5")
+
+# ── 工作区静态文件服务（图片/MIDI/音频 CDN 直出）────────────────
+# 前端通过 /workspace/{workspace_id}/{path} 直接访问二进制文件，
+# 绕开 encoding=raw API，避免 Next.js rewrites 缓冲导致图片加载失败。
+app.mount("/workspace", StaticFiles(directory=str(_WS_FILE_ROOT)), name="workspace")
 
 
 @app.get("/healthz")

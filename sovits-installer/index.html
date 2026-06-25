@@ -1,0 +1,94 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>GPT-SoVITS · 加载中</title>
+<script src="https://cdn.tailwindcss.com/3.4.17"></script>
+<style>
+  body { background:#0a0a0f; color:#e2e8f0; font-family:'Inter',sans-serif; display:flex; align-items:center; justify-content:center; min-height:100vh; margin:0; }
+  .bg-grid { position:fixed; inset:0; z-index:0; background-image:linear-gradient(rgba(139,92,246,0.03) 1px,transparent 1px),linear-gradient(90deg,rgba(139,92,246,0.03) 1px,transparent 1px); background-size:40px 40px; }
+  .bg-glow { position:fixed; inset:0; z-index:0; pointer-events:none; background:radial-gradient(ellipse 60% 40% at 20% 20%,rgba(139,92,246,0.12) 0%,transparent 60%),radial-gradient(ellipse 40% 30% at 80% 80%,rgba(236,72,153,0.08) 0%,transparent 60%); }
+  .glass { background:rgba(255,255,255,0.04); border:1px solid rgba(255,255,255,0.08); backdrop-filter:blur(20px); border-radius:16px; }
+  .grad-text { background:linear-gradient(135deg,#a78bfa 0%,#ec4899 50%,#f97316 100%); -webkit-background-clip:text; -webkit-text-fill-color:transparent; background-clip:text; }
+  @keyframes spin { to { transform:rotate(360deg); } }
+  .spin { animation:spin 1s linear infinite; }
+  @keyframes fadeIn { from{opacity:0;transform:translateY(12px)} to{opacity:1;transform:translateY(0)} }
+  .fade-in { animation:fadeIn 0.5s ease forwards; }
+  .dot-loader span { display:inline-block; width:8px; height:8px; border-radius:50%; background:#a78bfa; margin:0 3px; animation:dotBounce 1.2s ease-in-out infinite; }
+  .dot-loader span:nth-child(2) { animation-delay:0.2s; }
+  .dot-loader span:nth-child(3) { animation-delay:0.4s; }
+  @keyframes dotBounce { 0%,80%,100%{transform:scale(0.6);opacity:0.4} 40%{transform:scale(1);opacity:1} }
+</style>
+</head>
+<body>
+<div class="bg-grid"></div>
+<div class="bg-glow"></div>
+<div class="relative z-10 text-center fade-in" id="content">
+  <div class="w-16 h-16 rounded-2xl flex items-center justify-center mx-auto mb-6" style="background:linear-gradient(135deg,#7c3aed,#db2777)">
+    <svg class="w-8 h-8 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z"/>
+    </svg>
+  </div>
+  <h1 class="text-3xl font-bold grad-text mb-2">GPT-SoVITS</h1>
+  <p class="text-slate-400 text-sm mb-8">Voice Clone Module · EP-Agent</p>
+  <div class="glass p-6 max-w-sm mx-auto">
+    <div class="dot-loader mb-4 flex justify-center">
+      <span></span><span></span><span></span>
+    </div>
+    <p class="text-slate-300 text-sm font-medium" id="statusMsg">正在检测安装状态…</p>
+    <p class="text-slate-500 text-xs mt-2" id="subMsg">连接后端服务中</p>
+  </div>
+
+  <!-- 离线模式备用按钮（后端未启动时显示） -->
+  <div id="offlineNav" class="hidden mt-6 space-y-3">
+    <p class="text-slate-500 text-xs mb-4">后端服务未启动，请选择要打开的页面：</p>
+    <div class="flex gap-3 justify-center flex-wrap">
+      <a href="install.html" class="px-5 py-2.5 rounded-xl text-sm font-semibold text-white" style="background:linear-gradient(135deg,#7c3aed,#db2777)">安装页面</a>
+      <a href="launcher.html" class="px-5 py-2.5 rounded-xl text-sm font-semibold text-slate-300 border border-white/10 bg-white/5">启动页面</a>
+      <a href="updater.html" class="px-5 py-2.5 rounded-xl text-sm font-semibold text-slate-300 border border-white/10 bg-white/5">更新页面</a>
+    </div>
+  </div>
+</div>
+
+<script>
+const BACKEND = 'http://localhost:3333';
+
+async function checkAndRedirect() {
+  const msg    = document.getElementById('statusMsg');
+  const subMsg = document.getElementById('subMsg');
+
+  try {
+    // 1. 检测后端是否在线
+    const res = await fetch(`${BACKEND}/status`, { signal: AbortSignal.timeout(3000) });
+    if (!res.ok) throw new Error('status error');
+    const status = await res.json();
+
+    if (!status.installed) {
+      // 未安装 → 跳转安装页
+      msg.textContent = '未检测到安装，跳转安装页…';
+      subMsg.textContent = `目录 ${status.installDir} 不存在`;
+      setTimeout(() => { window.location.href = '/install'; }, 1200);
+    } else if (status.webuiOnline) {
+      // WebUI 已在运行 → 跳转启动页
+      msg.textContent = 'WebUI 正在运行，跳转启动页…';
+      subMsg.textContent = `PID ${status.webuiPid || '–'} · http://localhost:9872`;
+      setTimeout(() => { window.location.href = '/launcher'; }, 800);
+    } else {
+      // 已安装但未运行 → 跳转启动页
+      msg.textContent = '已安装，跳转启动页…';
+      subMsg.textContent = `${status.modelCount} 个模型文件 · ${status.installDir}`;
+      setTimeout(() => { window.location.href = '/launcher'; }, 1000);
+    }
+  } catch (_) {
+    // 后端未启动 → 显示离线导航
+    msg.textContent = '后端服务未连接';
+    subMsg.textContent = '请先运行 start.bat / start.sh';
+    document.getElementById('offlineNav').classList.remove('hidden');
+  }
+}
+
+checkAndRedirect();
+</script>
+</body>
+</html>

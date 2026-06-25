@@ -23,7 +23,6 @@ export interface ChatAssistantMessage {
   tool_calls?: ToolCall[]
   createdAt: string
   kind?: 'turn' | 'final'
-  stream_turn_id?: string
 }
 
 export interface ChatToolMessage {

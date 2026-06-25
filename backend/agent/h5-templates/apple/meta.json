@@ -1,0 +1,26 @@
+{
+  "name": "apple",
+  "label": "苹果风格",
+  "desc": "深色毛玻璃，红色强调，旋转唱片，门户级加载动画",
+  "mood": "dark premium",
+  "intent_keys": [
+    "苹果",
+    "apple",
+    "高级",
+    "流行",
+    "摇滚",
+    "夜晚",
+    "深色",
+    "dark"
+  ],
+  "extra_vars": {},
+  "theme_preset": {
+    "ACCENT_COLOR": "#FF375F",
+    "BG_COLOR": "#0A0A0F",
+    "CARD_BG": "rgba(28,28,30,0.85)",
+    "TEXT_COLOR": "#FFFFFF",
+    "TEXT_SUB": "rgba(255,255,255,0.55)",
+    "GRADIENT": "linear-gradient(135deg, #1a0010 0%, #0A0A0F 50%, #001020 100%)",
+    "ABC_SVG_FILTER": "invert(1) brightness(0.9)"
+  }
+}

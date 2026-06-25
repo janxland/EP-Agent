@@ -1,0 +1,28 @@
+{
+  "name": "miku",
+  "label": "初音未来",
+  "desc": "青绿赛博，全息投影，扫描线效果，人物立绘",
+  "mood": "cyber electric",
+  "intent_keys": [
+    "初音",
+    "miku",
+    "电子",
+    "赛博",
+    "vocaloid",
+    "二次元",
+    "动漫",
+    "游戏配乐"
+  ],
+  "extra_vars": {
+    "LYRIC_LINE": "歌词一行（可选）"
+  },
+  "theme_preset": {
+    "ACCENT_COLOR": "#39C5BB",
+    "BG_COLOR": "#050F12",
+    "CARD_BG": "rgba(8,24,32,0.92)",
+    "TEXT_COLOR": "#E0FFFD",
+    "TEXT_SUB": "rgba(57,197,187,0.6)",
+    "GRADIENT": "linear-gradient(160deg, #050F12 0%, #081820 40%, #050F12 100%)",
+    "ABC_SVG_FILTER": "invert(1) sepia(1) saturate(3) hue-rotate(150deg)"
+  }
+}

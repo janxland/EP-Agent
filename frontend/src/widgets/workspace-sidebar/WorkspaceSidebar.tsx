@@ -17,6 +17,7 @@ import {
 import { useRouter } from 'next/navigation'
 import { useWorkspaceStore } from '@/features/workspace/store/workspace.store'
 import type { WorkspaceDto, SessionInfoDto } from '@/features/workspace/store/workspace.store'
+import { ConfirmDialog } from '@/shared/components/ConfirmDialog'
 
 // ─── 图标 ──────────────────────────────────────────────────────────────────────
 function Icon({ path, className = 'w-4 h-4' }: { path: string; className?: string }) {
@@ -46,23 +47,27 @@ function SessionItem({
   onDelete: (id: string) => void
   onRename: (id: string, title: string) => void
 }) {
-  const [editing, setEditing]   = useState(false)
-  const [editTitle, setEditTitle] = useState(session.title || '新对话')
+  const [editing, setEditing]       = useState(false)
+  const [editTitle, setEditTitle]   = useState(session.title || '新对话')
+  const [showConfirm, setShowConfirm] = useState(false)
   const inputRef = useRef<HTMLInputElement>(null)
 
   const handleDelete = useCallback((e: MouseEvent) => {
     e.stopPropagation()
     e.preventDefault()
-    if (window.confirm(`确定删除对话「${session.title || '新对话'}」？此操作不可恢复。`)) {
-      void onDelete(session.id)
-    }
-  }, [onDelete, session.id, session.title])
+    setShowConfirm(true)
+  }, [])
 
   const submitRename = useCallback(() => {
     const t = editTitle.trim()
     if (t && t !== session.title) onRename(session.id, t)
     setEditing(false)
   }, [editTitle, session.id, session.title, onRename])
+
+  const handleConfirmDelete = useCallback(() => {
+    setShowConfirm(false)
+    void onDelete(session.id)
+  }, [onDelete, session.id])
 
   useEffect(() => { if (editing) inputRef.current?.focus() }, [editing])
 
@@ -132,6 +137,24 @@ function SessionItem({
           <Icon path={ICONS.trash} className="w-3 h-3" />
         </button>
       )}
+
+      {/* 自制删除确认弹窗 */}
+      {showConfirm && (
+        <ConfirmDialog
+          title="删除对话"
+          description={
+            <>
+              确定删除对话
+              <span className="font-medium text-gray-700">「{session.title || '新对话'}」</span>
+              吗？消息记录将一并删除且不可恢复。
+            </>
+          }
+          confirmText="删除"
+          variant="danger"
+          onConfirm={handleConfirmDelete}
+          onCancel={() => setShowConfirm(false)}
+        />
+      )}
     </div>
   )
 }
@@ -152,12 +175,11 @@ function WorkspacePanel({
   onClose: () => void
   onRenameSession: (sessionId: string, title: string) => void
 }) {
-  const [editing, setEditing]       = useState(false)
-  const [editName, setEditName]     = useState(workspace.name)
-  const [confirmDel, setConfirmDel] = useState(false)
-  const inputRef                    = useRef<HTMLInputElement>(null)
-  const delTimer                    = useRef<ReturnType<typeof setTimeout> | null>(null)
-  const panelRef                    = useRef<HTMLDivElement>(null)
+  const [editing, setEditing]         = useState(false)
+  const [editName, setEditName]       = useState(workspace.name)
+  const [showConfirmDel, setShowConfirmDel] = useState(false)
+  const inputRef                      = useRef<HTMLInputElement>(null)
+  const panelRef                      = useRef<HTMLDivElement>(null)
 
   // 点击面板外关闭
   // 用 mousedown 捕获阶段注册，通过 openedByRef 标记忽略打开面板的那次点击，
@@ -184,8 +206,6 @@ function WorkspacePanel({
     }
   }, [onClose])
 
-  useEffect(() => () => { if (delTimer.current) clearTimeout(delTimer.current) }, [])
-
   const submitRename = useCallback(() => {
     const name = editName.trim()
     if (name && name !== workspace.name) onRename(workspace.id, name)
@@ -200,13 +220,8 @@ function WorkspacePanel({
   const handleDelete = useCallback((e: MouseEvent) => {
     e.stopPropagation()
     e.preventDefault()
-    if (confirmDel) {
-      void Promise.resolve(onDelete(workspace.id))
-    } else {
-      setConfirmDel(true)
-      delTimer.current = setTimeout(() => setConfirmDel(false), 2500)
-    }
-  }, [confirmDel, onDelete, workspace.id])
+    setShowConfirmDel(true)
+  }, [])
 
   useEffect(() => { if (editing) inputRef.current?.focus() }, [editing])
 
@@ -251,13 +266,10 @@ function WorkspacePanel({
           <button
             onMouseDown={(e) => e.stopPropagation()}
             onClick={handleDelete}
-            title={confirmDel ? '再次点击确认删除' : '删除工作区'}
-            className={[
-              'w-6 h-6 flex items-center justify-center rounded transition-colors',
-              confirmDel ? 'text-red-500 bg-red-50' : 'text-gray-300 hover:text-red-400 hover:bg-red-50',
-            ].join(' ')}
+            title="删除工作区"
+            className="w-6 h-6 flex items-center justify-center rounded transition-colors text-gray-300 hover:text-red-400 hover:bg-red-50"
           >
-            <Icon path={confirmDel ? ICONS.check : ICONS.trash} className="w-3 h-3" />
+            <Icon path={ICONS.trash} className="w-3 h-3" />
           </button>
           {/* 关闭 */}
           <button
@@ -299,6 +311,26 @@ function WorkspacePanel({
           <span className="text-[11px] font-medium">新建对话</span>
         </button>
       </div>
+      {/* 删除工作区确认弹窗 */}
+      {showConfirmDel && (
+        <ConfirmDialog
+          title="删除工作区"
+          description={
+            <>
+              确定删除工作区
+              <span className="font-medium text-gray-700">「{workspace.name}」</span>
+              吗？其下所有对话将一并删除且不可恢复。
+            </>
+          }
+          confirmText="删除"
+          variant="danger"
+          onConfirm={() => {
+            setShowConfirmDel(false)
+            void Promise.resolve(onDelete(workspace.id))
+          }}
+          onCancel={() => setShowConfirmDel(false)}
+        />
+      )}
     </div>
   )
 }
@@ -420,9 +452,8 @@ export function WorkspaceSidebar() {
     } catch { /* error 已在 store 中设置 */ }
   }, [deleteSession])
 
-  // 删除工作区（二次确认 + await + 跳转由 _pendingNavigateSessionId 监听驱动）
+  // 删除工作区（WorkspacePanel 内部已有确认弹窗，此处直接执行删除）
   const handleDeleteWorkspace = useCallback(async (wsId: string) => {
-    if (!window.confirm('确定删除该工作区？其下所有对话将一并删除且不可恢复。')) return
     setOpenWsId(null)
     try {
       await deleteWorkspace(wsId)
@@ -521,7 +552,7 @@ export function WorkspaceSidebar() {
         </div>
       )}
 
-      {/* 悬浮工作区详情面板 */}
+      {/* 悬浮工作区详情面板（删除确认弹窗已内置于 WorkspacePanel） */}
       {openWorkspace && (
         <WorkspacePanel
           workspace={openWorkspace}
@@ -530,7 +561,7 @@ export function WorkspaceSidebar() {
           onDeleteSession={handleDeleteSession}
           onCreateSession={handleCreateSession}
           onRename={renameWorkspace}
-          onDelete={handleDeleteWorkspace}
+          onDelete={(wsId) => { void handleDeleteWorkspace(wsId) }}
           onClose={() => setOpenWsId(null)}
           onRenameSession={handleRenameSession}
         />

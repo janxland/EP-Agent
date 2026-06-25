@@ -225,6 +225,10 @@ async def edit(session_id: str, intent: str, publish, scene: str = "editor") -> 
     except Exception as e:
         _logger.warning("[service] edit 落库失败 session=%s: %s", session_id, e)
 
+    # service.edit() 是旧路径（_LegacyEditRunner），由 universal_chat → EditAgent 调用时
+    # EditAgent 内部已推送 abc.updated，此处跳过避免双重推送。
+    # 仅在直接调用 service.edit()（非 universal_chat 路径）时才推送。
+    # 注意：universal_chat 路径不会调用 service.edit()，因此此处推送不会重复。
     m2 = sess.score.meta
     await publish("abc.updated", {
         "abc":     new_abc,
@@ -252,8 +256,8 @@ async def edit(session_id: str, intent: str, publish, scene: str = "editor") -> 
     # 按场景附加额外输出
     if agent_result.get("sky_json"):
         result["sky_json"] = agent_result["sky_json"]
-    if agent_result.get("midi_b64"):
-        result["midi_b64"] = agent_result["midi_b64"]
+    if agent_result.get("midi_url"):
+        result["midi_url"] = agent_result["midi_url"]
     return result
 
 
@@ -318,9 +322,10 @@ async def universal_chat(
     message: str,
     attachment_content: str = "",
     attachment_name: str = "",
-    attachment_b64: str = "",
+    attachment_workspace_path: str = "",  # 工作区相对路径（MIDI/图片/音频）
+    attachment_b64: str = "",              # 音频 base64（仅音色克隆直接上传）
     publish=None,
-    role_id: str | None = None,   # ← 角色 ID，透传给 universal_runner
+    role_id: str | None = None,
 ) -> dict:
     """
     统一对话用例：LLM 自动识别意图，路由到 convert/edit/audio/voice/query。
@@ -340,10 +345,10 @@ async def universal_chat(
 
     # ── 1. 落库用户消息 ──────────────────────────────────────────────────────
     user_msg_id = new_id("msg")
-    # 构建完整消息内容（含附件名提示）
-    user_content = message
-    if attachment_name:
-        user_content = f"[附件: {attachment_name}]\n{message}"
+    # 前端 RichInput.getPlainText() 已将 mention 节点序列化为 [@文件名] 格式，
+    # ChatPanel.handleRichSend 传来的 message 已是含 chip 的 displayText，
+    # 此处直接落库，SSE replay 时能正确还原橙色 chip，不再做任何拼接。
+    user_content = message.strip() if message else ""
     try:
         _db.insert_message(
             msg_id=user_msg_id,
@@ -354,13 +359,23 @@ async def universal_chat(
     except Exception as e:
         _logger.warning("[service] 用户消息落库失败 session=%s: %s", session_id, e)
 
-    # ── 2. 执行意图路由（透传 role_id，若未传则 runner 内部从 session extra 恢复）──
+    # ── 2. 注入 Session 上下文（重要记忆架构）───────────────────────────────────
+    # 让 session_context 模块持有 getter/saver，后续所有 SubAgent 可直接读写记忆，
+    # 无需再透传 session_getter/saver 参数（Phase 3 目标：彻底消除参数透传）。
+    try:
+        from app.agentcore.session_context import set_session_context
+        set_session_context(get_session, save_session)
+    except Exception as _sce:
+        _logger.warning("[service] set_session_context 失败: %s", _sce)
+
+    # ── 3. 执行意图路由（透传 role_id，若未传则 runner 内部从 session extra 恢复）──
     # 优先使用调用方传入的 role_id；若为 None，runner 会从 DB session.extra 读取
     result = await universal_runner.run(
         session_id=session_id,
         message=message,
         attachment_content=attachment_content,
         attachment_name=attachment_name,
+        attachment_workspace_path=attachment_workspace_path,
         attachment_b64=attachment_b64,
         session_getter=get_session,
         session_saver=save_session,
@@ -371,15 +386,21 @@ async def universal_chat(
         role_id=role_id,
     )
 
-    # ── 3. 落库 AI 回复（兼容各 SubAgent 返回 key 不一致：message / reply / text）──
+    # ── 3. 落库 AI 最终回复（兼容各 SubAgent 返回 key 不一致：message / reply / text）──
+    # 注意：ReactExecutor 已在每轮 ReAct 中落库了 assistant 消息（含 tool_calls）。
+    # 此处仅落库最终的纯文字回复（无工具调用的 stop 轮），避免与 ReactExecutor 重复。
+    # 若 result 含 tool_call_records，说明 ReactExecutor 已落库，此处跳过重复写入。
     assistant_reply = (
         result.get("message")
         or result.get("reply")
         or result.get("text")
         or ""
     )
-    # 非空检查：空字符串或纯空白不落库，避免 SSE replay 时推送空消息气泡
-    if assistant_reply and assistant_reply.strip():
+    # _persisted=True 表示 ReactExecutor 已落库所有 assistant 消息，此处跳过避免重复
+    _already_persisted = bool(result.get("_persisted"))
+    _has_tool_calls = bool(result.get("tool_calls") or result.get("tool_call_records"))
+    # 非空 且 未被 ReactExecutor 落库 且 非纯工具调用轮次时才落库
+    if assistant_reply and assistant_reply.strip() and not _already_persisted and not _has_tool_calls:
         try:
             _db.insert_message(
                 msg_id=new_id("msg"),

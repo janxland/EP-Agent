@@ -14,6 +14,40 @@ import type {
 // 优先使用环境变量；开发时留空走 next.config.js 代理，生产时由 NEXT_PUBLIC_API_URL 指定
 const BASE_URL = process.env.NEXT_PUBLIC_API_URL ?? ''
 
+// ─── Models ──────────────────────────────────────────────────────────────────
+
+export interface ModelItem {
+  id: string
+  name: string
+  group: string
+  desc: string
+  current?: boolean
+}
+
+export async function listModels(): Promise<{ models: ModelItem[]; active: string }> {
+  const res = await fetch(`${BASE_URL}/api/models`)
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
+}
+
+export async function setActiveModel(modelId: string): Promise<void> {
+  const res = await fetch(`${BASE_URL}/api/models/active`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ model_id: modelId }),
+  })
+  if (!res.ok) throw new Error(await res.text())
+}
+
+export async function getContextUsage(sessionId: string): Promise<{
+  session_id: string; msg_count: number; total_chars: number
+  est_tokens: number; ctx_limit: number; pct: number
+}> {
+  const res = await fetch(`${BASE_URL}/api/sessions/${sessionId}/context`)
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
+}
+
 // ─── Workspace ────────────────────────────────────────────────
 
 export interface WorkspaceDto {
@@ -398,9 +432,10 @@ export async function getSessionTodos(sessionId: string): Promise<{ session_id: 
 
 export interface UniversalChatRequest {
   message: string
-  attachment_content?: string   // 附件文本内容（JSON/TXT 等，已解码）
-  attachment_name?: string      // 附件文件名
-  attachment_b64?: string       // 音频附件 base64（音色克隆用）
+  attachment_content?: string          // 文本附件内容（ABC/JSON/TXT，可进 LLM context）
+  attachment_name?: string             // 附件文件名
+  attachment_workspace_path?: string   // 工作区相对路径（MIDI/图片/音频，后端 Runner 层处理，不传 base64）
+  attachment_b64?: string              // 音频 base64（仅音色克隆直接上传场景，其余留空）
 }
 
 export interface UniversalChatResponse {

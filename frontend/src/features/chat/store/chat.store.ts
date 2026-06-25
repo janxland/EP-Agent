@@ -26,12 +26,18 @@ export interface StreamState {
   reasoning_content: string
   /** 累积中的工具调用（arguments 在流式过程中逐步拼接，可能不完整） */
   tool_calls: ToolCall[]
+  /** 当前 ReAct 轮次（从 0 开始，多轮时前端展示「第 N 轮」） */
+  roundIdx: number
+  /** 当前流式回合 ID（后端每轮 ReAct 生成，用于隔离多轮输出） */
+  streamTurnId: string | null
 }
 
 const emptyStream = (): StreamState => ({
   content: '',
   reasoning_content: '',
   tool_calls: [],
+  roundIdx: 0,
+  streamTurnId: null,
 })
 
 // ─── Store 类型 ───────────────────────────────────────────────────────────────
@@ -52,8 +58,6 @@ interface ChatStoreState {
   messages: ChatMessage[]
   /** 流式临时状态（未 commit，不在 messages 中） */
   streaming: StreamState
-  /** 当前流式回合 ID，用于去重 */
-  activeStreamTurnId: string | null
   /** 运行状态 */
   status: ChatRunStatus
   /** 当前步骤文字（pipeline.step 事件） */
@@ -96,7 +100,7 @@ interface ChatStoreState {
   commitStreamMessage: () => void
   /** 开始一次 run（清空 streaming，重置状态） */
   startRun: () => void
-  /** 正常结束（由 SSE message.completed 或 abc.updated 触发） */
+  /** 正常结束（由 SSE message.completed 触发） */
   finishRun: () => void
   /** 异常结束 */
   failRun: (error: string) => void
@@ -104,9 +108,6 @@ interface ChatStoreState {
   resetRuntime: () => void
   setCurrentStep: (step: string | null) => void
   setTodos: (todos: TodoItem[], summary?: string, domain?: string) => void
-  updateTodo: (id: string, status: TodoItem['status']) => void
-  /** 追加子 TODO（todo.append 事件，不覆盖现有列表） */
-  appendTodos: (parentId: string, newTodos: TodoItem[]) => void
 
   /** 角色切换欢迎语直接注入对话框（修复：原来用 window.dispatchEvent 但无监听者） */
   addGreetingMessage: (greeting: string, roleName: string, roleIcon: string) => void
@@ -125,7 +126,6 @@ const newMsgId = () => `msg_${++_msgCounter}_${Date.now()}`
 export const useChatStore = create<ChatStoreState>((set, get) => ({
   messages: [],
   streaming: emptyStream(),
-  activeStreamTurnId: null,
   status: 'idle',
   currentStep: null,
   errorMessage: null,
@@ -230,14 +230,12 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
     }),
 
   commitStreamMessage: () => {
-    // 用 set(s => ...) 而非先 get() 再 set()，避免并发更新丢失其他状态变更
     set((s) => {
       const { streaming } = s
       const hasContent = streaming.content.trim().length > 0
       const hasTools = streaming.tool_calls.length > 0
       const hasReasoning = streaming.reasoning_content.trim().length > 0
       if (!hasContent && !hasTools && !hasReasoning) return {}
-
       const msg: ChatAssistantMessage = {
         id: newMsgId(),
         role: 'assistant',
@@ -250,7 +248,6 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
       return {
         messages: [...s.messages, msg],
         streaming: emptyStream(),
-        activeStreamTurnId: null,
       }
     })
   },
@@ -261,21 +258,64 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
       errorMessage: null,
       currentStep: null,
       streaming: emptyStream(),
-      activeStreamTurnId: null,
-      // 新轮次开始时不立即清空 TODO，等 todo.list 事件到达时再覆盖
-      // 避免发消息瞬间 TODO 卡片闪烁消失再出现
-      // 注意：不重置 activeRole*，角色状态跨轮次保持
-      // 不重置 _roleRestored，避免每轮都重新 fetch
+      // TODO 不立即清空：等 todo.list 事件覆盖，避免发消息瞬间卡片闪烁
+      // activeRole* 跨轮次保持，_roleRestored 不重置
     }),
 
   finishRun: () => {
-    get().commitStreamMessage()
-    set({ status: 'completed', currentStep: null })
+    // tool.call(succeeded) 已 commit 过；此处仅处理纯文本轮次（无工具调用）的收尾
+    set((s) => {
+      const { streaming } = s
+      const hasContent = streaming.content.trim().length > 0
+      const hasTools   = streaming.tool_calls.length > 0
+      const hasReason  = streaming.reasoning_content.trim().length > 0
+      if (!hasContent && !hasTools && !hasReason) {
+        return { status: 'completed' as const, currentStep: null }
+      }
+      const msg: ChatAssistantMessage = {
+        id: newMsgId(),
+        role: 'assistant',
+        content: streaming.content,
+        reasoning_content: hasReason ? streaming.reasoning_content : undefined,
+        tool_calls: hasTools ? streaming.tool_calls : undefined,
+        createdAt: new Date().toISOString(),
+        kind: 'turn',
+      }
+      return {
+        messages: [...s.messages, msg],
+        streaming: emptyStream(),
+        status: 'completed' as const,
+        currentStep: null,
+      }
+    })
   },
 
   failRun: (error) => {
-    get().commitStreamMessage()
-    set({ status: 'failed', errorMessage: error, currentStep: null })
+    set((s) => {
+      const { streaming } = s
+      const hasContent = streaming.content.trim().length > 0
+      const hasTools   = streaming.tool_calls.length > 0
+      const hasReason  = streaming.reasoning_content.trim().length > 0
+      if (!hasContent && !hasTools && !hasReason) {
+        return { status: 'failed' as const, errorMessage: error, currentStep: null }
+      }
+      const msg: ChatAssistantMessage = {
+        id: newMsgId(),
+        role: 'assistant',
+        content: streaming.content,
+        reasoning_content: hasReason ? streaming.reasoning_content : undefined,
+        tool_calls: hasTools ? streaming.tool_calls : undefined,
+        createdAt: new Date().toISOString(),
+        kind: 'turn',
+      }
+      return {
+        messages: [...s.messages, msg],
+        streaming: emptyStream(),
+        status: 'failed' as const,
+        errorMessage: error,
+        currentStep: null,
+      }
+    })
   },
 
   resetRuntime: () =>
@@ -284,12 +324,10 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
       errorMessage: null,
       currentStep: null,
       streaming: emptyStream(),
-      activeStreamTurnId: null,
-      // session 切换时清空 TODO，避免旧卡片残留到新 session 第一次发消息前
+      // session 切换：清空 TODO 避免旧卡片残留，重置角色恢复标记
       todos: [],
       todoSummary: '',
       todoDomain: '',
-      // session 切换时重置角色恢复标记，确保新 session 的角色从服务端重新加载
       _roleRestored: false,
     }),
 
@@ -327,20 +365,6 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
 
   setTodos: (todos, summary, domain) => set({ todos, todoSummary: summary ?? '', todoDomain: domain ?? '' }),
 
-  updateTodo: (id, status) =>
-    set((s) => ({
-      todos: s.todos.map((t) => (t.id === id ? { ...t, status } : t)),
-    })),
-
-  appendTodos: (parentId, newTodos) =>
-    set((s) => ({
-      // 去重：已存在相同 id 的子任务不重复追加
-      todos: [
-        ...s.todos,
-        ...newTodos.filter((n) => !s.todos.some((t) => t.id === n.id)),
-      ],
-    })),
-
   // ── SSE 事件统一处理 ───────────────────────────────────────────────────────
   //
   // 事件流时序（正常情况）：
@@ -353,7 +377,7 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
   //
   handleSSEEvent: (event: SSEEvent) => {
     const { setCurrentStep, appendStreamingChunk, appendReasoningChunk,
-            appendToolCallChunk, commitStreamMessage, addMessage, failRun } = get()
+            appendToolCallChunk, commitStreamMessage, addMessage, failRun, finishRun } = get()
 
     switch (event.type) {
 
@@ -389,11 +413,50 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
 
       // ── 步骤进度 ──────────────────────────────────────────────────────────
       case 'pipeline.step': {
-        const p = event.payload as PipelineStepPayload
+        const p = event.payload as PipelineStepPayload & { round_idx?: number; stream_turn_id?: string }
         setCurrentStep(p.text)
         // 步骤开始时标记 running（如果还没开始）
         if (p.status === 'running') {
           set((s) => s.status === 'idle' ? { status: 'running' } : {})
+        }
+        // 新 ReAct 轮次开始：先 commit 上一轮 streaming，再 reset 为新轮次
+        // 这是解决多轮 ReAct 流式输出混乱的关键：每轮用独立 stream_turn_id 隔离
+        if (typeof p.round_idx === 'number' && p.stream_turn_id) {
+          const newTurnId = p.stream_turn_id
+          set((s) => {
+            // 若 turn_id 相同（重复事件）则跳过
+            if (s.streaming.streamTurnId === newTurnId) return {}
+            // 先检查上一轮是否有未 commit 的内容
+            const prev = s.streaming
+            const prevHasContent = prev.content.trim().length > 0
+            const prevHasTools   = prev.tool_calls.length > 0
+            const prevHasReason  = prev.reasoning_content.trim().length > 0
+            if (prevHasContent || prevHasTools || prevHasReason) {
+              // 上一轮有内容：commit 为正式消息
+              const msg: ChatAssistantMessage = {
+                id: newMsgId(),
+                role: 'assistant',
+                content: prev.content,
+                reasoning_content: prevHasReason ? prev.reasoning_content : undefined,
+                tool_calls: prevHasTools ? prev.tool_calls : undefined,
+                createdAt: new Date().toISOString(),
+                kind: 'turn',
+              }
+              return {
+                messages: [...s.messages, msg],
+                streaming: { ...emptyStream(), roundIdx: p.round_idx as number, streamTurnId: newTurnId },
+              }
+            }
+            // 上一轮无内容：直接 reset
+            return {
+              streaming: { ...emptyStream(), roundIdx: p.round_idx as number, streamTurnId: newTurnId },
+            }
+          })
+        } else if (typeof p.round_idx === 'number') {
+          // 兼容无 stream_turn_id 的旧事件：仅更新轮次
+          set((s) => ({
+            streaming: { ...s.streaming, roundIdx: p.round_idx as number }
+          }))
         }
         break
       }
@@ -408,9 +471,9 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
       }
 
       // ── 消息完成（整轮结束信号）──────────────────────────────────────────
+      // finishRun 内部已处理：有 streaming 内容则 commit，无则仅更新状态
       case 'message.completed': {
-        commitStreamMessage()
-        set({ status: 'completed', currentStep: null })
+        finishRun()
         break
       }
 
@@ -418,9 +481,20 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
       // 后端 SSE 连接建立时推送 message.history 事件，前端直接追加到 messages
       // 不经过 streaming 流程，不影响当前 status，实现无感知历史恢复。
       case 'message.history': {
-        const p = event.payload as { role: string; content: string; msg_id?: string }
-        // 空内容直接忽略，避免空消息气泡
-        if (!p.content?.trim()) break
+        const p = event.payload as {
+          role: string
+          content: string
+          msg_id?: string
+          tool_call_id?: string
+          name?: string
+          // assistant 消息携带 tool_calls（刷新后工具卡片渲染的关键）
+          tool_calls?: ToolCall[]
+        }
+        // user / tool 消息：空内容直接忽略，避免空消息气泡
+        // assistant 消息：可能 content="" 但有 tool_calls（纯工具调用轮次），不能跳过
+        if (p.role !== 'assistant' && !p.content?.trim()) break
+        if (p.role === 'assistant' && !p.content?.trim() && !p.tool_calls?.length) break
+
         const existing = get().messages
         // 生成稳定 ID：优先使用后端 msg_id；为空时基于内容 hash 生成，保证重连幂等
         const msgId = (p.msg_id && p.msg_id.length > 0)
@@ -428,6 +502,7 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
           : `hist_${p.role}_${p.content.slice(0, 32).replace(/\s+/g, '_')}`
         // 去重：已存在相同 id 的消息直接跳过
         if (existing.some((m) => m.id === msgId)) break
+
         if (p.role === 'user') {
           const userMsg: ChatUserMessage = {
             id: msgId,
@@ -441,10 +516,24 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
             id: msgId,
             role: 'assistant',
             content: p.content,
+            // 还原 tool_calls：前端渲染工具卡片时通过 tool_call_id 匹配 tool message
+            tool_calls: p.tool_calls?.length ? p.tool_calls : undefined,
             createdAt: event.timestamp,
             kind: 'turn',
           }
           set((s) => ({ messages: [...s.messages, assistantMsg] }))
+        } else if (p.role === 'tool') {
+          // ── 工具结果体恢复（刷新后 SSE replay 推送 tool message）──────────
+          // tool_call_id 用于与 assistant tool_calls 匹配，渲染工具结果卡片
+          const toolMsg: ChatToolMessage = {
+            id: msgId,
+            role: 'tool',
+            tool_call_id: p.tool_call_id ?? '',
+            name: p.name,
+            content: p.content,
+            createdAt: event.timestamp,
+          }
+          set((s) => ({ messages: [...s.messages, toolMsg] }))
         }
         break
       }
@@ -472,6 +561,7 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
           // 工具完成：
           //   1. 先 commit streaming（把包含该工具的 assistant 消息落库）
           //   2. 再追加 tool message（通过 tool_call_id O(1) 匹配）
+          //   3. 若是文件操作工具（写/删/重命名/上传），触发文件树刷新
           commitStreamMessage()
 
           const toolMsg: ChatToolMessage = {
@@ -485,6 +575,19 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
             createdAt: new Date().toISOString(),
           }
           addMessage(toolMsg)
+
+          // 文件操作工具成功完成时刷新文件树
+          if (p.status === 'succeeded' && typeof window !== 'undefined') {
+            const FILE_OP_TOOLS = new Set([
+              'write_workspace_file', 'delete_workspace_file',
+              'rename_workspace_file', 'copy_workspace_file',
+              'upload_workspace_file', 'save_abc_score',
+              'save_h5_file', 'create_workspace_dir',
+            ])
+            if (FILE_OP_TOOLS.has(p.tool)) {
+              window.dispatchEvent(new CustomEvent('ep:workspace-refresh'))
+            }
+          }
         }
         break
       }
@@ -529,10 +632,13 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
         const title    = p.title    ?? 'H5 乐谱海报'
         const urlPath  = p.url_path ?? ''
         const sizeKb   = p.size_kb  ? `${p.size_kb} KB` : ''
-        const template = p.template ?? 'apple_dark'
+        const template = p.template ?? 'apple'
+        // H5 文件由后端静态服务托管，需拼接后端地址（绕过 Next.js 路由）
+        const backendBase = process.env.NEXT_PUBLIC_BACKEND_URL ?? 'http://localhost:8080'
+        const fullUrl = urlPath ? `${backendBase}${urlPath}` : ''
         const content  = [
           `🎨 **${title}** 已生成`,
-          urlPath ? `📎 [点击预览 H5 海报](${urlPath})` : '',
+          fullUrl ? `📎 [点击预览 H5 海报](${fullUrl})` : '',
           sizeKb  ? `📦 文件大小：${sizeKb}` : '',
           `🖼️ 模板：${template}`,
         ].filter(Boolean).join('\n')
@@ -545,6 +651,17 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
           kind: 'turn',
         }
         set((s) => ({ messages: [...s.messages, h5Msg] }))
+        break
+      }
+
+      // ── 工作区文件已保存（谱子写入 .sky/ 后通知前端刷新文件树）────────────
+      case 'workspace.file_saved':
+      case 'workspace.scores': {
+        // 触发文件树刷新（fileTreeRefreshToken 递增，WorkspaceFileTree 监听此值）
+        // 使用 window 事件总线避免循环依赖（workspace.store → chat.store 已有依赖链）
+        if (typeof window !== 'undefined') {
+          window.dispatchEvent(new CustomEvent('ep:workspace-refresh'))
+        }
         break
       }
 

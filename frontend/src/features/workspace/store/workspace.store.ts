@@ -39,6 +39,10 @@ interface WorkspaceStoreState {
   error: string | null
   /** 侧边栏是否折叠 */
   sidebarCollapsed: boolean
+  /** 文件树刷新令牌（每次文件上传后递增，WorkspaceFileTree 监听此值触发刷新） */
+  fileTreeRefreshToken: number
+  /** 触发文件树刷新 */
+  triggerFileTreeRefresh: () => void
 
   // ── 查询 ──
   /** 获取当前活跃工作区 */
@@ -87,6 +91,7 @@ export const useWorkspaceStore = create<WorkspaceStoreState>()(
       loading: false,
       error: null,
       sidebarCollapsed: false,
+      fileTreeRefreshToken: 0,
 
       // ── 查询 ────────────────────────────────────────────────────────────────
 
@@ -319,6 +324,7 @@ export const useWorkspaceStore = create<WorkspaceStoreState>()(
       setActiveWorkspaceId: (id) => set({ activeWorkspaceId: id }),
       setActiveSessionId: (id) => set({ activeSessionId: id }),
       toggleSidebar: () => set((s) => ({ sidebarCollapsed: !s.sidebarCollapsed })),
+      triggerFileTreeRefresh: () => set((s) => ({ fileTreeRefreshToken: s.fileTreeRefreshToken + 1 })),
       clearError: () => set({ error: null }),
       clearPendingNavigate: () => set({ _pendingNavigateSessionId: undefined }),
     }),
