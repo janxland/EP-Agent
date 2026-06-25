@@ -33,13 +33,16 @@ class AudioChatResponse(BaseModel):
     audio_url: str
     audio_b64: str = ""
     provider: str
-    prompt_used: str
-    style_used: str
-    lyrics_used: str = ""
-    instrumental: bool
-    duration_ms: int
-    summary: str
-    suggestions: list[str]
+    # 字段名与前端 AudioTurn 对齐（audio_runner 返回 prompt_used/style_used/lyrics_used，此处做映射）
+    prompt: str = ""            # 对应 audio_runner 的 prompt_used
+    style: str = ""             # 对应 audio_runner 的 style_used
+    lyrics: str = ""            # 对应 audio_runner 的 lyrics_used
+    model: str = ""             # 生成所用模型名称
+    user_message: str = ""      # 本轮用户原始消息
+    instrumental: bool = False
+    duration_ms: int = 0
+    summary: str = ""
+    suggestions: list[str] = []
     diff_summary: str = ""
     tool_calls: list[dict] = []
     domain: str = ""
@@ -69,7 +72,16 @@ async def audio_chat(session_id: str, req: AudioChatRequest) -> AudioChatRespons
             audio_b64=req.audio_b64,
             publish=_make_publisher(session_id),
         )
-        return AudioChatResponse(**result)
+        # audio_runner 返回 prompt_used/style_used/lyrics_used，映射为前端期望的字段名
+        mapped = {
+            **result,
+            "prompt":       result.get("prompt_used", ""),
+            "style":        result.get("style_used",  ""),
+            "lyrics":       result.get("lyrics_used", ""),
+            "model":        result.get("model",        ""),
+            "user_message": req.message,
+        }
+        return AudioChatResponse(**mapped)
     except KeyError as e:
         raise HTTPException(status_code=404, detail=str(e))
     except ValueError as e:

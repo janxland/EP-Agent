@@ -223,7 +223,17 @@ export const useScoreStore = create<ScoreState>((set, get) => ({
 
         set((s) => {
           if (isRunning) {
-            // running：以 call_id 为 log.id append 新条目，后续 O(1) 精确定位
+            // running：以 call_id 为 log.id，若已存在则更新（防重复 key），否则 append
+            const exists = s.pipelineLogs.some((l) => l.id === callId)
+            if (exists) {
+              return {
+                pipelineLogs: s.pipelineLogs.map((l) =>
+                  l.id === callId
+                    ? { ...l, text, status: 'running' as const, toolName, toolArgs: p.arguments }
+                    : l
+                ),
+              }
+            }
             return {
               pipelineLogs: [
                 ...s.pipelineLogs,
@@ -270,6 +280,11 @@ export const useScoreStore = create<ScoreState>((set, get) => ({
         set({ pipelineState: 'failed' })
         break
       }
+
+      // connection.reconnecting / todo.list / role.active 等后端推送的
+      // 非 scoreStore 关注事件：静默忽略，避免开发模式 switch 警告
+      default:
+        break
     }
   },
 

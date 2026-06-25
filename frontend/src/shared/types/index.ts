@@ -60,7 +60,7 @@ export interface EditResult {
   version: number
   tool_calls: ToolCallRecord[]
   sky_json?: string    // scene=player/raw
-  midi_b64?: string   // scene=daw/raw
+  midi_url?: string   // H5 海报 MIDI CDN 路径
 }
 
 // ─── Audio Generation ───────────────────────────────────────
@@ -147,13 +147,16 @@ export type SSEEventType =
   | 'activity.update'
   | 'message.delta'
   | 'message.completed'
-  | 'message.history'   // replay：刷新后后端推送的历史对话消息
+  | 'message.history'        // replay：刷新后后端推送的历史对话消息
   | 'tool.call'
   | 'todo.list'
   | 'todo.update'
   | 'todo.append'
-  | 'role.active'        // 角色激活（切换角色/刷新恢复/降级后补推）
-  | 'h5.ready'           // H5 海报生成完成（含 url_path/file_path/size_kb）
+  | 'role.active'             // 角色激活（切换角色/刷新恢复/降级后补推）
+  | 'h5.ready'               // H5 海报生成完成（含 url_path/file_path/size_kb）
+  | 'connection.reconnecting' // SSE 断线重连前通知前端清空 store
+  | 'workspace.file_saved'     // 谱子写入 .sky/ 后通知前端刷新文件树
+  | 'workspace.scores'         // SSE replay 推送工作区谱子列表
   | 'error'
 
 export interface SSEEvent {
@@ -176,6 +179,10 @@ export interface PipelineStepPayload {
   key?: string
   intent_type?: IntentType
   version?: number
+  /** 多轮 ReAct 轮次索引（从 0 开始） */
+  round_idx?: number
+  /** 每轮 ReAct 唯一回合 ID，前端用于隔离多轮流式输出 */
+  stream_turn_id?: string
 }
 
 // abc.updated payload
@@ -185,9 +192,10 @@ export interface ABCUpdatedPayload {
   summary?: string
 }
 
-// message.delta payload（预留：后端实现流式文本时使用）
+// message.delta payload
 export interface MessageDeltaPayload {
-  delta: string
+  delta?: string
+  reasoning_delta?: string
 }
 
 // error payload

@@ -8,17 +8,20 @@ import { PipelineStatus } from '@/widgets/pipeline-status/PipelineStatus'
 import { ExportPanel } from '@/widgets/export-panel/ExportPanel'
 import { AudioPanel } from '@/widgets/audio-panel/AudioPanel'
 import { useScoreStore } from '@/entities/session/store'
+import { useWorkspaceStore } from '@/features/workspace/store/workspace.store'
 import { createSession, subscribeToSession } from '@/shared/lib/api'
 import Link from 'next/link'
 
 export default function SimplePage() {
   const { sessionId, setSessionId, abcNotation, score, handleSSEEvent } = useScoreStore()
+  const { activeWorkspaceId } = useWorkspaceStore()
   const [rightTab, setRightTab] = useState<'export' | 'audio'>('export')
   const unsubRef = useRef<(() => void) | null>(null)
 
   useEffect(() => {
     if (!sessionId) {
-      createSession()
+      // 传入 activeWorkspaceId，确保 session 归属正确工作区，侧边栏可见
+      createSession(activeWorkspaceId ?? undefined)
         .then(({ session_id }) => setSessionId(session_id))
         .catch(console.error)
       return
@@ -26,7 +29,7 @@ export default function SimplePage() {
     unsubRef.current?.()
     unsubRef.current = subscribeToSession(sessionId, handleSSEEvent)
     return () => { unsubRef.current?.(); unsubRef.current = null }
-  }, [sessionId, setSessionId, handleSSEEvent])
+  }, [sessionId, activeWorkspaceId, setSessionId, handleSSEEvent])
 
   return (
     <div className="flex flex-col h-screen bg-gray-50">

@@ -11,24 +11,29 @@ import { useWorkspaceStore } from '@/features/workspace/store/workspace.store'
 import { chatUniversal } from '@/shared/lib/api'
 import { ChatMessageList, StreamingAssistantCard } from './ChatMessageList'
 import { TodoListCard } from './TodoListCard'
+import { RichInput, type FileRef } from './RichInput'
+import { readWorkspaceFile, uploadFileToWorkspace } from '@/shared/lib/workspace-files-api'
 import { useBackendHealth, HEALTH_VISUAL } from '@/shared/hooks/useBackendHealth'
 import { RoleSwitcher, RoleBadge } from '@/widgets/role-switcher'
 import type { RoleMeta } from '@/widgets/role-switcher'
+import { ConfirmDialog } from '@/shared/components/ConfirmDialog'
 
 // ─── 常量 ─────────────────────────────────────────────────────────────────────
 
 const STICK_SLOP_PX = 80
-const REQUEST_TIMEOUT_MS = 60_000
+// H5 生成等复杂任务需要 3-4 轮 LLM Tool Calling，每轮最长 180s，前端给足 5 分钟
+const REQUEST_TIMEOUT_MS = 300_000
 
 // ─── 附件类型 ─────────────────────────────────────────────────────────────────
 
-type AttachmentKind = 'json' | 'midi' | 'audio' | 'text'
+type AttachmentKind = 'json' | 'midi' | 'audio' | 'text' | 'image'
 
 interface Attachment {
   kind: AttachmentKind
   name: string
-  content: string   // 文本内容（text/json）或 base64（audio/midi）
-  size: number      // 字节数
+  content: string          // 文本内容（text/json/abc）；二进制文件留空
+  workspace_path: string   // 工作区相对路径（二进制文件用此字段，不传 base64）
+  size: number             // 字节数
 }
 
 const KIND_ICON: Record<AttachmentKind, string> = {
@@ -36,6 +41,7 @@ const KIND_ICON: Record<AttachmentKind, string> = {
   midi:  '🎹',
   audio: '🎵',
   text:  '📄',
+  image: '🖼️',
 }
 
 const KIND_LABEL: Record<AttachmentKind, string> = {
@@ -43,6 +49,7 @@ const KIND_LABEL: Record<AttachmentKind, string> = {
   midi:  'MIDI',
   audio: '音频',
   text:  '文本',
+  image: '图片',
 }
 
 /** 根据文件名/内容判断附件类型 */
@@ -205,6 +212,7 @@ export function ChatPanel() {
     setActiveSessionId,
     setActiveWorkspaceId,
     workspaces,
+    triggerFileTreeRefresh,
   } = useWorkspaceStore()
   const {
     messages,
@@ -226,10 +234,82 @@ export function ChatPanel() {
     setActiveRole,
   } = useChatStore()
 
-  const [input, setInput] = useState('')
   const [attachment, setAttachment] = useState<Attachment | null>(null)
+  const [imgUploadTip, setImgUploadTip] = useState<{ status: 'uploading' | 'done' | 'error'; name: string } | null>(null)
+  // 插入 mention 节点的 ref（上传完成后自动把文件引用插入 tiptap）
+  const insertMentionRef = useRef<((path: string, label: string, size: number) => void) | null>(null)
   const [showRolePanel, setShowRolePanel] = useState(false)
   const [showSessionMenu, setShowSessionMenu] = useState(false)
+  // RichInput 的 insertText ref，用于快捷回复按钮向编辑器插入文本
+  const insertTextRef = useRef<((text: string) => void) | null>(null)
+  // RichInput 的 send ref，用于发送按钮直接触发（避免 DOM 事件不可靠问题）
+  const richSendRef = useRef<(() => void) | null>(null)
+  // RichInput 发送回调：文本文件读内容进 context，二进制文件只传工作区路径
+  // 核心原则：图片/MIDI/音频的二进制内容永远不进 LLM context，防止上下文爆炸
+  const handleRichSend = useCallback(async (text: string, fileRefs: FileRef[]) => {
+    if (!text.trim() || status === 'running' || !sessionId) return
+    let autoAtt: Attachment | null = attachment
+
+    if (fileRefs.length > 0 && !autoAtt && activeWorkspaceId) {
+      const ref = fileRefs[0]
+      const ext = ref.label.split('.').pop()?.toLowerCase() ?? ''
+      const isMidi  = ['mid', 'midi'].includes(ext)
+      const isAudio = ['mp3', 'wav', 'm4a', 'ogg', 'flac'].includes(ext)
+      const isImage = ['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg'].includes(ext)
+      const isText  = ['abc', 'txt', 'md', 'json', 'html', 'csv'].includes(ext)
+
+      try {
+        if (isMidi || isAudio || isImage) {
+          // ✅ 二进制文件：只传工作区路径，不读取 base64
+          // 后端 Runner 层负责处理（MIDI → H5，图片 → visual_understanding URL）
+          const kind: AttachmentKind = isMidi ? 'midi' : isAudio ? 'audio' : 'image'
+          autoAtt = { kind, name: ref.label, content: '', workspace_path: ref.path, size: 0 }
+        } else if (isText) {
+          // ✅ 文本文件：读取内容（ABC/JSON/TXT 都是高效文本，可进 context）
+          const content = await readWorkspaceFile(activeWorkspaceId, ref.path)
+          const kind: AttachmentKind = ext === 'json' ? 'json' : 'text'
+          autoAtt = { kind, name: ref.label, content, workspace_path: ref.path, size: content.length }
+        }
+      } catch { /* 静默失败，不阻塞发送 */ }
+    }
+
+    const displayText = (autoAtt && !text.includes(`[@${autoAtt.name}]`))
+      ? `${text} [@${autoAtt.name}]`
+      : text
+    addOptimisticUserMessage(displayText)
+    const att = autoAtt
+    setAttachment(null)
+    startRun()
+    const timeoutId = setTimeout(() => failRun('请求超时，请检查后端连接'), REQUEST_TIMEOUT_MS)
+    timeoutRef.current = timeoutId
+    // 判断附件类型决定传哪个字段
+    // - 有 workspace_path（已上传到工作区）：传路径，content/b64 留空
+    // - 无 workspace_path 但有 content（降级 base64 路径）：
+    //   - MIDI/音频 → 传 attachment_b64，让 Runner 层转存到工作区
+    //   - 文本（ABC/JSON）→ 传 attachment_content，可进 LLM context
+    const isBinary = att?.kind === 'midi' || att?.kind === 'audio'
+    const hasWsPath = !!(att?.workspace_path)
+    chatUniversal(sessionId, {
+      // 使用 displayText（含 [@文件名] chip）而非原始 text，
+      // 保证后端落库内容与前端乐观显示一致，刷新后 SSE replay 能正确还原 chip
+      message: displayText,
+      attachment_name: att?.name ?? '',
+      // 工作区路径（优先）：后端 Runner 层直接使用
+      attachment_workspace_path: att?.workspace_path ?? '',
+      // 文本内容（ABC/JSON/TXT）：仅在非二进制且有内容时传
+      attachment_content: (!isBinary && att?.content) ? att.content : '',
+      // base64（降级路径）：仅在二进制且无 workspace_path 时传，Runner 层会转存到工作区
+      attachment_b64: (isBinary && !hasWsPath && att?.content) ? att.content : '',
+    }).catch((e: unknown) => {
+      const msg = e instanceof Error ? e.message : '请求失败'
+      failRun(msg)
+    })
+  }, [status, sessionId, attachment, activeWorkspaceId, addOptimisticUserMessage, startRun, failRun])
+
+  // 发送按钮：通过 RichInput 暴露的 sendRef 直接调用，避免 DOM 事件不可靠
+  const handleSendButton = useCallback(() => {
+    richSendRef.current?.()
+  }, [])
 
   // 当前活跃对话的标题
   const allSessions = activeSessions()
@@ -239,6 +319,9 @@ export function ChatPanel() {
   // 新建对话
   const handleCreateSession = useCallback(async () => {
     if (!activeWorkspaceId) return
+    // ⚡ 预清空：在路由跳转前同步清空消息列表，消除跳转动画期间的旧消息残留
+    // page.tsx 的 [sessionId] effect 也会清空，这里是双保险，确保视觉上立即生效
+    useChatStore.setState({ messages: [], todos: [], todoSummary: '', todoDomain: '' })
     try {
       const sess = await createSession(activeWorkspaceId, '新对话')
       router.push(`/pro/${sess.id}`)
@@ -259,14 +342,20 @@ export function ChatPanel() {
     router.push(`/pro/${id}`)
   }, [activeSessionId, workspaces, setActiveWorkspaceId, setActiveSessionId, router])
 
-  // 删除对话
-  const handleDeleteSession = useCallback(async (id: string) => {
-    if (!window.confirm('确定删除该对话？消息记录将一并删除且不可恢复。')) return
+  // 删除对话（自制弹窗确认）
+  const [deleteConfirmSessionId, setDeleteConfirmSessionId] = useState<string | null>(null)
+  const handleDeleteSession = useCallback((id: string) => {
+    setDeleteConfirmSessionId(id)
+  }, [])
+  const handleConfirmDeleteSession = useCallback(async () => {
+    if (!deleteConfirmSessionId) return
+    const id = deleteConfirmSessionId
+    setDeleteConfirmSessionId(null)
     try {
       await deleteSession(id)
       // deleteSession 会设置 _pendingNavigateSessionId，由 page.tsx 监听跳转
     } catch { /* error 已在 store 中设置 */ }
-  }, [deleteSession])
+  }, [deleteConfirmSessionId, deleteSession])
 
   // ── 角色恢复已统一由 /pro/[sessionId]/page.tsx 初始化 effect 调用 ─────────────
   // ChatPanel 不再重复调用 restoreRoleFromSession，避免 session 切换时双重 fetch。
@@ -275,7 +364,6 @@ export function ChatPanel() {
   const scrollRef   = useRef<HTMLDivElement>(null)
   const stickRef    = useRef(true)
   const timeoutRef  = useRef<ReturnType<typeof setTimeout> | null>(null)
-  const textareaRef = useRef<HTMLTextAreaElement>(null)
 
   // ── 自动滚底 ──────────────────────────────────────────────────────────────
   const onScroll = useCallback(() => {
@@ -322,17 +410,68 @@ export function ChatPanel() {
       if (!file) return
 
       const isAudio = file.type.includes('audio') || /\.(mp3|wav|m4a|ogg|flac)$/i.test(file.name)
-      if (isAudio) {
+      const isMidi  = file.type.includes('midi') || /\.(mid|midi)$/i.test(file.name)
+
+      if ((isAudio || isMidi) && activeWorkspaceId) {
+        // ✅ 新架构：MIDI/音频先上传到工作区，存 workspace_path，不存 base64
+        // 这样 LLM context 中永远不会出现二进制内容，彻底避免超时
+        const kind: AttachmentKind = isAudio ? 'audio' : 'midi'
+        const subdir = isMidi ? '.sky' : 'shared'
+        const destPath = `${subdir}/${file.name}`
+        setImgUploadTip({ status: 'uploading', name: file.name })
+        try {
+          await uploadFileToWorkspace(activeWorkspaceId, file, destPath)
+          setAttachment({ kind, name: file.name, content: '', workspace_path: destPath, size: file.size })
+          setImgUploadTip({ status: 'done', name: file.name })
+          // 上传成功：自动插入 @mention，不显示顶部胶囊
+          insertMentionRef.current?.(destPath, file.name, file.size)
+          triggerFileTreeRefresh()
+        } catch {
+          // 上传失败降级：仍然设置附件，但用 base64 路径（旧兼容路径）
+          const reader = new FileReader()
+          reader.onload = () => {
+            const b64 = (reader.result as string).split(',')[1] ?? ''
+            setAttachment({ kind, name: file.name, content: b64, workspace_path: '', size: file.size })
+          }
+          reader.readAsDataURL(file)
+          setImgUploadTip({ status: 'error', name: file.name })
+        }
+      } else if (isAudio || isMidi) {
+        // 无工作区时降级用 base64（兼容旧路径）
         const reader = new FileReader()
         reader.onload = () => {
           const b64 = (reader.result as string).split(',')[1] ?? ''
-          setAttachment({ kind: 'audio', name: file.name, content: b64, size: file.size })
+          const kind: AttachmentKind = isAudio ? 'audio' : 'midi'
+          setAttachment({ kind, name: file.name, content: b64, workspace_path: '', size: file.size })
         }
         reader.readAsDataURL(file)
       } else {
-        const text = await file.text()
-        const kind = detectKind(file.name, text)
-        setAttachment({ kind, name: file.name, content: text, size: file.size })
+        // txt / json 等文本文件：上传到工作区 + 插入 mention 胶囊
+        const ext = file.name.split('.').pop()?.toLowerCase() ?? ''
+        const subdir = ext === 'json' ? 'shared' : 'shared'
+        const destPath = `${subdir}/${file.name}`
+        if (activeWorkspaceId) {
+          setImgUploadTip({ status: 'uploading', name: file.name })
+          try {
+            await uploadFileToWorkspace(activeWorkspaceId, file, destPath)
+            const text = await file.text()
+            const kind = detectKind(file.name, text)
+            setAttachment({ kind, name: file.name, content: text, workspace_path: destPath, size: file.size })
+            setImgUploadTip({ status: 'done', name: file.name })
+            insertMentionRef.current?.(destPath, file.name, file.size)
+            triggerFileTreeRefresh()
+          } catch {
+            // 上传失败降级：读内容但无胶囊
+            const text = await file.text()
+            const kind = detectKind(file.name, text)
+            setAttachment({ kind, name: file.name, content: text, workspace_path: '', size: file.size })
+            setImgUploadTip({ status: 'error', name: file.name })
+          }
+        } else {
+          const text = await file.text()
+          const kind = detectKind(file.name, text)
+          setAttachment({ kind, name: file.name, content: text, workspace_path: '', size: file.size })
+        }
       }
       return
     }
@@ -348,54 +487,12 @@ export function ChatPanel() {
           e.preventDefault()
           const kind = detectKind('paste.json', trimmed)
           setAttachment({ kind, name: 'paste.json', content: trimmed, size: trimmed.length })
-          setInput((prev) => prev || '帮我加载这首谱子')
+          // 提示用户可以输入意图（通过 insertTextRef 插入快捷文本）
+          insertTextRef.current?.('帮我加载这首谱子')
         }
       })
     }
-  }, [])
-
-  // ── 发送消息 ──────────────────────────────────────────────────────────────
-  const handleSend = useCallback(async () => {
-    const text = input.trim()
-    if (!text || status === 'running' || !sessionId) return
-
-    // 构建用户可见的消息（含附件提示）
-    const displayText = attachment
-      ? `${text} [附件: ${attachment.name}]`
-      : text
-
-    addOptimisticUserMessage(displayText)
-    setInput('')
-    const att = attachment
-    setAttachment(null)
-    startRun()
-
-    // 超时兜底
-    timeoutRef.current = setTimeout(() => {
-      failRun('请求超时，请检查后端连接')
-    }, REQUEST_TIMEOUT_MS)
-
-    // 统一调用 /chat 接口，LLM 自动识别意图
-    try {
-      await chatUniversal(sessionId, {
-        message: text,
-        attachment_content: att && att.kind !== 'audio' ? att.content : '',
-        attachment_name:    att?.name ?? '',
-        attachment_b64:     att?.kind === 'audio' ? att.content : '',
-      })
-      // 结束信号来自 SSE: abc.updated / message.completed / error
-    } catch (e: unknown) {
-      const msg = e instanceof Error ? e.message : '请求失败，请检查后端服务'
-      failRun(msg)
-    }
-  }, [input, attachment, status, sessionId, addOptimisticUserMessage, startRun, failRun])
-
-  const handleKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
-    if (e.key === 'Enter' && !e.shiftKey) {
-      e.preventDefault()
-      handleSend()
-    }
-  }
+  }, [activeWorkspaceId, triggerFileTreeRefresh])
 
   const isRunning        = status === 'running'
   const hasStreamContent = streaming.content || streaming.tool_calls.length > 0 || streaming.reasoning_content
@@ -410,6 +507,8 @@ export function ChatPanel() {
     voice:          { icon: '🎤', label: '音色克隆' },
     query:          { icon: '🔍', label: '查询分析' },
     'convert+edit': { icon: '🎮', label: '解析并编辑' },
+    h5_create:      { icon: '🎨', label: 'H5 页面' },
+    h5_edit:        { icon: '🖌️', label: 'H5 编辑' },
   }
   const domainInfo = todoDomain ? (DOMAIN_LABEL[todoDomain] ?? null) : null
 
@@ -419,14 +518,21 @@ export function ChatPanel() {
   const doneCount     = todos.filter((t) => t.status === 'done').length
   const hasTodos      = todos.length > 0
 
+  // 图片上传状态自动消除
+  useEffect(() => {
+    if (!imgUploadTip || imgUploadTip.status === 'uploading') return
+    const t = setTimeout(() => setImgUploadTip(null), 2500)
+    return () => clearTimeout(t)
+  }, [imgUploadTip])
+
   // 根据当前状态/附件决定 placeholder
   const placeholder = !sessionId
-    ? '请先创建 Session...'
+    ? '请先创建会话...'
     : isRunning
       ? `${currentStep ?? 'AI 处理中'}...`
       : attachment
-        ? `描述对「${attachment.name}」的处理意图...`
-        : '发消息或粘贴 JSON/音频文件，AI 自动识别意图...'
+        ? `描述对「${attachment.name}」的处理意图，或直接发送...`
+        : '发消息 · 粘贴图片自动上传 · @ 引用文件'
 
   return (
     <div className="flex flex-col h-full bg-white">
@@ -518,7 +624,10 @@ export function ChatPanel() {
         )}
         {messages.length > 0 && !isRunning && (
           <button
-            onClick={resetRuntime}
+            onClick={() => {
+              // 同时清空消息列表和运行时状态，确保 UI 立即清空
+              useChatStore.setState({ messages: [], todos: [], todoSummary: '', todoDomain: '' })
+            }}
             className="shrink-0 text-xs text-gray-300 hover:text-gray-500 transition-colors"
             title="清空对话"
           >
@@ -584,7 +693,7 @@ export function ChatPanel() {
               ].map((hint) => (
                 <button
                   key={hint}
-                  onClick={() => setInput(hint)}
+                  onClick={() => insertTextRef.current?.(hint)}
                   className="text-xs px-2.5 py-1 bg-gray-50 hover:bg-orange-50 hover:text-orange-500 text-gray-500 rounded-lg transition-colors border border-gray-100 hover:border-orange-200"
                 >
                   {hint}
@@ -607,6 +716,7 @@ export function ChatPanel() {
             content={streaming.content}
             reasoningContent={streaming.reasoning_content}
             toolCalls={streaming.tool_calls}
+            roundIdx={streaming.roundIdx}
           />
         )}
 
@@ -634,89 +744,187 @@ export function ChatPanel() {
       )}
 
       {/* ── 输入区 ── */}
-      <div className="px-3 pb-3 shrink-0 space-y-1.5">
-
-        {/* 附件 chip */}
-        {attachment && (
-          <div className="flex items-center gap-2 px-1">
-            <AttachmentChip
-              attachment={attachment}
-              onRemove={() => setAttachment(null)}
-            />
-            <span className="text-[10px] text-gray-400 flex items-center gap-1">
-              <span>{KIND_ICON[attachment.kind]}</span>
-              <span>{KIND_LABEL[attachment.kind]} 已就绪，发送时自动识别意图</span>
-            </span>
-          </div>
-        )}
-
+      <div className="px-3 pb-3 shrink-0">
         <div className={[
-          'flex items-end gap-2 rounded-xl border p-2 transition-all duration-200',
+          'rounded-2xl border transition-all duration-200 shadow-sm',
           isRunning
-            ? 'border-gray-100 bg-gray-50 opacity-70'
-            : 'border-gray-200 bg-white focus-within:border-orange-300 focus-within:shadow-sm focus-within:shadow-orange-50',
+            ? 'border-gray-100 bg-gray-50/80 opacity-80'
+            : 'border-gray-200 bg-white focus-within:border-orange-300 focus-within:shadow-md focus-within:shadow-orange-50/60',
         ].join(' ')}>
 
-          {/* 附件按钮（提示粘贴方式） */}
-          <button
-            className="shrink-0 w-6 h-6 flex items-center justify-center text-gray-300 hover:text-orange-400 transition-colors"
-            title="粘贴 JSON / 音频文件到输入框即可附加"
-            onClick={() => textareaRef.current?.focus()}
-          >
-            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5}
-                d="M15.172 7l-6.586 6.586a2 2 0 102.828 2.828l6.414-6.586a4 4 0 00-5.656-5.656l-6.415 6.585a6 6 0 108.486 8.486L20.5 13" />
-            </svg>
-          </button>
-
-          <textarea
-            ref={textareaRef}
-            value={input}
-            onChange={(e) => {
-              setInput(e.target.value)
-              e.target.style.height = 'auto'
-              e.target.style.height = Math.min(e.target.scrollHeight, 120) + 'px'
-            }}
-            onKeyDown={handleKeyDown}
-            onPaste={handlePaste}
-            disabled={isRunning || !sessionId}
-            placeholder={placeholder}
-            rows={1}
-            style={{ minHeight: '32px', maxHeight: '120px' }}
-            className={[
-              'flex-1 text-sm resize-none bg-transparent outline-none leading-relaxed py-0.5',
-              isRunning || !sessionId ? 'text-gray-300 cursor-not-allowed' : 'text-gray-700 placeholder:text-gray-300',
-            ].join(' ')}
-          />
-
-          {/* 发送按钮 */}
-          <button
-            onClick={handleSend}
-            disabled={!input.trim() || isRunning || !sessionId}
-            className={[
-              'shrink-0 w-7 h-7 rounded-lg flex items-center justify-center transition-all duration-150',
-              !input.trim() || isRunning || !sessionId
-                ? 'bg-gray-100 text-gray-300 cursor-not-allowed'
-                : 'bg-orange-500 text-white hover:bg-orange-600 active:scale-90 shadow-sm shadow-orange-200',
-            ].join(' ')}
-          >
-            {isRunning ? (
-              <svg className="animate-spin w-3.5 h-3.5" fill="none" viewBox="0 0 24 24">
-                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+          {/* ── 顶部工具栏：专家角色（左）+ 上下文用量（右）── */}
+          <div className="flex items-center justify-between px-3 pt-2.5 pb-1">
+            {/* 左：专家角色选择按钮 */}
+            <button
+              onClick={() => setShowRolePanel(true)}
+              disabled={isRunning}
+              className="flex items-center gap-1.5 px-2 py-1 rounded-lg hover:bg-gray-50 transition-colors group disabled:opacity-50 disabled:cursor-not-allowed"
+              title="切换专家角色"
+            >
+              <span className="text-base leading-none">{activeRoleIcon}</span>
+              <span className="text-[11px] font-semibold text-gray-700 max-w-[80px] truncate group-hover:text-orange-600 transition-colors">
+                {activeRoleName}
+              </span>
+              <svg className="w-3 h-3 text-gray-300 group-hover:text-orange-400 transition-colors shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
               </svg>
-            ) : (
-              <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M5 12h14M12 5l7 7-7 7" />
-              </svg>
-            )}
-          </button>
+            </button>
+
+            {/* 右：上下文用量圆形指示器 */}
+            {(() => {
+              // 用消息数估算上下文占用（每条消息约 500 token，上限 128k）
+              const estTokens = messages.reduce((acc, m) => acc + (m.content?.length ?? 0), 0)
+              const pct = Math.min(99, Math.round(estTokens / 1280))
+              const color = pct >= 80 ? 'text-red-500 bg-red-50 border-red-100'
+                          : pct >= 50 ? 'text-orange-500 bg-orange-50 border-orange-100'
+                          : 'text-gray-500 bg-gray-50 border-gray-100'
+              return (
+                <button
+                  onClick={() => {
+                    useChatStore.setState({ messages: [], todos: [], todoSummary: '', todoDomain: '' })
+                  }}
+                  title={`上下文已用约 ${pct}%，点击清空对话`}
+                  className={`flex items-center gap-1 px-2 py-0.5 rounded-full border text-[10px] font-bold transition-all hover:scale-105 ${color}`}
+                >
+                  <span className="tabular-nums">{pct}%</span>
+                  <svg className="w-2.5 h-2.5 opacity-60" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                  </svg>
+                </button>
+              )
+            })()}
+          </div>
+
+          {/* ── Tiptap 富文本输入框 ── */}
+          <div className="px-3 pb-1">
+            <RichInput
+              disabled={isRunning || !sessionId}
+              placeholder={placeholder}
+              onSend={handleRichSend}
+              onPaste={handlePaste as unknown as (e: ClipboardEvent) => void}
+              insertTextRef={insertTextRef}
+              sendRef={richSendRef}
+              insertMentionRef={insertMentionRef}
+              onImageUploadStatus={(status, name) => {
+                setImgUploadTip({ status, name: name ?? '' })
+              }}
+            />
+          </div>
+
+          {/* ── 底部工具栏 ── */}
+          <div className="flex items-center justify-between px-2.5 pb-2.5 pt-1">
+
+            {/* 左侧：模型选择 + 上传状态提示 */}
+            <div className="flex items-center gap-1.5">
+              {/* 模型选择按钮（占位，后续接真实模型列表） */}
+              <button
+                className="flex items-center gap-1 px-2 py-1 rounded-lg hover:bg-gray-50 transition-colors group"
+                title="选择模型"
+              >
+                <span className="w-4 h-4 rounded-md bg-gray-800 flex items-center justify-center shrink-0">
+                  <span className="text-[7px] font-black text-white leading-none">EP</span>
+                </span>
+                <span className="text-[10px] text-gray-500 font-medium group-hover:text-gray-700 transition-colors hidden sm:inline">默认模型</span>
+                <svg className="w-2.5 h-2.5 text-gray-300 group-hover:text-gray-500 transition-colors" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+                </svg>
+              </button>
+
+              {/* 上传状态提示 */}
+              {imgUploadTip && (
+                <span className={[
+                  'text-[10px] flex items-center gap-1 transition-all',
+                  imgUploadTip.status === 'uploading' ? 'text-orange-400' :
+                  imgUploadTip.status === 'done'      ? 'text-green-500'  : 'text-red-400',
+                ].join(' ')}>
+                  {imgUploadTip.status === 'uploading' && (
+                    <svg className="w-2.5 h-2.5 animate-spin shrink-0" fill="none" viewBox="0 0 24 24">
+                      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+                    </svg>
+                  )}
+                  {imgUploadTip.status === 'done'  && <span>✓</span>}
+                  {imgUploadTip.status === 'error' && <span>✕</span>}
+                  <span className="truncate max-w-[100px]">
+                    {imgUploadTip.status === 'uploading' ? `上传中...` :
+                     imgUploadTip.status === 'done'      ? `已引用` : `上传失败`}
+                  </span>
+                </span>
+              )}
+            </div>
+
+            {/* 右侧：联网 + 语音 + 发送 */}
+            <div className="flex items-center gap-1.5">
+              {/* 联网模式按钮 */}
+              <button
+                className="w-7 h-7 rounded-lg flex items-center justify-center text-gray-400 hover:text-gray-600 hover:bg-gray-50 transition-all"
+                title="联网搜索（暂未开放）"
+              >
+                <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.8}
+                    d="M21 12a9 9 0 01-9 9m9-9a9 9 0 00-9-9m9 9H3m9 9a9 9 0 01-9-9m9 9c1.657 0 3-4.03 3-9s-1.343-9-3-9m0 18c-1.657 0-3-4.03-3-9s1.343-9 3-9m-9 9a9 9 0 019-9" />
+                </svg>
+              </button>
+
+              {/* 语音输入按钮 */}
+              <button
+                className="w-7 h-7 rounded-lg flex items-center justify-center text-gray-400 hover:text-gray-600 hover:bg-gray-50 transition-all"
+                title="语音输入（暂未开放）"
+              >
+                <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.8}
+                    d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z" />
+                </svg>
+              </button>
+
+              {/* 发送按钮 */}
+              <button
+                onClick={handleSendButton}
+                disabled={isRunning || !sessionId}
+                className={[
+                  'w-7 h-7 rounded-lg flex items-center justify-center transition-all duration-150',
+                  isRunning || !sessionId
+                    ? 'bg-gray-100 text-gray-300 cursor-not-allowed'
+                    : 'bg-orange-500 text-white hover:bg-orange-600 active:scale-90 shadow-sm shadow-orange-200',
+                ].join(' ')}
+                title="发送（Enter）"
+              >
+                {isRunning ? (
+                  <svg className="animate-spin w-3.5 h-3.5" fill="none" viewBox="0 0 24 24">
+                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+                  </svg>
+                ) : (
+                  <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M5 12h14M12 5l7 7-7 7" />
+                  </svg>
+                )}
+              </button>
+            </div>
+          </div>
         </div>
-
-        <p className="text-[10px] text-gray-300 text-right pr-0.5">
-          Enter 发送 · Shift+Enter 换行 · 粘贴文件自动识别
-        </p>
       </div>
+
+      {/* 删除对话确认弹窗（自制，替代 window.confirm） */}
+      {deleteConfirmSessionId && (() => {
+        const sess = allSessions.find((s) => s.id === deleteConfirmSessionId)
+        return (
+          <ConfirmDialog
+            title="删除对话"
+            description={
+              <>
+                确定删除对话
+                <span className="font-medium text-gray-700">「{sess?.title || '新对话'}」</span>
+                吗？消息记录将一并删除且不可恢复。
+              </>
+            }
+            confirmText="删除"
+            variant="danger"
+            onConfirm={handleConfirmDeleteSession}
+            onCancel={() => setDeleteConfirmSessionId(null)}
+          />
+        )
+      })()}
     </div>
   )
 }

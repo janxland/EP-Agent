@@ -1,0 +1,843 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<!--
+  EP-Agent H5 模板：苹果风格（Apple）v2.0
+  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  可替换变量（ 格式）：
+    坠落星空           — 曲名
+    EP-Agent        — 作曲者
+    120             — 速度
+    C 大调             — 调号
+    7      — 音符数
+    0:04        — 时长字符串 (mm:ss)
+    4000     — 时长毫秒（JS 播放器用）
+    ABC Notation    — 格式标签 (MIDI/ABC/Sky JSON)
+    [{"pitch": "E4", "midi": 64, "time_ms": 0, "duration_ms": 400}, {"pitch": "G4", "midi": 67, "time_ms": 400, "duration_ms": 400}, {"pitch": "A4", "midi": 69, "time_ms": 800, "duration_ms": 600}, {"pitch": "C5", "midi": 72, "time_ms": 1400, "duration_ms": 800}, {"pitch": "B4", "midi": 71, "time_ms": 2200, "duration_ms": 400}, {"pitch": "D5", "midi": 74, "time_ms": 2800, "duration_ms": 500}, {"pitch": "E5", "midi": 76, "time_ms": 3400, "duration_ms": 600}]      — 音符数据 JSON 数组字符串
+    [1.0, 0.25, 0.05, 0.25, 0.5, 0.25, 0.05, 0.25, 0.5, 0.25, 0.05, 0.05, 0.05, 0.25, 0.5, 0.25, 0.05, 0.05, 0.05, 0.05, 0.05, 0.25, 0.5, 0.25, 0.05, 0.05, 0.05, 0.25, 0.5, 0.25, 0.05, 0.05, 0.05, 0.25, 0.5, 0.25, 0.05, 0.05, 0.05, 0.05]   — 波形数据 JSON 数组字符串
+    X:1\nT:\u5760\u843d\u661f\u7a7a\nM:4/4\nK:C\n|: E2 GA c2 BA | G4 E2 D2 | E8 :|     — ABC Notation 字符串（JSON转义后）
+            — MIDI base64 字符串（可选）
+           — 视频链接（可选）
+          — 额外说明文字
+    apple           — 主题变体
+    #FF375F    — 强调色 hex，如 #FF375F
+    #0A0A0F        — 背景色 hex，如 #0A0A0F
+    rgba(28,28,30,0.85)         — 卡片背景 rgba
+    #FFFFFF      — 主文字色
+    rgba(255,255,255,0.55)        — 次要文字色 rgba
+    linear-gradient(135deg, #1a0010 0%, #0A0A0F 50%, #001020 100%)        — 背景渐变 CSS 值
+    invert(1) brightness(0.9)  — ABC 乐谱 SVG 滤镜
+    <div class="cover-composer">EP-Agent</div>   — 作曲者 HTML 片段
+    <div class="meta-item"><div class="meta-icon-wrap">🎹</div><div><div class="meta-val">EP-Agent</div><div class="meta-label">作曲</div></div></div>   — 作曲者元数据行 HTML
+    <span class="pill">7 音符</span> — 音符数胶囊标签 HTML
+    <span class="pill sub">0:04</span>   — 时长胶囊标签 HTML
+          — 额外信息 HTML 块
+    <div class="card" data-card><div class="section-title">🎼 乐谱</div><div class="abc-output"><div id="abcContainer"></div></div></div>     — ABC 乐谱渲染区块 HTML
+       — 视频嵌入区块 HTML
+-->
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<meta name="theme-color" content="#0A0A0F">
+<title>坠落星空 — EP-Agent</title>
+<meta property="og:title" content="坠落星空">
+<meta property="og:description" content="7 音符 · 0:04 · ABC Notation">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/abcjs/6.4.4/abcjs-basic-min.js"></script>
+<style>
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+:root {
+  --bg:          #0A0A0F;
+  --card-bg:     rgba(28,28,30,0.85);
+  --text:        #FFFFFF;
+  --text-sub:    rgba(255,255,255,0.55);
+  --accent:      #FF375F;
+  --gradient:    linear-gradient(135deg, #1a0010 0%, #0A0A0F 50%, #001020 100%);
+  --blur:        24px;
+  --blur-heavy:  40px;
+  --border:      rgba(255,255,255,0.07);
+  --border-hi:   rgba(255,255,255,0.14);
+  --pill-bg:     rgba(255,255,255,0.08);
+  --glow:        color-mix(in srgb, var(--accent) 35%, transparent);
+  --glow-hi:     color-mix(in srgb, var(--accent) 55%, transparent);
+  --safe-top:    env(safe-area-inset-top, 0px);
+  --safe-bot:    env(safe-area-inset-bottom, 0px);
+  --radius-card: 24px;
+  --radius-pill: 50px;
+}
+
+/* ── 预加载 ─────────────────────────────────────────────────── */
+#preloader {
+  position: fixed; inset: 0; z-index: 9999;
+  background: var(--bg);
+  display: flex; flex-direction: column;
+  align-items: center; justify-content: center; gap: 28px;
+  transition: opacity 0.9s cubic-bezier(0.4,0,0.2,1),
+              transform 0.9s cubic-bezier(0.4,0,0.2,1);
+}
+#preloader.hide { opacity: 0; transform: scale(1.04); pointer-events: none; }
+
+.pre-card {
+  width: 88px; height: 88px; border-radius: 26px;
+  background: linear-gradient(145deg,
+    color-mix(in srgb, var(--accent) 80%, #fff),
+    color-mix(in srgb, var(--accent) 40%, #000));
+  display: flex; align-items: center; justify-content: center;
+  font-size: 40px; position: relative;
+  box-shadow: 0 0 0 0 var(--glow);
+  animation: preCardPulse 2s ease-in-out infinite;
+}
+.pre-card::before {
+  content: '';
+  position: absolute; inset: -1px; border-radius: 27px;
+  background: linear-gradient(135deg, var(--border-hi), transparent 60%);
+  pointer-events: none;
+}
+@keyframes preCardPulse {
+  0%,100% { box-shadow: 0 0 0 0 var(--glow), 0 20px 60px rgba(0,0,0,0.5); transform: translateY(0); }
+  50%      { box-shadow: 0 0 0 16px transparent, 0 28px 70px rgba(0,0,0,0.6); transform: translateY(-4px); }
+}
+
+.pre-info { text-align: center; }
+.pre-title { font-size: 17px; font-weight: 600; color: var(--text); margin-bottom: 4px; letter-spacing: -0.01em; }
+.pre-sub   { font-size: 13px; color: var(--text-sub); letter-spacing: 0.04em; }
+
+.pre-bar-wrap {
+  width: 200px; height: 2px;
+  background: rgba(255,255,255,0.08);
+  border-radius: 2px; overflow: hidden; position: relative;
+}
+.pre-bar {
+  height: 100%; width: 0%; background: var(--accent);
+  border-radius: 2px; transition: width 0.06s linear;
+  position: relative;
+}
+.pre-bar::after {
+  content: '';
+  position: absolute; right: 0; top: -2px;
+  width: 20px; height: 6px; border-radius: 3px;
+  background: color-mix(in srgb, var(--accent) 80%, #fff);
+  filter: blur(4px);
+}
+
+/* ── 基础 ───────────────────────────────────────────────────── */
+html, body {
+  width: 100%; height: 100%;
+  background: var(--bg); color: var(--text);
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display",
+               "PingFang SC", "Helvetica Neue", sans-serif;
+  -webkit-font-smoothing: antialiased;
+  overflow-x: hidden;
+}
+
+/* ── 封面层 ─────────────────────────────────────────────────── */
+.cover-layer {
+  position: fixed; top: 0; left: 0; right: 0; height: 100dvh;
+  background: var(--gradient);
+  z-index: 100;
+  display: flex; flex-direction: column;
+  align-items: center; justify-content: flex-end;
+  padding: calc(var(--safe-top) + 20px) 24px calc(var(--safe-bot) + 40px);
+  transition: transform 0.65s cubic-bezier(0.32,0.72,0,1),
+              opacity   0.65s cubic-bezier(0.32,0.72,0,1);
+  will-change: transform, opacity;
+  overflow: hidden;
+  opacity: 0;
+}
+.cover-layer.visible { opacity: 1; }
+.cover-layer.pulled  { transform: translateY(-100%); opacity: 0; pointer-events: none; }
+
+.cover-bg-canvas { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; opacity: 0.25; }
+
+/* 封面底部渐变遮罩 */
+.cover-layer::after {
+  content: '';
+  position: absolute; bottom: 0; left: 0; right: 0; height: 55%;
+  background: linear-gradient(to top, rgba(0,0,0,0.65) 0%, transparent 100%);
+  pointer-events: none; z-index: 1;
+}
+
+.cover-content { position: relative; z-index: 2; width: 100%; max-width: 400px; text-align: center; }
+
+/* 旋转唱片 — 多层光晕版 */
+.disc-wrap {
+  width: 180px; height: 180px; margin: 0 auto 32px;
+  position: relative; display: flex; align-items: center; justify-content: center;
+}
+.disc-glow {
+  position: absolute; inset: -20px; border-radius: 50%;
+  background: radial-gradient(circle, var(--glow-hi) 0%, transparent 70%);
+  animation: glowPulse 3s ease-in-out infinite;
+}
+@keyframes glowPulse {
+  0%,100% { opacity: 0.6; transform: scale(1); }
+  50%      { opacity: 1;   transform: scale(1.12); }
+}
+.disc-ring {
+  position: absolute; inset: -6px; border-radius: 50%;
+  border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent);
+  animation: ringRotate 20s linear infinite paused;
+}
+.disc-ring.playing { animation-play-state: running; }
+@keyframes ringRotate { to { transform: rotate(360deg); } }
+
+.cover-disc {
+  width: 180px; height: 180px; border-radius: 50%;
+  background: conic-gradient(
+    var(--accent) 0deg,
+    color-mix(in srgb, var(--accent) 60%, #fff) 90deg,
+    color-mix(in srgb, var(--accent) 30%, #000) 200deg,
+    var(--accent) 360deg
+  );
+  display: flex; align-items: center; justify-content: center;
+  box-shadow:
+    0 0 0 1px var(--border-hi),
+    0 0 60px var(--glow),
+    0 30px 80px rgba(0,0,0,0.6);
+  animation: discSpin 12s linear infinite paused;
+  position: relative;
+  flex-shrink: 0;
+}
+.cover-disc.playing { animation-play-state: running; }
+.cover-disc::after {
+  content: ""; position: absolute;
+  width: 56px; height: 56px; border-radius: 50%;
+  background: var(--bg);
+  box-shadow: inset 0 2px 12px rgba(0,0,0,0.6), 0 0 0 1px var(--border);
+}
+@keyframes discSpin { to { transform: rotate(360deg); } }
+
+/* 渐变文字标题 */
+.cover-title {
+  font-size: clamp(24px, 7vw, 38px); font-weight: 800;
+  letter-spacing: -0.03em; line-height: 1.1; margin-bottom: 8px;
+  background: linear-gradient(135deg, var(--text) 30%, color-mix(in srgb, var(--text) 60%, var(--accent)));
+  -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+.cover-composer { font-size: 14px; color: var(--text-sub); margin-bottom: 20px; letter-spacing: 0.02em; }
+
+/* 胶囊标签行 */
+.pills-row { display: flex; gap: 7px; justify-content: center; flex-wrap: wrap; margin-bottom: 26px; }
+.pill {
+  padding: 5px 13px; border-radius: var(--radius-pill);
+  background: var(--pill-bg); border: 1px solid var(--border);
+  font-size: 11px; font-weight: 600; color: var(--accent);
+  letter-spacing: 0.05em;
+  backdrop-filter: blur(var(--blur)); -webkit-backdrop-filter: blur(var(--blur));
+}
+.pill.sub { color: var(--text-sub); font-weight: 500; }
+
+/* 波形 — 渐变圆角版 */
+.waveform-wrap {
+  width: 100%; height: 60px;
+  display: flex; align-items: flex-end; gap: 2.5px;
+  margin-bottom: 24px; padding: 8px 10px 0;
+  background: rgba(255,255,255,0.04);
+  border: 1px solid var(--border);
+  border-radius: 16px; overflow: hidden;
+  position: relative;
+}
+.wave-bar {
+  flex: 1; border-radius: 3px 3px 0 0; min-height: 3px;
+  background: linear-gradient(to top, var(--accent), color-mix(in srgb, var(--accent) 60%, #fff));
+  opacity: 0.45;
+  transition: opacity 0.08s, transform 0.08s;
+  transform-origin: bottom;
+}
+.wave-bar.active {
+  opacity: 1;
+  transform: scaleY(1.15);
+  filter: drop-shadow(0 0 4px var(--accent));
+}
+
+/* 进度条 */
+.progress-wrap {
+  width: 100%; height: 3px; background: rgba(255,255,255,0.1);
+  border-radius: 3px; margin-bottom: 10px; position: relative; cursor: pointer;
+}
+.progress-fill {
+  height: 100%; width: 0%; background: var(--accent); border-radius: 3px;
+  transition: width 0.1s linear; position: relative;
+}
+.progress-fill::after {
+  content: '';
+  position: absolute; right: -5px; top: -4px;
+  width: 11px; height: 11px; border-radius: 50%;
+  background: var(--text); border: 2px solid var(--accent);
+  box-shadow: 0 0 8px var(--glow);
+  opacity: 0; transition: opacity 0.2s;
+}
+.progress-wrap:hover .progress-fill::after { opacity: 1; }
+.progress-time {
+  display: flex; justify-content: space-between;
+  font-size: 10px; color: var(--text-sub); margin-bottom: 18px;
+  letter-spacing: 0.04em;
+}
+
+/* 播放控件 */
+.player-controls { display: flex; align-items: center; justify-content: center; gap: 16px; margin-bottom: 26px; }
+.ctrl-btn {
+  width: 48px; height: 48px; border-radius: 50%; border: none; cursor: pointer;
+  display: flex; align-items: center; justify-content: center; font-size: 18px;
+  background: var(--pill-bg); color: var(--text);
+  border: 1px solid var(--border);
+  backdrop-filter: blur(var(--blur)); -webkit-backdrop-filter: blur(var(--blur));
+  transition: transform 0.12s cubic-bezier(0.34,1.56,0.64,1), opacity 0.12s, background 0.2s;
+  -webkit-tap-highlight-color: transparent;
+}
+.ctrl-btn:active { transform: scale(0.84); opacity: 0.7; }
+.ctrl-btn:hover  { background: rgba(255,255,255,0.14); }
+.ctrl-btn.primary {
+  width: 72px; height: 72px; font-size: 28px;
+  background: var(--accent); color: #fff;
+  border-color: transparent;
+  box-shadow: 0 12px 36px var(--glow), 0 0 0 0 var(--glow);
+  animation: playBtnGlow 3s ease-in-out infinite;
+}
+@keyframes playBtnGlow {
+  0%,100% { box-shadow: 0 12px 36px var(--glow); }
+  50%      { box-shadow: 0 16px 48px var(--glow-hi); }
+}
+.ctrl-btn.primary:active { transform: scale(0.88); }
+
+/* 下拉提示 */
+.pull-hint {
+  display: flex; flex-direction: column; align-items: center; gap: 8px;
+  color: var(--text-sub); font-size: 11px; letter-spacing: 0.06em;
+  text-transform: uppercase;
+  animation: hintFloat 2.5s ease-in-out infinite;
+}
+.pull-chevron {
+  display: flex; flex-direction: column; gap: 3px; align-items: center;
+}
+.pull-chevron span {
+  display: block; width: 20px; height: 1.5px;
+  background: var(--text-sub); border-radius: 2px;
+  transform-origin: center;
+}
+.pull-chevron span:first-child { transform: rotate(30deg) translateX(4px); }
+.pull-chevron span:last-child  { transform: rotate(-30deg) translateX(-4px); }
+@keyframes hintFloat {
+  0%,100% { transform: translateY(0); opacity: 0.45; }
+  50%      { transform: translateY(6px); opacity: 0.9; }
+}
+
+/* ── 详情层 ─────────────────────────────────────────────────── */
+.detail-layer {
+  position: relative; z-index: 1;
+  padding-top: 100dvh; min-height: 200dvh;
+  background: var(--bg);
+}
+.detail-inner {
+  padding: 40px 18px calc(var(--safe-bot) + 64px);
+  max-width: 480px; margin: 0 auto;
+}
+
+/* 卡片 */
+.card {
+  background: var(--card-bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-card);
+  padding: 22px 20px; margin-bottom: 14px;
+  backdrop-filter: blur(var(--blur-heavy)); -webkit-backdrop-filter: blur(var(--blur-heavy));
+  opacity: 0; transform: translateY(28px) scale(0.98);
+  transition: opacity 0.55s cubic-bezier(0.4,0,0.2,1),
+              transform 0.55s cubic-bezier(0.4,0,0.2,1);
+  position: relative; overflow: hidden;
+}
+.card::before {
+  content: '';
+  position: absolute; top: 0; left: 0; right: 0; height: 1px;
+  background: linear-gradient(90deg, transparent, var(--border-hi) 40%, var(--accent) 50%, var(--border-hi) 60%, transparent);
+  opacity: 0.7;
+}
+.card.visible { opacity: 1; transform: translateY(0) scale(1); }
+
+.section-title {
+  font-size: 11px; font-weight: 700; color: var(--text-sub);
+  text-transform: uppercase; letter-spacing: 0.12em; margin-bottom: 16px;
+  display: flex; align-items: center; gap: 8px;
+}
+.section-title::after {
+  content: ''; flex: 1; height: 1px;
+  background: linear-gradient(to right, var(--border-hi), transparent);
+}
+
+/* 元数据网格 */
+.meta-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+.meta-item { display: flex; align-items: center; gap: 12px; }
+.meta-icon-wrap {
+  width: 36px; height: 36px; border-radius: 10px; flex-shrink: 0;
+  background: rgba(255,255,255,0.06); border: 1px solid var(--border);
+  display: flex; align-items: center; justify-content: center; font-size: 17px;
+}
+.meta-val  { font-size: 14px; font-weight: 600; line-height: 1.3; }
+.meta-label { color: var(--text-sub); font-size: 10px; margin-top: 2px; letter-spacing: 0.04em; }
+
+/* 音符瀑布 */
+.notes-waterfall {
+  height: 130px; border-radius: 14px;
+  background: rgba(255,255,255,0.03);
+  border: 1px solid var(--border); overflow: hidden;
+}
+.notes-canvas { width: 100%; height: 100%; }
+
+/* ABC 乐谱 */
+.abc-output {
+  background: rgba(255,255,255,0.03);
+  border: 1px solid var(--border);
+  border-radius: 16px; padding: 16px; overflow-x: auto; margin-top: 12px;
+}
+.abc-output svg { max-width: 100%; filter: invert(1) brightness(0.9); }
+
+/* 视频区 */
+.video-wrap { border-radius: 16px; overflow: hidden; background: #000; aspect-ratio: 16/9; margin-top: 12px; }
+.video-wrap video { width: 100%; height: 100%; object-fit: cover; }
+
+/* 分享区 */
+.share-section { text-align: center; padding: 28px 0 0; }
+.share-btn {
+  display: inline-flex; align-items: center; gap: 10px;
+  padding: 16px 40px; border-radius: var(--radius-pill);
+  background: var(--accent); color: #fff;
+  font-size: 15px; font-weight: 600; border: none; cursor: pointer;
+  box-shadow: 0 12px 36px var(--glow);
+  transition: transform 0.15s cubic-bezier(0.34,1.56,0.64,1), box-shadow 0.2s;
+  -webkit-tap-highlight-color: transparent;
+}
+.share-btn:active { transform: scale(0.93); box-shadow: 0 6px 20px var(--glow); }
+.share-btn:hover  { box-shadow: 0 16px 48px var(--glow-hi); }
+.brand-tag { margin-top: 16px; font-size: 11px; color: var(--text-sub); letter-spacing: 0.06em; }
+
+/* 返回封面按钮 */
+.back-btn {
+  position: fixed; bottom: calc(var(--safe-bot) + 28px); right: 20px;
+  z-index: 200; width: 48px; height: 48px; border-radius: 50%;
+  background: var(--card-bg); border: 1px solid var(--border-hi);
+  backdrop-filter: blur(var(--blur-heavy)); -webkit-backdrop-filter: blur(var(--blur-heavy));
+  display: flex; align-items: center; justify-content: center;
+  font-size: 18px; cursor: pointer; color: var(--text);
+  opacity: 0; transform: translateY(16px) scale(0.85);
+  transition: opacity 0.3s, transform 0.35s cubic-bezier(0.34,1.56,0.64,1);
+  -webkit-tap-highlight-color: transparent;
+  box-shadow: 0 8px 24px rgba(0,0,0,0.4);
+}
+.back-btn.visible { opacity: 1; transform: translateY(0) scale(1); }
+.back-btn:active  { transform: scale(0.88); }
+</style>
+</head>
+<body>
+
+<!-- 门户预加载 -->
+<div id="preloader">
+  <div class="pre-card">🎵</div>
+  <div class="pre-info">
+    <div class="pre-title">坠落星空</div>
+    <div class="pre-sub">正在加载乐谱...</div>
+  </div>
+  <div class="pre-bar-wrap"><div class="pre-bar" id="preBar"></div></div>
+</div>
+
+<div class="page-wrapper" id="pageWrapper">
+
+  <!-- 封面层 -->
+  <div class="cover-layer" id="coverLayer">
+    <canvas class="cover-bg-canvas" id="bgCanvas"></canvas>
+    <div class="cover-content">
+
+      <!-- 唱片 -->
+      <div class="disc-wrap">
+        <div class="disc-glow"></div>
+        <div class="disc-ring" id="discRing"></div>
+        <div class="cover-disc" id="coverDisc"></div>
+      </div>
+
+      <div class="cover-title">坠落星空</div>
+      <div class="cover-composer">EP-Agent</div>
+
+      <div class="pills-row">
+        <span class="pill">ABC Notation</span>
+        <span class="pill sub">♩ 120</span>
+        <span class="pill sub">C 大调 调</span>
+        <span class="pill">7 音符</span>
+        <span class="pill sub">0:04</span>
+      </div>
+
+      <div class="waveform-wrap" id="waveformWrap"></div>
+
+      <div class="progress-wrap" id="progressWrap">
+        <div class="progress-fill" id="progressFill"></div>
+      </div>
+      <div class="progress-time">
+        <span id="timeElapsed">0:00</span>
+        <span>0:04</span>
+      </div>
+
+      <div class="player-controls">
+        <button class="ctrl-btn" id="btnRestart" aria-label="重新开始">⏮</button>
+        <button class="ctrl-btn primary" id="btnPlay" aria-label="播放">▶</button>
+        <button class="ctrl-btn" id="btnStop" aria-label="停止">⏹</button>
+      </div>
+
+      <div class="pull-hint">
+        <div class="pull-chevron"><span></span><span></span></div>
+        <span>下拉查看详情</span>
+      </div>
+
+    </div>
+  </div>
+
+  <!-- 详情层 -->
+  <div class="detail-layer">
+    <div class="detail-inner">
+
+      <div class="card" data-card>
+        <div class="section-title">乐曲信息</div>
+        <div class="meta-grid">
+          <div class="meta-item">
+            <div class="meta-icon-wrap">🎵</div>
+            <div><div class="meta-val">坠落星空</div><div class="meta-label">曲名</div></div>
+          </div>
+          <div class="meta-item"><div class="meta-icon-wrap">🎹</div><div><div class="meta-val">EP-Agent</div><div class="meta-label">作曲</div></div></div>
+          <div class="meta-item">
+            <div class="meta-icon-wrap">🎼</div>
+            <div><div class="meta-val">C 大调</div><div class="meta-label">调号</div></div>
+          </div>
+          <div class="meta-item">
+            <div class="meta-icon-wrap">🥁</div>
+            <div><div class="meta-val">120 BPM</div><div class="meta-label">速度</div></div>
+          </div>
+          <div class="meta-item">
+            <div class="meta-icon-wrap">🎹</div>
+            <div><div class="meta-val">7</div><div class="meta-label">音符数</div></div>
+          </div>
+          <div class="meta-item">
+            <div class="meta-icon-wrap">⏱</div>
+            <div><div class="meta-val">0:04</div><div class="meta-label">时长</div></div>
+          </div>
+        </div>
+        
+      </div>
+
+      <div class="card" data-card>
+        <div class="section-title">音符可视化</div>
+        <div class="notes-waterfall"><canvas class="notes-canvas" id="notesCanvas"></canvas></div>
+      </div>
+
+      <div class="card" data-card><div class="section-title">🎼 乐谱</div><div class="abc-output"><div id="abcContainer"></div></div></div>
+      
+
+      <div class="share-section">
+        <button class="share-btn" id="shareBtn">
+          <span>📤</span><span>分享这首乐曲</span>
+        </button>
+        <div class="brand-tag">由 EP-Agent 生成 · 乐谱海报</div>
+      </div>
+
+    </div>
+  </div>
+</div>
+
+<button class="back-btn" id="backBtn" aria-label="返回封面">↑</button>
+
+<script>
+(function () {
+  'use strict';
+
+  /* ── 数据注入 ── */
+  const NOTES       = [{"pitch": "E4", "midi": 64, "time_ms": 0, "duration_ms": 400}, {"pitch": "G4", "midi": 67, "time_ms": 400, "duration_ms": 400}, {"pitch": "A4", "midi": 69, "time_ms": 800, "duration_ms": 600}, {"pitch": "C5", "midi": 72, "time_ms": 1400, "duration_ms": 800}, {"pitch": "B4", "midi": 71, "time_ms": 2200, "duration_ms": 400}, {"pitch": "D5", "midi": 74, "time_ms": 2800, "duration_ms": 500}, {"pitch": "E5", "midi": 76, "time_ms": 3400, "duration_ms": 600}];
+  const WAVEFORM    = [1.0, 0.25, 0.05, 0.25, 0.5, 0.25, 0.05, 0.25, 0.5, 0.25, 0.05, 0.05, 0.05, 0.25, 0.5, 0.25, 0.05, 0.05, 0.05, 0.05, 0.05, 0.25, 0.5, 0.25, 0.05, 0.05, 0.05, 0.25, 0.5, 0.25, 0.05, 0.05, 0.05, 0.25, 0.5, 0.25, 0.05, 0.05, 0.05, 0.05];
+  const ABC_CONTENT = "X:1\nT:\u5760\u843d\u661f\u7a7a\nM:4/4\nK:C\n|: E2 GA c2 BA | G4 E2 D2 | E8 :|";
+  const BPM         = 120;
+  const DURATION_MS = 4000;
+  const ACCENT      = '#FF375F';
+
+  /* ── 预加载进度条 ── */
+  const preloader = document.getElementById('preloader');
+  const preBar    = document.getElementById('preBar');
+  let pct = 0;
+  const loadTimer = setInterval(function () {
+    pct += Math.random() * 15 + 4;
+    if (pct >= 92) { clearInterval(loadTimer); pct = 92; }
+    preBar.style.width = pct + '%';
+  }, 70);
+
+  window.addEventListener('load', function () {
+    clearInterval(loadTimer);
+    preBar.style.width = '100%';
+    setTimeout(function () {
+      preloader.classList.add('hide');
+      setTimeout(function () {
+        preloader.style.display = 'none';
+        document.getElementById('coverLayer').classList.add('visible');
+        /* 卡片错落入场 */
+        document.querySelectorAll('[data-card]').forEach(function (c, i) {
+          setTimeout(function () { c.classList.add('visible'); }, i * 130);
+        });
+      }, 900);
+    }, 350);
+  });
+
+  /* ── 波形渲染 ── */
+  const waveWrap = document.getElementById('waveformWrap');
+  WAVEFORM.forEach(function (h) {
+    const bar = document.createElement('div');
+    bar.className = 'wave-bar';
+    bar.style.height = Math.max(4, Math.round(h * 48)) + 'px';
+    waveWrap.appendChild(bar);
+  });
+
+  /* ── Web Audio 播放器 ── */
+  let audioCtx = null, isPlaying = false, playStart = 0;
+  let scheduledNodes = [], animFrame = null;
+
+  function getCtx() {
+    if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    return audioCtx;
+  }
+
+  function fmtTime(ms) {
+    const s = Math.floor(ms / 1000);
+    return Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0');
+  }
+
+  function stopAll() {
+    scheduledNodes.forEach(function (n) { try { n.stop(0); } catch (e) {} });
+    scheduledNodes = [];
+    if (animFrame) { cancelAnimationFrame(animFrame); animFrame = null; }
+    isPlaying = false;
+    document.getElementById('btnPlay').textContent = '▶';
+    document.getElementById('coverDisc').classList.remove('playing');
+    document.getElementById('discRing').classList.remove('playing');
+    highlightWave(-1);
+    setProgress(0);
+  }
+
+  function playNotes(offsetMs) {
+    const ctx = getCtx();
+    if (ctx.state === 'suspended') ctx.resume();
+    stopAll();
+    const now = ctx.currentTime;
+    playStart = now - offsetMs / 1000;
+    isPlaying = true;
+    document.getElementById('btnPlay').textContent = '⏸';
+    document.getElementById('coverDisc').classList.add('playing');
+    document.getElementById('discRing').classList.add('playing');
+
+    NOTES.forEach(function (note) {
+      const t = note.time_ms / 1000, d = (note.duration_ms || 200) / 1000;
+      if (t < offsetMs / 1000) return;
+      const osc = ctx.createOscillator(), gain = ctx.createGain();
+      osc.connect(gain); gain.connect(ctx.destination);
+      const freq = note.midi
+        ? 440 * Math.pow(2, (note.midi - 69) / 12)
+        : 440;
+      osc.type = 'sine';
+      osc.frequency.setValueAtTime(freq, now + t);
+      const st = now + t;
+      gain.gain.setValueAtTime(0, st);
+      gain.gain.linearRampToValueAtTime(0.15, st + 0.012);
+      gain.gain.exponentialRampToValueAtTime(0.001, st + d);
+      osc.start(st); osc.stop(st + d + 0.06);
+      scheduledNodes.push(osc);
+    });
+
+    setTimeout(function () { if (isPlaying) stopAll(); },
+      Math.max(1000, (DURATION_MS - offsetMs) + 600));
+    animateProgress();
+  }
+
+  function setProgress(pct) {
+    document.getElementById('progressFill').style.width = (pct * 100) + '%';
+    document.getElementById('timeElapsed').textContent = fmtTime(pct * DURATION_MS);
+  }
+
+  function animateProgress() {
+    const bars  = waveWrap.querySelectorAll('.wave-bar');
+    const total = bars.length;
+    function tick() {
+      if (!isPlaying) return;
+      const elapsed = (getCtx().currentTime - playStart) * 1000;
+      const pct = Math.min(elapsed / (DURATION_MS || 1), 1);
+      setProgress(pct);
+      highlightWave(Math.floor(pct * total));
+      animFrame = requestAnimationFrame(tick);
+    }
+    animFrame = requestAnimationFrame(tick);
+  }
+
+  function highlightWave(idx) {
+    waveWrap.querySelectorAll('.wave-bar').forEach(function (b, i) {
+      b.classList.toggle('active', i === idx);
+    });
+  }
+
+  /* 进度条点击跳转 */
+  document.getElementById('progressWrap').addEventListener('click', function (e) {
+    if (!DURATION_MS) return;
+    const rect = this.getBoundingClientRect();
+    const pct  = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+    if (isPlaying) playNotes(pct * DURATION_MS);
+    else setProgress(pct);
+  });
+
+  /* 播放控件 */
+  document.getElementById('btnPlay').addEventListener('click', function () {
+    if (isPlaying) stopAll(); else playNotes(0);
+  });
+  document.getElementById('btnStop').addEventListener('click', stopAll);
+  document.getElementById('btnRestart').addEventListener('click', function () {
+    stopAll(); setTimeout(function () { playNotes(0); }, 60);
+  });
+
+  /* ── 音符瀑布 ── */
+  function drawNotes() {
+    const canvas = document.getElementById('notesCanvas');
+    if (!canvas || !NOTES.length) return;
+    const ctx2 = canvas.getContext('2d');
+    const W = canvas.offsetWidth || 320, H = canvas.offsetHeight || 130;
+    canvas.width = W * devicePixelRatio; canvas.height = H * devicePixelRatio;
+    ctx2.scale(devicePixelRatio, devicePixelRatio);
+    const maxT = NOTES.reduce(function (m, n) {
+      return Math.max(m, n.time_ms + (n.duration_ms || 200));
+    }, 1);
+    const pitches = [...new Set(NOTES.map(function (n) { return n.midi || n.pitch; }))].sort();
+    const rows = Math.max(pitches.length, 1);
+    const pitchIdx = {};
+    pitches.forEach(function (p, i) { pitchIdx[p] = i; });
+    ctx2.clearRect(0, 0, W, H);
+    NOTES.forEach(function (note) {
+      const x  = (note.time_ms / maxT) * W;
+      const pw = Math.max(3, ((note.duration_ms || 200) / maxT) * W);
+      const pi = pitchIdx[note.midi || note.pitch] || 0;
+      const y  = H - ((pi / rows) * (H - 8)) - 6;
+      const alpha = 0.55 + (pi / rows) * 0.35;
+      ctx2.globalAlpha = alpha;
+      const grad = ctx2.createLinearGradient(x, y, x + pw, y);
+      grad.addColorStop(0, ACCENT);
+      grad.addColorStop(1, ACCENT + '88');
+      ctx2.fillStyle = grad;
+      ctx2.beginPath();
+      if (ctx2.roundRect) ctx2.roundRect(x, y, pw, 5, 2.5);
+      else ctx2.rect(x, y, pw, 5);
+      ctx2.fill();
+    });
+    ctx2.globalAlpha = 1;
+  }
+
+  /* ── ABC 渲染 ── */
+  function renderAbc() {
+    const container = document.getElementById('abcContainer');
+    if (!container || !ABC_CONTENT || !window.ABCJS) return;
+    try { ABCJS.renderAbc('abcContainer', ABC_CONTENT, { responsive: 'resize' }); }
+    catch (e) {}
+  }
+
+  /* ── 背景粒子 ── */
+  function initBg() {
+    const canvas = document.getElementById('bgCanvas');
+    if (!canvas) return;
+    const ctx3 = canvas.getContext('2d');
+    let W = canvas.offsetWidth, H = canvas.offsetHeight;
+    canvas.width = W; canvas.height = H;
+    const pts = Array.from({ length: 50 }, function () {
+      return {
+        x: Math.random() * W, y: Math.random() * H,
+        r: Math.random() * 2.2 + 0.4,
+        vx: (Math.random() - 0.5) * 0.3, vy: (Math.random() - 0.5) * 0.3,
+        o: Math.random() * 0.35 + 0.1
+      };
+    });
+    function draw() {
+      ctx3.clearRect(0, 0, W, H);
+      pts.forEach(function (p) {
+        p.x += p.vx; p.y += p.vy;
+        if (p.x < 0) p.x = W; if (p.x > W) p.x = 0;
+        if (p.y < 0) p.y = H; if (p.y > H) p.y = 0;
+        ctx3.beginPath(); ctx3.arc(p.x, p.y, p.r, 0, Math.PI * 2);
+        ctx3.fillStyle = ACCENT; ctx3.globalAlpha = p.o; ctx3.fill();
+      });
+      ctx3.globalAlpha = 1;
+      requestAnimationFrame(draw);
+    }
+    draw();
+    window.addEventListener('resize', function () {
+      W = canvas.offsetWidth; H = canvas.offsetHeight;
+      canvas.width = W; canvas.height = H;
+    });
+  }
+
+  /* ── 下拉手势 ── */
+  const coverLayer = document.getElementById('coverLayer');
+  const backBtn    = document.getElementById('backBtn');
+  let coverPulled = false, touchStartY = 0;
+
+  document.addEventListener('touchstart', function (e) {
+    touchStartY = e.touches[0].clientY;
+  }, { passive: true });
+  document.addEventListener('touchmove', function (e) {
+    if (!coverPulled && e.touches[0].clientY - touchStartY < -55 && window.scrollY < 10) pullCover();
+  }, { passive: true });
+  document.addEventListener('wheel', function (e) {
+    if (!coverPulled && e.deltaY > 60) pullCover();
+  }, { passive: true });
+
+  function pullCover() {
+    if (coverPulled) return;
+    coverPulled = true;
+    coverLayer.classList.add('pulled');
+    setTimeout(function () {
+      window.scrollTo({ top: window.innerHeight * 0.4, behavior: 'smooth' });
+    }, 200);
+    backBtn.classList.add('visible');
+  }
+
+  backBtn.addEventListener('click', function () {
+    coverPulled = false;
+    coverLayer.classList.remove('pulled');
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+    backBtn.classList.remove('visible');
+  });
+
+  window.addEventListener('scroll', function () {
+    if (window.scrollY > window.innerHeight * 0.25) {
+      if (!coverPulled) { coverPulled = true; coverLayer.classList.add('pulled'); }
+      backBtn.classList.add('visible');
+    } else {
+      backBtn.classList.remove('visible');
+    }
+  }, { passive: true });
+
+  /* ── 分享 ── */
+  document.getElementById('shareBtn').addEventListener('click', function () {
+    const label = document.querySelector('.share-btn span:last-child');
+    if (navigator.share) {
+      navigator.share({ title: '坠落星空', url: location.href }).catch(function () {});
+    } else {
+      navigator.clipboard.writeText(location.href).then(function () {
+        label.textContent = '✓ 链接已复制';
+        setTimeout(function () { label.textContent = '分享这首乐曲'; }, 2200);
+      }).catch(function () {});
+    }
+  });
+
+  /* ── IntersectionObserver 卡片入场 ── */
+  if ('IntersectionObserver' in window) {
+    const obs = new IntersectionObserver(function (entries) {
+      entries.forEach(function (e) {
+        if (e.isIntersecting) { e.target.classList.add('visible'); obs.unobserve(e.target); }
+      });
+    }, { threshold: 0.12 });
+    document.querySelectorAll('[data-card]').forEach(function (el) { obs.observe(el); });
+  }
+
+  /* ── 初始化 ── */
+  window.addEventListener('load', function () {
+    initBg(); drawNotes(); renderAbc();
+  });
+  window.addEventListener('resize', drawNotes);
+
+}());
+</script>
+</body>
+</html>

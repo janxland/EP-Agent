@@ -214,6 +214,23 @@ export function subscribeToSession(
       es?.close()
       es = null
       if (destroyed || retryCount >= MAX_RETRY) return
+      // 首次断线重连前：通知前端清空 store，避免 SSE replay 与已有历史消息重复
+      // 后续重连（retryCount > 0）不再重复通知，防止多次清空
+      if (retryCount === 0) {
+        try {
+          onEvent({
+            id: 'reconnecting',
+            type: 'connection.reconnecting',
+            session_id: sessionId,
+            display: false,
+            sequence: -1,
+            timestamp: new Date().toISOString(),
+            payload: {},
+          })
+        } catch {
+          // 忽略：前端若未处理此事件类型不影响重连逻辑
+        }
+      }
       // 指数退避重连（2s → 4s → 8s → … → 30s）
       const delay = Math.min(RETRY_BASE_MS * Math.pow(1.5, retryCount), RETRY_MAX_MS)
       retryCount++
@@ -359,7 +376,7 @@ export interface HistoryTodo {
   session_id: string
   title: string
   detail: string
-  status: 'pending' | 'running' | 'done' | 'failed'
+  status: 'pending' | 'running' | 'done' | 'failed' | 'skipped'  // skipped: finish_gate 跳过的未执行步骤
   domain: string
   summary: string
   created_at: string
@@ -381,18 +398,16 @@ export async function getSessionTodos(sessionId: string): Promise<{ session_id: 
 
 export interface UniversalChatRequest {
   message: string
-  attachment_content?: string   // 附件文本内容（JSON/TXT 等，已解码）
-  attachment_name?: string      // 附件文件名
-  attachment_b64?: string       // 音频附件 base64（音色克隆用）
+  attachment_content?: string          // 文本附件内容（ABC/JSON/TXT，可进 LLM context）
+  attachment_name?: string             // 附件文件名
+  attachment_workspace_path?: string   // 工作区相对路径（MIDI/图片/音频，后端 Runner 层处理，不传 base64）
+  attachment_b64?: string              // 音频 base64（仅音色克隆直接上传场景，其余留空）
 }
 
 export interface UniversalChatResponse {
-  domain: string                // convert | edit | audio | voice | query | convert+edit
-  message: string               // AI 回复文本
-  abc_updated: boolean
-  audio_url?: string
-  voice_id?: string
-  [key: string]: unknown
+  /** 后端实际返回 202 Accepted，结果全部通过 SSE 推送 */
+  status: string                // "accepted"
+  session_id: string
 }
 
 /**

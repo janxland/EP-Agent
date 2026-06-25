@@ -61,6 +61,8 @@ const DOMAIN_CONFIG: Record<string, { icon: string; label: string; color: string
   voice:          { icon: '🎤', label: '音色克隆',   color: 'text-indigo-600', bg: 'bg-indigo-50' },
   query:          { icon: '🔍', label: '查询分析',   color: 'text-amber-600',  bg: 'bg-amber-50'  },
   'convert+edit': { icon: '🎮', label: '解析并编辑', color: 'text-blue-600',   bg: 'bg-blue-50'   },
+  h5_create:      { icon: '🎨', label: 'H5 页面',    color: 'text-rose-600',   bg: 'bg-rose-50'   },
+  h5_edit:        { icon: '🖌️', label: 'H5 编辑',    color: 'text-orange-600', bg: 'bg-orange-50' },
 }
 
 // ─── 完成闪光动画（done 状态入场） ────────────────────────────────────────────

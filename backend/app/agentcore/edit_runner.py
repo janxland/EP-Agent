@@ -15,7 +15,7 @@ ABC Edit Runner — 纯 ABC 编辑逻辑层（v3.1 整合版）
   - 构造 ABC 编辑专用 system/user prompt
   - 调用 ReactExecutor 执行 ReAct Loop
   - 提取 ABC 和 SUMMARY（委托给 abc_utils）
-  - OutputAdapter：按 scene 追加格式转换（sky_json / midi_b64）
+  - OutputAdapter：按 scene 追加格式转换（sky_json / midi_url）
 
 不负责：
   - TODO 状态管理（由 EditAgent 负责）
@@ -48,17 +48,27 @@ MAX_EDIT_ROUNDS = 5  # edit 域最多 5 轮 ReAct
 _REACT_SUPPLEMENT = """
 ## ReAct 工作模式补充
 
-你在 ReAct 循环中工作（最多 3 轮）：
-1. **Thought**：理解意图，思考策略
-2. **Action**：必要时调用 analyze_abc（分析结构）或 validate_abc（验证范围）
-3. **Observation**：查看工具结果，调整策略
-4. **Output**：finish_reason=stop 时输出最终 ABC + SUMMARY
+你在 ReAct 循环中工作（最多 5 轮）：
+1. **Thought**：理解意图，思考修改策略（乐理分析）
+2. **Action（可选）**：必要时调用 analyze_abc 分析结构，或 validate_abc 验证范围
+3. **Observation**：查看工具结果，确认修改方向
+4. **Output（必须）**：无论是否调用工具，最终都必须输出完整 ABC + SUMMARY
 
 可用工具：
 - `analyze_abc`：分析 ABC 结构（调号/速度/音符数/音域）→ 复杂意图时先分析
 - `validate_abc`：验证是否在 Sky C4-C6 范围内 → 转调后验证
 
 **简单修改（改速度/简单转调）可直接输出，无需调工具。**
+
+## 🔴 工具调用后的铁律
+
+调用工具获得 Observation 后，你 **必须** 继续输出修改后的完整 ABC 谱子。
+绝对禁止：工具调用完成后只输出文字总结而不输出 ABC。
+绝对禁止：输出「已完成」「修改如下」等文字而不附上完整 ABC。
+
+正确流程示例：
+  → 调用 analyze_abc → 看到分析结果 → 输出完整修改后 ABC + SUMMARY
+  → 调用 validate_abc → 看到验证结果 → 输出完整修改后 ABC + SUMMARY
 """
 
 
@@ -102,6 +112,7 @@ async def run_edit(
     publish: Publisher,
     todo_mgr: TodoManager,
     scene: Scene = "editor",
+    session_id: str = "",   # 传入后 ReactExecutor 自动落库 tool message
 ) -> dict:
     """
     执行 ABC 编辑（v3.1：使用 ReactExecutor，不再内嵌 ReAct Loop）。
@@ -121,7 +132,7 @@ async def run_edit(
         "summary":      str,       # 中文摘要
         "tool_calls":   [...],     # 所有工具调用记录
         "sky_json":     str|None,
-        "midi_b64":     str|None,
+        "midi_url":     str|None,
         "react_rounds": int,
       }
     """
@@ -154,9 +165,11 @@ async def run_edit(
     # todo_mgr 由外层 EditAgent 传入，ReactExecutor 负责 complete_one 纪律
     # 创作型意图（重写/改编/风格转换/时长扩展）用更高 temperature 激发创意
     # 参数型意图（转调/变速）保持低 temperature 确保准确性
+    # 创作/风格改编类意图用高 temperature 激发创意；参数型修改用低 temperature 确保精确
     _CREATIVE_INTENTS = ["重写", "改编", "风格", "流行", "爵士", "中国风",
-                         "古典", "延长", "分钟", "扩展", "新旋律", "创作"]
-    temperature = 0.7 if any(kw in intent for kw in _CREATIVE_INTENTS) else 0.2
+                         "古典", "延长", "分钟", "扩展", "新旋律", "创作",
+                         "加花", "华丽", "丰富", "装饰", "变奏"]
+    temperature = 0.82 if any(kw in intent for kw in _CREATIVE_INTENTS) else 0.25
 
     exec_result = await ReactExecutor().run(
         messages=messages,
@@ -165,12 +178,13 @@ async def run_edit(
         todo_manager=todo_mgr,
         max_rounds=MAX_EDIT_ROUNDS,
         temperature=temperature,
+        session_id=session_id,  # 落库 tool message
     )
 
     raw = exec_result.get("content", "")
     react_rounds = exec_result.get("rounds", 1)
     sky_json = exec_result.get("extra", {}).get("sky_json")
-    midi_b64 = exec_result.get("extra", {}).get("midi_b64")
+    midi_url = exec_result.get("extra", {}).get("midi_url")
 
     # ── 提取 ABC + SUMMARY ───────────────────────────────────────────────────
     _FALLBACK = current_abc
@@ -200,13 +214,17 @@ async def run_edit(
                 "text": f"Sky JSON 生成失败: {e}",
             })
 
-    if scene in ("daw", "raw") and not midi_b64:
+    if scene in ("daw", "raw") and not midi_url:
         await publish("pipeline.step", {
             "step": "output_adapt", "status": "running",
             "text": "正在生成 MIDI...",
         })
         try:
-            midi_b64 = await call_tool("abc_to_midi_b64", {"abc": new_abc})
+            result = await call_tool("abc_to_midi_file", {"abc": new_abc})
+            if isinstance(result, dict):
+                midi_url = result.get("midi_url")
+            else:
+                midi_url = result
             await publish("pipeline.step", {
                 "step": "output_adapt", "status": "succeeded",
                 "text": "MIDI 生成完成",
@@ -222,7 +240,7 @@ async def run_edit(
         "summary":      summary,
         "tool_calls":   exec_result.get("tool_calls", []),
         "sky_json":     sky_json,
-        "midi_b64":     midi_b64,
+        "midi_url":     midi_url,
         "react_rounds": react_rounds,
     }
 

@@ -2,14 +2,17 @@
 CreateAgent — ABC 谱创作 SubAgent
 
 职责（单一）：
-  - LLM 直接创作 ABC（从零创作 或 基于已有谱子改编）
+  - LLM 直接创作 ABC（从零创作 或 基于已有谱子改编/延伸）
   - 验证 ABC + 自动修正（最多 1 次重试）
+  - 重复行检测 + 自动修正（防止主旋律循环）
   - 存入 session + 落库
   - 管理 create 域 TODO 状态
 
-Prompt 设计：
-  - 从 score-creator.agent 文件热加载（支持热更新）
-  - 时长提示动态注入（用户指定分钟数时）
+核心设计原则：
+  1. 无论从零创作还是改编，都必须从已有 ABC 中读取 BPM/调号，
+     再精确计算目标行数，注入 prompt，LLM 无需猜测时长
+  2. 改编时将完整原谱注入 prompt，LLM 基于真实数据理解音乐结构
+  3. 输出后做重复行检测，发现重复则强制要求 LLM 重写
 """
 from __future__ import annotations
 
@@ -21,54 +24,68 @@ from app.agentcore.todo_manager import TodoManager, assert_finish_gate
 from app.agentcore.react_executor import stream_text
 from app.agentcore.abc_utils import (
     extract_abc_and_summary, parse_abc_header, count_notes,
-    check_duration_requirement,
+    check_duration_requirement, detect_duplicate_lines, check_rhythm_variety,
 )
+from app.agentcore.agent_loader import load_agent_prompt
 
 Publisher = Callable[[str, dict], Awaitable[None]]
 
-# ── Prompt 常量（内嵌备用）────────────────────────────────────────────────────
-# 当前实现：直接使用内嵌常量（性能最优，无 IO 开销）
-# 未来扩展：可从 score-creator.agent 文件热加载（实现 load_agent_prompt() 后替换）
-_SYSTEM_CREATE = (
-    "你是世界顶级的 ABC Notation 音乐创作大师，曾为无数游戏、电影创作配乐，"
-    "精通 Sky: Children of the Light 游戏的 15 键乐器特性。\n\n"
-    "## Sky 乐器规范\n"
-    "可用音符：C D E F G A B c d e f g a b c'（C4-C6，共 15 键）\n"
-    "主旋律建议在 c-b 区间（C5-B5），副旋律可用 C-B（C4-B4）\n"
-    "禁止使用范围外音符（如 C, 低八度 或 d'' 高八度）\n\n"
-    "## ABC Notation 格式规范\n"
-    "X:1\nT:曲名\nC:EP-Agent\nM:4/4\nL:1/8\nQ:1/4=120\nK:C\n"
-    "% 正文：每行一个乐句（4小节），用 | 分隔小节\n\n"
-    "## 创作原则（必须遵守）\n"
-    "1. 结构完整：A段（主题8小节）→ B段（发展/副歌8小节）→ A'段（再现8小节）→ 尾声\n"
-    "2. 旋律优美：有明确主题动机，有上行/下行张力，有呼吸感和情感起伏\n"
-    "3. 节奏多样：不要全是八分音符，要有四分音符、附点、切分等节奏变化\n"
-    "4. 足够的量：用户要求多长就必须写多长，不能偷懒！\n"
-    "   - 1分钟 ≈ 30小节 ≈ 8行正文\n"
-    "   - 2分钟 ≈ 60小节 ≈ 15行正文\n"
-    "   - 3分钟 ≈ 90小节 ≈ 23行正文\n"
-    "5. 情感表达：根据风格选择合适调式和节奏型\n\n"
-    "## 输出格式（严格遵守）\n"
-    "直接输出完整 ABC Notation，最后一行：\n"
-    "SUMMARY: 一句话中文摘要（说明风格、结构、情感）\n"
-    "不要输出任何解释、代码块（```）、JSON、分析文字。"
-)
+# ── Prompt 热加载 ──────────────────────────────────────────────────────────────
 
-_SYSTEM_ARRANGE = (
-    "你是世界顶级的 ABC Notation 音乐编曲大师，精通古典、流行、民谣等所有风格，"
-    "对 Sky: Children of the Light 游戏乐器特性了如指掌。\n\n"
-    "## 改编原则\n"
-    "1. 精确理解用户意图，大胆改编，不保守\n"
-    "2. 旋律必须流畅、有张力、有情感，符合专业音乐审美\n"
-    "3. 保持或优化段落结构（A-B-A' 或 verse-chorus），有起承转合\n"
-    "4. Sky 限制：所有音符必须在 C D E F G A B c d e f g a b c'（C4-C6）范围内\n\n"
-    "## 输出格式（严格遵守）\n"
-    "直接输出完整改编后 ABC Notation，最后一行：\n"
-    "SUMMARY: 一句话中文说明改编内容\n"
-    "不要输出任何解释、代码块（```）、JSON。"
-)
+def _load_system_create() -> str:
+    try:
+        return load_agent_prompt("score-creator", sections=["role", "static_context"])
+    except Exception:
+        return (
+            "你是世界顶级的 ABC Notation 音乐创作大师，精通 Sky: Children of the Light 游戏的 15 键乐器特性。\n"
+            "可用音符：C D E F G A B c d e f g a b c'（C4-C6）\n"
+            "每行写4小节。禁止重复旋律行。禁止全八分音符。\n"
+            "直接输出完整 ABC + SUMMARY 行，不输出解释。"
+        )
 
 _FALLBACK_ABC = "X:1\nT:新曲\nM:4/4\nL:1/8\nQ:1/4=120\nK:C\nCDEF GABc|dedB cAGE|FEDC DEFG|E4 z4|\n"
+
+
+def _calc_duration_hint(mins: float, bpm: float, time_sig_num: int = 4) -> str:
+    """
+    根据目标时长、BPM、拍号精确计算目标行数，返回注入 prompt 的说明文本。
+    每行 = 4小节，每小节 = (60/BPM) × time_sig_num 拍。
+    """
+    seconds_per_bar  = (60.0 / bpm) * time_sig_num
+    seconds_per_line = seconds_per_bar * 4          # 每行 4 小节
+    target_seconds   = mins * 60.0
+    target_lines     = round(target_seconds / seconds_per_line)
+    target_lines     = max(6, min(32, target_lines))  # 限制在合理范围
+    target_bars      = target_lines * 4
+
+    return (
+        f"\n\n【时长精确计算 — 必须严格执行】\n"
+        f"目标时长：{mins} 分钟 = {target_seconds:.0f} 秒\n"
+        f"BPM={bpm:.0f}，拍号={time_sig_num}/4，"
+        f"每小节 {seconds_per_bar:.2f} 秒，每行（4小节）{seconds_per_line:.2f} 秒\n"
+        f"✅ 必须写 {target_lines} 行正文（共 {target_bars} 小节）\n"
+        f"❌ 禁止写超过 {target_lines + 2} 行（会超时）\n"
+        f"❌ 禁止写少于 {target_lines - 2} 行（时长不足）\n"
+        f"❌ 每行旋律内容必须不同，任意两行不能完全相同\n"
+        f"❌ 禁止用注释（% 重复...）代替音符\n"
+    )
+
+
+def _extract_bpm_from_message(message: str) -> float | None:
+    """从用户消息中提取 BPM，未找到返回 None。"""
+    m = re.search(r'(\d+)\s*(?:bpm|BPM|拍)', message)
+    if m:
+        return float(m.group(1))
+    return None
+
+
+def _infer_bpm_from_style(message: str) -> float:
+    """根据风格关键词推断 BPM，无匹配返回 120。"""
+    if any(kw in message for kw in ['慢', '抒情', '轻柔', '安静', '悠扬']):
+        return 90.0
+    if any(kw in message for kw in ['快', '欢快', '活泼', '节拍', '激烈']):
+        return 140.0
+    return 120.0
 
 
 class CreateAgent:
@@ -82,9 +99,27 @@ class CreateAgent:
         session_getter: Callable,
         session_saver: Callable,
         todo_mgr: TodoManager,
-        current_abc: str = "",
+        current_abc: str = "",   # 由 chain convert→create 传入；改编时优先使用 session 中的谱子
     ) -> dict:
         from app.pipeline.domain import Score, ScoreMeta
+
+        # ── 从 session 读取已有 ABC（改编/延伸时的数据基础）──────────────────────
+        # current_abc 优先级：参数传入 > session.score.abc_notation
+        # 这保证了「改编已有谱子」时 LLM 能看到完整的原谱数据（含 BPM/调号/旋律）
+        session_abc = ""
+        session_bpm = 120.0
+        session_time_sig_num = 4
+        try:
+            sess = session_getter(session_id)
+            if sess.score and sess.score.abc_notation:
+                session_abc = sess.score.abc_notation
+                session_bpm = float(sess.score.meta.bpm or 120.0)
+                session_time_sig_num = int(getattr(sess.score.meta, 'time_sig_num', 4) or 4)
+        except Exception:
+            pass
+
+        # 确定本次创作的「基础 ABC」：参数优先，其次 session 中已有的谱子
+        base_abc = current_abc or session_abc
 
         ids      = todo_mgr.get_ids()
         pending  = todo_mgr.get_pending_ids()
@@ -98,16 +133,27 @@ class CreateAgent:
             "call_id":   create_call_id,
             "tool":      "abc_composer",
             "status":    "running",
-            "arguments": {"style": message[:100], "has_base": bool(current_abc)},
+            "arguments": {"style": message[:100], "has_base": bool(base_abc)},
         })
 
-        system, user_prompt = self._build_prompt(message, current_abc)
+        system, user_prompt = self._build_prompt(
+            message=message,
+            base_abc=base_abc,
+            session_bpm=session_bpm,
+            session_time_sig_num=session_time_sig_num,
+        )
 
+        # 创作场景必须用高 temperature，否则 LLM 输出极度保守、旋律平淡
+        # 改编模式（有 base_abc）用 0.85，从零创作用 0.92
+        create_temperature = 0.85 if base_abc else 0.92
         try:
-            resp = await llm_complete([
-                {"role": "system", "content": system},
-                {"role": "user",   "content": user_prompt},
-            ])
+            resp = await llm_complete(
+                [
+                    {"role": "system", "content": system},
+                    {"role": "user",   "content": user_prompt},
+                ],
+                temperature=create_temperature,
+            )
             raw = resp if isinstance(resp, str) else resp.get("content", "")
         except Exception as e:
             await publish("tool.call", {
@@ -121,19 +167,30 @@ class CreateAgent:
             await publish("message.completed", {"message": reply})
             return {"domain": "create", "message": reply, "abc_updated": False}
 
-        # LLM 真实返回 → complete_one TODO[0]
         if exec_ids:
             await todo_mgr.complete_one(exec_ids[0], publish)
 
         new_abc, summary = extract_abc_and_summary(raw, _FALLBACK_ABC)
+
+        # ── 验证 ABC 音符范围 + 自动修正 ─────────────────────────────────────
         new_abc, summary = await self._validate_and_fix(
             new_abc, summary, raw, system, user_prompt, publish
         )
 
-        # ── 时长验证：用户指定分钟数时检查小节数是否满足要求 ─────────────────
-        dur_match = re.search(r'(\d+)\s*分钟', message)
-        if dur_match and not current_abc:  # 仅从零创作时验证（改编不强制时长）
-            required_mins = int(dur_match.group(1))
+        # ── 重复行检测 + 自动修正（防止主旋律循环）──────────────────────────────
+        new_abc, summary = await self._fix_duplicate_lines(
+            new_abc, summary, raw, system, user_prompt, message, publish
+        )
+
+        # ── 节奏多样性检测 + 自动修正（防止全八分音符单调输出）──────────────────
+        new_abc, summary = await self._fix_rhythm_monotone(
+            new_abc, summary, system, user_prompt, publish
+        )
+
+        # ── 时长验证：用户指定分钟数时检查小节数是否满足要求 ─────────────────────
+        dur_match = re.search(r'(\d+(?:\.\d+)?)\s*分钟', message)
+        if dur_match:
+            required_mins = float(dur_match.group(1))
             dur_check = check_duration_requirement(new_abc, required_mins)
             if not dur_check["satisfied"]:
                 shortage = dur_check["shortage_bars"]
@@ -144,21 +201,38 @@ class CreateAgent:
                     "text": f"时长不足（{actual}/{required} 小节），正在补充 {shortage} 小节...",
                 })
                 try:
-                    resp3 = await llm_complete([
-                        {"role": "system",    "content": system},
-                        {"role": "user",      "content": user_prompt},
-                        {"role": "assistant", "content": raw},
-                        {"role": "user",      "content": (
-                            f"你的作品只有约 {actual} 小节（约 {dur_check['actual_seconds']:.0f} 秒），"
-                            f"但用户要求 {required_mins} 分钟（需要约 {required} 小节）。\n"
-                            f"请在现有基础上继续扩展，补充约 {shortage} 小节，"
-                            f"保持风格一致，重新输出完整 ABC + SUMMARY 行。"
-                        )},
-                    ])
+                    # 从已生成的 ABC 解析实际 BPM（LLM 可能改变了 BPM）
+                    actual_header = parse_abc_header(new_abc)
+                    actual_bpm = actual_header["bpm"] or session_bpm
+                    extend_hint = _calc_duration_hint(
+                        required_mins, actual_bpm, actual_header["time_sig_num"]
+                    )
+                    resp3 = await llm_complete(
+                        [
+                            {"role": "system",    "content": system},
+                            {"role": "user",      "content": user_prompt},
+                            {"role": "assistant", "content": raw},
+                            {"role": "user",      "content": (
+                                f"你的作品只有约 {actual} 小节（约 {dur_check['actual_seconds']:.0f} 秒），"
+                                f"但用户要求 {required_mins} 分钟（需要约 {required} 小节）。\n"
+                                f"{extend_hint}\n"
+                                f"请在现有旋律基础上继续扩展，补充约 {shortage} 小节。\n"
+                                f"⚠️ 新增的每一行旋律必须与已有行不同，禁止重复已有旋律行。\n"
+                                f"重新输出完整 ABC + SUMMARY 行。"
+                            )},
+                        ],
+                        temperature=0.88,
+                    )
                     raw3 = resp3 if isinstance(resp3, str) else resp3.get("content", "")
                     abc3, sum3 = extract_abc_and_summary(raw3, new_abc)
                     if "K:" in abc3 and count_notes(abc3) > count_notes(new_abc):
-                        new_abc, summary = abc3, sum3
+                        # 再次做重复行检测
+                        dup3 = detect_duplicate_lines(abc3)
+                        if not dup3["has_duplicates"]:
+                            new_abc, summary = abc3, sum3
+                        else:
+                            # 扩展版有重复，保留原版
+                            pass
                         await publish("pipeline.step", {
                             "step": "create_duration_check", "status": "succeeded",
                             "text": f"已扩展至 {check_duration_requirement(new_abc, required_mins)['actual_bars']} 小节",
@@ -183,8 +257,38 @@ class CreateAgent:
         except Exception:
             pass
 
-        # 落库由 service.universal_chat 在 SubAgent 返回后统一执行（避免双写）
-        # SubAgent 只通过 session_saver 操作内存 session
+        # ── 自动写入工作区文件（.sky/<title>.abc）─────────────────────────────
+        # 谱子是工作区资产，跨会话共享，类似 Cursor 的工作区文件概念
+        _ws_file_path = ""
+        try:
+            from app.pipeline import db as _db_ref
+            _si = _db_ref.get_session_info(session_id)
+            _ws_id = (_si or {}).get("workspace_id") or ""
+            if _ws_id:
+                from app.agentcore.tools.workspace_tools import save_score_to_workspace_impl
+                _save_result = save_score_to_workspace_impl(
+                    workspace_id=_ws_id,
+                    abc_notation=new_abc,
+                    title=header["title"] or "score",
+                    overwrite=True,
+                )
+                _ws_file_path = _save_result["path"]
+                # 写入重要记忆：ABC 文件路径（供 H5Agent 等跨轮次感知）
+                try:
+                    from app.agentcore.session_context import remember_workspace_file
+                    remember_workspace_file(session_id, _ws_file_path,
+                                           header["title"] or "score")
+                except Exception:
+                    pass
+                # 通知前端文件树刷新
+                await publish("workspace.file_saved", {
+                    "workspace_id": _ws_id,
+                    "path":         _ws_file_path,
+                    "type":         "abc",
+                    "title":        header["title"],
+                })
+        except Exception:
+            pass
 
         await publish("tool.call", {
             "call_id":        create_call_id,
@@ -193,13 +297,20 @@ class CreateAgent:
             "result_preview": summary,
         })
 
-        # 存储完成 → complete_one TODO[1]
         if len(exec_ids) > 1:
             await todo_mgr.complete_one(exec_ids[1], publish)
 
+        # 读取实际版本号（改编时 session 中可能已有多个版本）
+        _version = 1
+        try:
+            _sv = session_getter(session_id)
+            if _sv and _sv.score:
+                _version = _sv.score.latest_version()
+        except Exception:
+            pass
         await publish("abc.updated", {
             "abc":     new_abc,
-            "version": 1,
+            "version": _version,
             "summary": summary,
             "meta": {
                 "title":       header["title"],
@@ -213,7 +324,7 @@ class CreateAgent:
         })
 
         await todo_mgr.finish_all(publish, "done")
-        action_word = "改编" if current_abc else "创作"
+        action_word = "改编" if base_abc else "创作"
         reply = f"✅ 已为你{action_word}《{header['title']}》：{summary}"
         await stream_text(reply, publish)
         await assert_finish_gate(todo_mgr, "create", publish)
@@ -226,21 +337,74 @@ class CreateAgent:
             "summary":      summary,
         }
 
-    def _build_prompt(self, message: str, current_abc: str) -> tuple[str, str]:
-        if current_abc:
-            return _SYSTEM_ARRANGE, f"用户需求：{message}\n\n原始 ABC 谱：\n{current_abc}"
+    def _build_prompt(
+        self,
+        message: str,
+        base_abc: str,
+        session_bpm: float = 120.0,
+        session_time_sig_num: int = 4,
+    ) -> tuple[str, str]:
+        """
+        构造创作/改编 prompt。
 
-        duration_hint = ""
-        dur_match = re.search(r'(\d+)\s*分钟', message)
+        核心原则：
+          - 无论从零创作还是改编，都基于真实 BPM 精确计算时长
+          - 改编时将完整原谱注入，LLM 基于真实数据理解音乐结构
+          - 时长计算结果以强制指令形式注入，不依赖 LLM 自行计算
+        """
+        system = _load_system_create()
+
+        # ── 确定 BPM（优先级：消息中指定 > 原谱 BPM > 风格推断）────────────────
+        bpm = (
+            _extract_bpm_from_message(message)
+            or (parse_abc_header(base_abc)["bpm"] if base_abc else None)
+            or session_bpm
+            or _infer_bpm_from_style(message)
+        )
+        # 从原谱获取拍号
+        time_sig_num = session_time_sig_num
+        if base_abc:
+            h = parse_abc_header(base_abc)
+            time_sig_num = h.get("time_sig_num", 4) or 4
+
+        # ── 时长注入（有时长需求时精确计算，无时长需求时给出默认建议）──────────
+        dur_match = re.search(r'(\d+(?:\.\d+)?)\s*分钟', message)
         if dur_match:
-            mins     = int(dur_match.group(1))
-            est_bars = mins * 30
+            mins = float(dur_match.group(1))
+            duration_hint = _calc_duration_hint(mins, bpm, time_sig_num)
+        else:
+            # 无时长要求：默认写 10-14 行（约 1.5-2 分钟），给出参考
+            seconds_per_line = (60.0 / bpm) * time_sig_num * 4
+            default_lines_min = max(6, round(90 / seconds_per_line))
+            default_lines_max = max(default_lines_min + 2, round(120 / seconds_per_line))
             duration_hint = (
-                f"\n\n⚠️ 时长要求：{mins} 分钟，"
-                f"必须写够约 {est_bars} 小节（4/4拍，BPM≈120）！"
-                f"每行写4小节，需要约 {est_bars//4} 行正文，绝对不能偷懒只写几行！"
+                f"\n\n【时长参考】BPM={bpm:.0f}，每行（4小节）{seconds_per_line:.1f} 秒。"
+                f"无时长要求时写 {default_lines_min}-{default_lines_max} 行（约1.5-2分钟），精炼优于冗长。"
             )
-        return _SYSTEM_CREATE, f"请创作：{message}{duration_hint}"
+
+        # ── 改编模式：注入完整原谱 ────────────────────────────────────────────
+        if base_abc:
+            base_header = parse_abc_header(base_abc)
+            arrange_note = (
+                f"\n\n## 改编/延伸模式\n"
+                f"原谱信息：调号={base_header['key']}，BPM={base_header['bpm']:.0f}，"
+                f"拍号={base_header['time_sig_num']}/{base_header['time_sig_den']}\n"
+                f"原谱是你的音乐素材库——提取其核心动机、调式、情感色彩，"
+                f"结合用户需求创作全新旋律。\n"
+                f"⚠️ 不是复制原谱，不是重复原谱的旋律行，而是基于原谱的音乐语言写出新的音乐叙事。\n"
+                f"⚠️ 每一行旋律都必须是新的，任意两行不能完全相同。"
+            )
+            user = (
+                f"用户需求：{message}"
+                f"{duration_hint}"
+                f"{arrange_note}"
+                f"\n\n原始 ABC 谱（完整数据，用于理解音乐结构）：\n{base_abc}"
+            )
+        else:
+            # 从零创作
+            user = f"请创作：{message}{duration_hint}"
+
+        return system, user
 
     async def _validate_and_fix(
         self,
@@ -251,7 +415,7 @@ class CreateAgent:
         user_prompt: str,
         publish: Publisher,
     ) -> tuple[str, str]:
-        """验证 ABC + 自动修正（最多 1 次重试）。"""
+        """验证 ABC 音符范围 + 自动修正（最多 1 次重试）。"""
         from app.agentcore.tools import call_tool as _call_tool
         try:
             validation = await _call_tool("validate_abc", {"abc": abc})
@@ -262,16 +426,19 @@ class CreateAgent:
                     "text": f"ABC 验证发现问题，正在自动修正：{issues}",
                 })
                 try:
-                    resp2 = await llm_complete([
-                        {"role": "system",    "content": system},
-                        {"role": "user",      "content": user_prompt},
-                        {"role": "assistant", "content": raw},
-                        {"role": "user",      "content": (
-                            f"你生成的 ABC 存在问题：{issues}\n"
-                            "请修正所有超出 Sky C4-C6 范围的音符（移八度处理），"
-                            "重新输出完整 ABC + SUMMARY 行。"
-                        )},
-                    ])
+                    resp2 = await llm_complete(
+                        [
+                            {"role": "system",    "content": system},
+                            {"role": "user",      "content": user_prompt},
+                            {"role": "assistant", "content": raw},
+                            {"role": "user",      "content": (
+                                f"你生成的 ABC 存在问题：{issues}\n"
+                                "请修正所有超出 Sky C4-C6 范围的音符（移八度处理），"
+                                "重新输出完整 ABC + SUMMARY 行。"
+                            )},
+                        ],
+                        temperature=0.3,  # 修正时用低 temperature 确保精确性
+                    )
                     raw2 = resp2 if isinstance(resp2, str) else resp2.get("content", "")
                     abc2, sum2 = extract_abc_and_summary(raw2, abc)
                     if "K:" in abc2:
@@ -284,4 +451,144 @@ class CreateAgent:
                     pass
         except Exception:
             pass
+        return abc, summary
+
+    async def _fix_rhythm_monotone(
+        self,
+        abc: str,
+        summary: str,
+        system: str,
+        user_prompt: str,
+        publish: Publisher,
+    ) -> tuple[str, str]:
+        """
+        检测节奏单调性（全八分音符行占比 > 30%）并要求 LLM 重写。
+        防止 LLM 输出「CDEDCDEF|GABCDEFG」这类毫无节奏变化的谱子。
+        """
+        try:
+            result = check_rhythm_variety(abc)
+            variety_ratio = result.get("variety_ratio", 1.0)
+            monotone_count = result.get("monotone_count", 0)
+            total = result.get("total_body_lines", 0)
+
+            if variety_ratio >= 0.7 or total < 4:
+                return abc, summary  # 节奏多样性足够，无需修正
+
+            mono_lines = result.get("monotone_lines", [])[:5]
+            mono_desc = "\n".join(
+                f"  - 第{i+1}行：{preview}" for i, preview in mono_lines
+            )
+            await publish("pipeline.step", {
+                "step": "create_rhythm_fix", "status": "running",
+                "text": f"节奏单调（{monotone_count}/{total} 行纯八分音符），正在修正...",
+            })
+            resp = await llm_complete(
+                [
+                    {"role": "system", "content": system},
+                    {"role": "user",   "content": user_prompt},
+                    {"role": "assistant", "content": abc},
+                    {"role": "user", "content": (
+                        f"你的谱子有 {monotone_count} 行是纯八分音符（节奏单调），违反了禁令4：\n"
+                        f"{mono_desc}\n\n"
+                        f"请修改这些行，在每行混用至少2种时值：\n"
+                        f"- 四分音符 C2（重量感）、附点八分 C3/2 C/2（律动感）\n"
+                        f"- 长音 C4/C6（呼吸点）、休止符 z2/z4（留白）\n"
+                        f"保持旋律骨干音不变，只改节奏型。重新输出完整 ABC + SUMMARY 行。"
+                    )},
+                ],
+                temperature=0.75,
+            )
+            raw_fix = resp if isinstance(resp, str) else resp.get("content", "")
+            abc_fix, sum_fix = extract_abc_and_summary(raw_fix, abc)
+            if "K:" in abc_fix:
+                result2 = check_rhythm_variety(abc_fix)
+                if result2.get("variety_ratio", 0) > variety_ratio:
+                    await publish("pipeline.step", {
+                        "step": "create_rhythm_fix", "status": "succeeded",
+                        "text": f"节奏多样性已提升（{variety_ratio:.0%}→{result2['variety_ratio']:.0%}）",
+                    })
+                    return abc_fix, sum_fix
+            await publish("pipeline.step", {
+                "step": "create_rhythm_fix", "status": "failed",
+                "text": "节奏修正效果有限，保留原版",
+            })
+        except Exception:
+            pass
+        return abc, summary
+
+    async def _fix_duplicate_lines(
+        self,
+        abc: str,
+        summary: str,
+        raw: str,
+        system: str,
+        user_prompt: str,
+        message: str,
+        publish: Publisher,
+    ) -> tuple[str, str]:
+        """
+        检测重复旋律行并要求 LLM 修正（最多 1 次重试）。
+        重复行是「3分钟变12分钟」的根本原因：LLM 把主旋律循环 N 遍凑时长。
+        """
+        dup = detect_duplicate_lines(abc)
+        if not dup["has_duplicates"]:
+            return abc, summary
+
+        dup_count = len(dup["duplicate_pairs"])
+        total     = dup["total_lines"]
+        unique    = dup["unique_lines"]
+        await publish("pipeline.step", {
+            "step": "create_dedup", "status": "running",
+            "text": f"检测到 {dup_count} 对重复旋律行（共 {total} 行，唯一 {unique} 行），正在修正...",
+        })
+
+        # 构造重复行说明，让 LLM 精确知道哪些行重复了
+        dup_desc = "\n".join(
+            f"  - 第{a+1}行与第{b+1}行完全相同：「{content}」"
+            for a, b, content in dup["duplicate_pairs"][:5]  # 最多列出5对
+        )
+
+        try:
+            resp_fix = await llm_complete(
+                [
+                    {"role": "system",    "content": system},
+                    {"role": "user",      "content": user_prompt},
+                    {"role": "assistant", "content": raw},
+                    {"role": "user",      "content": (
+                        f"你的 ABC 谱存在 {dup_count} 对重复旋律行，这会导致音乐听起来是在循环主旋律：\n"
+                        f"{dup_desc}\n\n"
+                        f"请重写整首曲子，确保每一行旋律都是独特的。\n"
+                        f"使用动机发展手法（倒影、增值、减值、移调、节奏变形）让每行都不同，"
+                        f"而不是重复已有旋律。\n"
+                        f"行数保持不变，重新输出完整 ABC + SUMMARY 行。"
+                    )},
+                ],
+                temperature=0.88,  # 重写时保持高创意度
+            )
+            raw_fix = resp_fix if isinstance(resp_fix, str) else resp_fix.get("content", "")
+            abc_fix, sum_fix = extract_abc_and_summary(raw_fix, abc)
+            if "K:" in abc_fix:
+                dup2 = detect_duplicate_lines(abc_fix)
+                if dup2["has_duplicates"]:
+                    # 修正后仍有重复，但至少减少了重复数量则接受
+                    if len(dup2["duplicate_pairs"]) < dup_count:
+                        abc, summary = abc_fix, sum_fix
+                        await publish("pipeline.step", {
+                            "step": "create_dedup", "status": "succeeded",
+                            "text": f"重复行已减少（{dup_count}→{len(dup2['duplicate_pairs'])} 对）",
+                        })
+                    else:
+                        await publish("pipeline.step", {
+                            "step": "create_dedup", "status": "failed",
+                            "text": "重复行修正效果有限，保留原版",
+                        })
+                else:
+                    abc, summary = abc_fix, sum_fix
+                    await publish("pipeline.step", {
+                        "step": "create_dedup", "status": "succeeded",
+                        "text": "重复旋律行已全部修正",
+                    })
+        except Exception:
+            pass
+
         return abc, summary

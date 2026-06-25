@@ -1,9 +1,9 @@
 'use client'
 
-import { useState, useCallback } from 'react'
+import { useState, useCallback, useEffect } from 'react'
 import type { AudioTurn, AudioProvider } from '@/shared/types'
 import { AudioDomain } from '@/shared/types'
-import { chatAudio, clearAudioHistory } from '@/shared/lib/api'
+import { chatAudio, clearAudioHistory, getAudioHistory } from '@/shared/lib/api'
 import { useScoreStore } from '@/entities/session/store'
 import { AudioHistoryList } from './AudioHistoryList'
 import { AudioChatInput } from './AudioChatInput'
@@ -48,6 +48,19 @@ export function AudioPanel() {
   const [isGenerating, setIsGenerating] = useState(false)
   const [error, setError] = useState('')
   const [provider, setProvider] = useState<'auto' | 'minimax' | 'suno'>('auto')
+
+  // ── 恢复历史：组件 mount 或 sessionId 切换时从后端拉取音频历史 ──────────────
+  useEffect(() => {
+    if (!sessionId) return
+    getAudioHistory(sessionId)
+      .then(({ history: turns }) => {
+        if (turns.length > 0) {
+          setHistory(turns)
+          setCurrentTurn(turns[turns.length - 1].turn)
+        }
+      })
+      .catch(() => { /* 静默失败：历史拉取失败不影响新建对话 */ })
+  }, [sessionId])
 
   const lastTurn = history[history.length - 1] ?? null
   const lastSuggestions = lastTurn?.suggestions ?? []

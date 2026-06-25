@@ -145,6 +145,29 @@ class ConvertAgent:
             "meta":    meta,
         })
 
+        # ── 落盘到工作区 .sky/ 目录 + 写入重要记忆 ──────────────────────────
+        # convert 成功后 ABC 只在 sess.score（内存），需落盘才能被 H5Agent 等跨轮次感知
+        _ws_abc_path = ""
+        try:
+            from app.pipeline import db as _db_ref
+            _si = _db_ref.get_session_info(session_id)
+            _ws_id = (_si or {}).get("workspace_id") or ""
+            if _ws_id and result.get("abc_notation"):
+                from app.agentcore.tools.workspace_tools import save_score_to_workspace_impl
+                _save_r = save_score_to_workspace_impl(
+                    workspace_id=_ws_id,
+                    abc_notation=result["abc_notation"],
+                    title=meta.get("title") or "score",
+                    overwrite=True,
+                )
+                _ws_abc_path = _save_r["path"]
+                # 写入重要记忆：ABC 路径（供 H5Agent 等跨轮次感知）
+                from app.agentcore.session_context import remember_workspace_file
+                remember_workspace_file(session_id, _ws_abc_path,
+                                        meta.get("title") or "score")
+        except Exception:
+            pass
+
         load_reply = (
             f"✅ 已成功加载谱子《{meta.get('title', '未命名')}》\n\n"
             f"- 调号：{meta.get('key', 'C')}\n"

@@ -141,8 +141,10 @@ def parse_abc_header(abc: str) -> dict:
 
 
 def count_notes(abc: str) -> int:
-    """统计 ABC 中的音符数量（粗略计数）。"""
-    return len(re.findall(r"[A-Ga-g][',]?[0-9]*", abc))
+    """统计 ABC Body 中的音符数量（跳过 Header 行，避免 T:/K:/C: 中的字母被误计）。"""
+    k_match = re.search(r'^K:.*$', abc, re.MULTILINE)
+    body = abc[k_match.end():] if k_match else abc
+    return len(re.findall(r"[A-Ga-g][',]?[0-9]*", body))
 
 
 def count_bars(abc: str) -> int:
@@ -174,6 +176,95 @@ def estimate_duration_seconds(abc: str) -> float:
     beats_per_bar = header["time_sig_num"]
     bpm           = header["bpm"] or 120.0
     return bars * beats_per_bar / (bpm / 60.0)
+
+
+def check_rhythm_variety(abc: str) -> dict:
+    """
+    检测 ABC Body 中每行的节奏多样性。
+
+    返回：
+      {
+        "monotone_lines": [(line_idx, content_preview), ...],  # 纯八分音符行
+        "total_body_lines": int,
+        "monotone_count": int,
+        "variety_ratio": float,  # 有多样性的行占比
+      }
+    """
+    k_match = re.search(r'^K:.*$', abc, re.MULTILINE)
+    if not k_match:
+        return {"monotone_lines": [], "total_body_lines": 0,
+                "monotone_count": 0, "variety_ratio": 1.0}
+
+    body = abc[k_match.end():].strip()
+    lines = [l.strip() for l in body.splitlines()
+             if l.strip() and not l.strip().startswith('%')]
+
+    monotone = []
+    for i, line in enumerate(lines):
+        # 去掉小节线和空格，只看音符+时值
+        content = re.sub(r'[|:\[\]\s]', '', line)
+        # 找所有带时值标注的音符
+        notes_with_dur = re.findall(r'[A-Ga-gz]\d*(?:/\d+)?', content)
+        if len(notes_with_dur) < 3:
+            continue
+        # 判断是否全是纯八分（无时值数字）
+        has_duration_mark = any(re.search(r'\d', n) for n in notes_with_dur)
+        if not has_duration_mark:
+            monotone.append((i, line[:50]))
+
+    total = len(lines)
+    mono_count = len(monotone)
+    variety_ratio = (total - mono_count) / total if total > 0 else 1.0
+
+    return {
+        "monotone_lines": monotone,
+        "total_body_lines": total,
+        "monotone_count": mono_count,
+        "variety_ratio": variety_ratio,
+    }
+
+
+def detect_duplicate_lines(abc: str) -> dict:
+    """
+    检测 ABC Body 中的重复旋律行。
+
+    返回：
+      {
+        "has_duplicates": bool,
+        "duplicate_pairs": [(line_a_idx, line_b_idx, content), ...],
+        "total_lines": int,
+        "unique_lines": int,
+      }
+    """
+    k_match = re.search(r'^K:.*$', abc, re.MULTILINE)
+    if not k_match:
+        return {"has_duplicates": False, "duplicate_pairs": [], "total_lines": 0, "unique_lines": 0}
+
+    body = abc[k_match.end():].strip()
+    # 按换行拆分，过滤空行和注释行
+    lines = [l.strip() for l in body.splitlines() if l.strip() and not l.strip().startswith('%')]
+    if not lines:
+        return {"has_duplicates": False, "duplicate_pairs": [], "total_lines": 0, "unique_lines": 0}
+
+    seen: dict[str, int] = {}
+    pairs = []
+    for i, line in enumerate(lines):
+        # 标准化：去掉行尾注释，压缩空格
+        norm = re.sub(r'%.*$', '', line).strip()
+        norm = re.sub(r'\s+', ' ', norm)
+        if not norm:
+            continue
+        if norm in seen:
+            pairs.append((seen[norm], i, norm[:60]))
+        else:
+            seen[norm] = i
+
+    return {
+        "has_duplicates": len(pairs) > 0,
+        "duplicate_pairs": pairs,
+        "total_lines": len(lines),
+        "unique_lines": len(seen),
+    }
 
 
 def check_duration_requirement(abc: str, required_minutes: float) -> dict:

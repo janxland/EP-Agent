@@ -13,9 +13,14 @@ const nextConfig = {
       },
       {
         // H5 海报静态文件代理：前端 /h5/* 转发到后端静态文件服务
-        // 对应 main.py 中 app.mount("/h5", StaticFiles(...))
         source: '/h5/:path*',
         destination: `${backendUrl}/h5/:path*`,
+      },
+      {
+        // 工作区静态文件代理：图片/MIDI/音频等二进制文件直出
+        // 对应 main.py 中 app.mount("/workspace", StaticFiles(...))
+        source: '/workspace/:path*',
+        destination: `${backendUrl}/workspace/:path*`,
       },
     ]
   },

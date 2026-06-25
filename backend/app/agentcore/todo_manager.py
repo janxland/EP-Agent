@@ -47,6 +47,7 @@ class TodoManager:
         self.todos: list[dict] = []
         self.summary: str = ""
         self.domain: str = ""
+        self.session_id: str = ""   # 由 universal_runner 注入，用于状态变更时回写数据库
 
     # ── 查询方法 ──────────────────────────────────────────────────────────────
 
@@ -222,11 +223,23 @@ class TodoManager:
     # ── 状态流转 ─────────────────────────────────────────────────────────────
 
     async def tick(self, todo_id: str, status: str, publish: Publisher):
-        """更新单个 TODO 状态并推送 todo.update。"""
+        """更新单个 TODO 状态，推送 SSE 并回写数据库（确保刷新后状态不丢失）。"""
         t = self.get_by_id(todo_id)
         if t:
             t["status"] = status
         await publish("todo.update", {"id": todo_id, "status": status})
+        # ── 回写数据库：状态变更必须持久化，否则刷新后 TODO 状态丢失 ──
+        if self.session_id:
+            try:
+                from app.pipeline import db as _db
+                _db.upsert_todos(
+                    session_id=self.session_id,
+                    todos=self.todos,
+                    domain=self.domain,
+                    summary=self.summary,
+                )
+            except Exception:
+                pass  # 持久化失败不影响主流程
 
     async def tick_next(self, publish: Publisher, status: str = "running") -> str | None:
         """将第一个 pending 的 TODO 设为 running，返回其 id。"""

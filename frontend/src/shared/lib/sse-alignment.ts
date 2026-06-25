@@ -34,8 +34,9 @@ export const SSE_HANDLED_EVENTS = new Set<string>([
   'todo.list',
   'todo.update',
   'todo.append',
-  'role.active',   // 角色激活（切换角色/刷新恢复）
-  'h5.ready',       // H5 海报生成完成（含 url_path/file_path/size_kb）
+  'role.active',              // 角色激活（切换角色/刷新恢复）
+  'h5.ready',                 // H5 海报生成完成（含 url_path/file_path/size_kb）
+  'connection.reconnecting',  // SSE 断线重连通知（api.ts 发出，chat.store 清空历史）
   'error',
 ])
 

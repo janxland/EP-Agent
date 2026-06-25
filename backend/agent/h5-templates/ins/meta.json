@@ -1,0 +1,30 @@
+{
+  "name": "ins",
+  "label": "INS 美学",
+  "desc": "玫瑰金/珊瑚粉，胶片颗粒感，Stories 竖版卡片，花卉装饰",
+  "mood": "warm aesthetic romantic",
+  "intent_keys": [
+    "ins",
+    "instagram",
+    "美学",
+    "玫瑰金",
+    "珊瑚",
+    "温柔",
+    "少女",
+    "花",
+    "胶片",
+    "复古"
+  ],
+  "extra_vars": {
+    "LYRIC_LINE": "歌词/情绪一行（可选）"
+  },
+  "theme_preset": {
+    "ACCENT_COLOR": "#C9956C",
+    "BG_COLOR": "#FFF8F4",
+    "CARD_BG": "rgba(255,248,244,0.94)",
+    "TEXT_COLOR": "#3D2B1F",
+    "TEXT_SUB": "rgba(61,43,31,0.52)",
+    "GRADIENT": "linear-gradient(160deg, #FFF0E8 0%, #FDF5F0 35%, #FFF8F4 65%, #FEF0EC 100%)",
+    "ABC_SVG_FILTER": "sepia(0.2) brightness(0.95)"
+  }
+}

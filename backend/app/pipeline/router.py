@@ -86,15 +86,45 @@ async def sse_stream(session_id: str, request: Request):
                 }
                 yield f"data: {json.dumps(abc_evt, ensure_ascii=False)}\n\n"
 
-            # 2. 推送历史对话消息（role=user / assistant），恢复右侧对话框
+            # 2. 推送历史对话消息（role=user / assistant / tool），恢复右侧对话框
             history_msgs = _db.get_session_messages(session_id)
             seq = 1
             for msg in history_msgs:
                 role = msg.get("role", "")
                 content = msg.get("content", "") or ""
-                if role not in ("user", "assistant") or not content.strip():
+                # 过滤：只处理 user / assistant / tool 三种角色
+                # assistant 消息允许 content 为空（纯工具调用轮次 content=""，但有 tool_calls）
+                if role not in ("user", "assistant", "tool"):
                     continue
+                # user / tool 消息：空内容跳过，避免空气泡
+                if role != "assistant" and not content.strip():
+                    continue
+
                 evt_type = "message.history"   # 专用类型，前端区分历史与实时
+                payload: dict = {
+                    "role":    role,
+                    "content": content,
+                    "msg_id":  msg.get("id", ""),
+                }
+                # assistant 消息：还原 tool_calls 字段（前端渲染工具卡片的关键）
+                # tool message 通过 tool_call_id 匹配 assistant.tool_calls[].id，
+                # 若 assistant 消息没有 tool_calls，工具卡片无法关联，刷新后工具结果体消失。
+                if role == "assistant":
+                    raw_tc = msg.get("tool_calls")
+                    if raw_tc:
+                        try:
+                            tc_list = json.loads(raw_tc) if isinstance(raw_tc, str) else raw_tc
+                            if tc_list:
+                                payload["tool_calls"] = tc_list
+                        except Exception:
+                            pass
+                    # 纯工具调用轮次（content="" 但有 tool_calls）：有 tool_calls 才推送
+                    if not content.strip() and not payload.get("tool_calls"):
+                        continue
+                # tool 消息：附带 tool_call_id 和 name，前端用于与 assistant tool_calls 匹配
+                if role == "tool":
+                    payload["tool_call_id"] = msg.get("tool_call_id", "")
+                    payload["name"]         = msg.get("tool_name", "")
                 hist_evt = {
                     "id": new_id("evt"),
                     "type": evt_type,
@@ -102,11 +132,7 @@ async def sse_stream(session_id: str, request: Request):
                     "display": True,
                     "sequence": seq,
                     "timestamp": msg.get("created_at", datetime.now(timezone.utc).isoformat()),
-                    "payload": {
-                        "role":    role,
-                        "content": content,
-                        "msg_id":  msg.get("id", ""),
-                    },
+                    "payload": payload,
                 }
                 yield f"data: {json.dumps(hist_evt, ensure_ascii=False)}\n\n"
                 seq += 1
@@ -170,6 +196,57 @@ async def sse_stream(session_id: str, request: Request):
                     },
                 }
                 yield f"data: {json.dumps(role_evt, ensure_ascii=False)}\n\n"
+                seq += 1
+            except Exception:
+                pass
+
+            # 5. 推送 pipeline.state（恢复前端 running/idle 状态，防止刷新后永久 loading）
+            # 若 pipeline_state == "running"，说明上次任务未完成（后端重启/崩溃），
+            # 此时推送 idle 让前端解除 loading，避免用户无法再发消息
+            try:
+                _pipeline_state = (session_info or {}).get("pipeline_state", "idle")
+                # 后端重启后内存中无此 session，running 状态应重置为 idle
+                _effective_state = "idle" if _pipeline_state == "running" else _pipeline_state
+                state_evt = {
+                    "id": new_id("evt"),
+                    "type": "pipeline.state",
+                    "session_id": session_id,
+                    "display": False,
+                    "sequence": seq,
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "payload": {
+                        "state":    _effective_state,
+                        "_replay":  True,
+                    },
+                }
+                yield f"data: {json.dumps(state_evt, ensure_ascii=False)}\n\n"
+                seq += 1
+            except Exception:
+                pass
+
+            # 6. 推送工作区谱子文件列表（workspace.scores）
+            # 工作区文件是跨会话的持久资产，新建会话后谱子依然存在
+            try:
+                _ws_id_replay = (session_info or {}).get("workspace_id") or ""
+                if _ws_id_replay:
+                    from app.agentcore.tools.workspace_tools import list_workspace_scores_impl
+                    _scores = list_workspace_scores_impl(_ws_id_replay)
+                    if _scores:
+                        scores_evt = {
+                            "id": new_id("evt"),
+                            "type": "workspace.scores",
+                            "session_id": session_id,
+                            "display": False,
+                            "sequence": seq,
+                            "timestamp": datetime.now(timezone.utc).isoformat(),
+                            "payload": {
+                                "workspace_id": _ws_id_replay,
+                                "scores":       _scores,
+                                "_replay":      True,
+                            },
+                        }
+                        yield f"data: {json.dumps(scores_evt, ensure_ascii=False)}\n\n"
+                        seq += 1
             except Exception:
                 pass
 
@@ -269,13 +346,17 @@ async def get_session(session_id: str):
         sess = service.get_session(session_id)
         info = _db.get_session_info(session_id) or {}
         return {
-            "session_id": sess.id,
+            "id":             sess.id,          # 前端 SessionInfoDto 用 id
+            "session_id":     sess.id,          # 兼容旧代码
             "pipeline_state": sess.pipeline_state,
-            "workspace_id": info.get("workspace_id"),
-            "title": info.get("title", "新对话"),
-            "score_title": info.get("score_title"),
-            "score_key": info.get("score_key"),
-            "score_bpm": info.get("score_bpm"),
+            "workspace_id":   info.get("workspace_id"),
+            "title":          info.get("title", "新对话"),
+            "score_title":    info.get("score_title"),
+            "score_key":      info.get("score_key"),
+            "score_bpm":      info.get("score_bpm"),
+            "score_notes":    info.get("score_notes"),
+            "created_at":     info.get("created_at"),
+            "updated_at":     info.get("updated_at"),
         }
     except KeyError:
         # session 不在内存中，尝试从 DB 恢复基本信息
@@ -283,14 +364,18 @@ async def get_session(session_id: str):
         if not info:
             raise HTTPException(404, f"session not found: {session_id}")
         return {
-            "session_id": session_id,
+            "id":             session_id,       # 前端 SessionInfoDto 用 id
+            "session_id":     session_id,       # 兼容旧代码
             "pipeline_state": info.get("pipeline_state", "idle"),
-            "workspace_id": info.get("workspace_id"),
-            "title": info.get("title", "新对话"),
-            "score_title": info.get("score_title"),
-            "score_key": info.get("score_key"),
-            "score_bpm": info.get("score_bpm"),
-            "stale": True,  # 内存中无此 session，需重建
+            "workspace_id":   info.get("workspace_id"),
+            "title":          info.get("title", "新对话"),
+            "score_title":    info.get("score_title"),
+            "score_key":      info.get("score_key"),
+            "score_bpm":      info.get("score_bpm"),
+            "score_notes":    info.get("score_notes"),
+            "created_at":     info.get("created_at"),
+            "updated_at":     info.get("updated_at"),
+            "stale":          True,  # 内存中无此 session，需重建
         }
 
 class RenameSessionRequest(BaseModel):
@@ -360,9 +445,10 @@ async def edit(session_id: str, req: EditRequest):
 
 class UniversalChatRequest(BaseModel):
     message: str
-    attachment_content: str = ""   # 附件文本内容（JSON/TXT 等）
-    attachment_name: str = ""      # 附件文件名
-    attachment_b64: str = ""       # 音频附件 base64（音色克隆用）
+    attachment_content: str = ""          # 文本附件内容（ABC/JSON/TXT，可进 LLM context）
+    attachment_name: str = ""             # 附件文件名
+    attachment_workspace_path: str = ""  # 工作区相对路径（MIDI/图片/音频，Runner 层处理）
+    attachment_b64: str = ""              # 音频 base64（仅音色克隆直接上传场景）
 
 @router.post("/sessions/{session_id}/chat")
 async def universal_chat(session_id: str, req: UniversalChatRequest):
@@ -439,12 +525,19 @@ async def universal_chat(session_id: str, req: UniversalChatRequest):
                 message=req.message,
                 attachment_content=req.attachment_content,
                 attachment_name=req.attachment_name,
+                attachment_workspace_path=req.attachment_workspace_path,
                 attachment_b64=req.attachment_b64,
                 publish=_make_publisher(session_id),
                 role_id=_role_id,
             )
         except Exception as e:
+            # 异常时：推送错误事件 + 重置 pipeline_state 为 idle（防止刷新后永久 loading）
             await _publish(session_id, "error", {"message": str(e)})
+            await _publish(session_id, "pipeline.state", {"state": "idle", "_error": True})
+            try:
+                _db.upsert_session(session_id, pipeline_state="idle")
+            except Exception:
+                pass
 
     asyncio.create_task(_run())
     return {"status": "accepted", "session_id": session_id}
@@ -692,3 +785,155 @@ async def get_session_role(session_id: str):
         "domains":   role.domains,
         "greeting":  role.greeting,
     }
+
+
+# ─── 工作区文件系统 API ────────────────────────────────────────────────────────
+# 提供工作区文件的 CRUD，供前端文件树和 Agent 工具共用同一套存储。
+# 文件存储路径：data/workspace/{workspace_id}/...
+
+from pathlib import Path as _Path
+import base64 as _base64
+import mimetypes as _mimetypes
+
+_WS_FILE_ROOT = _Path(__file__).resolve().parent.parent.parent / "data" / "workspace"
+_WS_FILE_ROOT.mkdir(parents=True, exist_ok=True)
+
+_BLOCKED_EXTS = {".py", ".sh", ".bash", ".exe", ".bat", ".cmd", ".ps1"}
+_MAX_UPLOAD_BYTES = 20 * 1024 * 1024  # 20 MB
+
+
+def _ws_safe_path(workspace_id: str, rel: str) -> _Path:
+    base = (_WS_FILE_ROOT / workspace_id).resolve()
+    target = (base / rel).resolve()
+    if not str(target).startswith(str(base)):
+        raise HTTPException(400, "路径越界")
+    return target
+
+
+@router.get("/workspaces/{workspace_id}/files")
+async def list_ws_files(workspace_id: str, subdir: str = ""):
+    """列出工作区文件树"""
+    base = _WS_FILE_ROOT / workspace_id
+    scan = (base / subdir) if subdir else base
+    if not scan.exists():
+        return {"files": []}
+    files = []
+    for p in sorted(scan.rglob("*")):
+        if p.is_file():
+            rel = str(p.relative_to(base))
+            ext = p.suffix.lower().lstrip(".")
+            mime, _ = _mimetypes.guess_type(str(p))
+            files.append({
+                "path": rel,
+                "name": p.name,
+                "ext":  ext,
+                "size": p.stat().st_size,
+                "mime": mime or "application/octet-stream",
+                "is_text": p.suffix.lower() in {
+                    ".abc", ".txt", ".md", ".json", ".html", ".htm",
+                    ".css", ".js", ".ts", ".xml", ".yaml", ".yml",
+                    ".csv", ".svg", ".log",
+                },
+            })
+    return {"workspace_id": workspace_id, "files": files}
+
+
+@router.get("/workspaces/{workspace_id}/files/content")
+async def get_ws_file(workspace_id: str, path: str, encoding: str = "text"):
+    """读取工作区文件内容（encoding=text 返回文本，encoding=base64 返回 b64，encoding=raw 直接返回二进制）"""
+    import mimetypes as _mimetypes
+    from fastapi.responses import Response as _Response
+    target = _ws_safe_path(workspace_id, path)
+    if not target.exists():
+        raise HTTPException(404, f"文件不存在: {path}")
+    if encoding == "raw":
+        data = target.read_bytes()
+        mime, _ = _mimetypes.guess_type(str(target))
+        return _Response(content=data, media_type=mime or "application/octet-stream")
+    if encoding == "base64":
+        data = target.read_bytes()
+        return {"path": path, "content": _base64.b64encode(data).decode("ascii"), "encoding": "base64"}
+    return {"path": path, "content": target.read_text(encoding="utf-8", errors="replace"), "encoding": "text"}
+
+
+class WsFileWriteRequest(BaseModel):
+    path: str
+    content: str
+    encoding: str = "text"   # "text" | "base64"
+
+
+@router.put("/workspaces/{workspace_id}/files")
+async def put_ws_file(workspace_id: str, req: WsFileWriteRequest):
+    """写入/创建工作区文件"""
+    ext = _Path(req.path).suffix.lower()
+    if ext in _BLOCKED_EXTS:
+        raise HTTPException(400, f"禁止写入 {ext} 类型文件")
+    target = _ws_safe_path(workspace_id, req.path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if req.encoding == "base64":
+        data = _base64.b64decode(req.content)
+        if len(data) > _MAX_UPLOAD_BYTES:
+            raise HTTPException(400, "文件超过 20MB 限制")
+        target.write_bytes(data)
+        return {"ok": True, "path": req.path, "size": len(data)}
+    else:
+        raw = req.content.encode("utf-8")
+        if len(raw) > _MAX_UPLOAD_BYTES:
+            raise HTTPException(400, "文件超过 20MB 限制")
+        target.write_text(req.content, encoding="utf-8")
+        return {"ok": True, "path": req.path, "size": len(raw)}
+
+
+@router.delete("/workspaces/{workspace_id}/files")
+async def delete_ws_file(workspace_id: str, path: str):
+    """删除工作区文件"""
+    target = _ws_safe_path(workspace_id, path)
+    if not target.exists():
+        return {"ok": True, "message": "文件不存在（已删除）"}
+    target.unlink()
+    return {"ok": True, "path": path}
+
+
+class WsFileCopyRequest(BaseModel):
+    src_path: str
+    dst_path: str
+
+
+@router.post("/workspaces/{workspace_id}/files/copy")
+async def copy_ws_file(workspace_id: str, req: WsFileCopyRequest):
+    """复制工作区文件到新路径"""
+    import shutil as _shutil
+    src = _ws_safe_path(workspace_id, req.src_path)
+    dst = _ws_safe_path(workspace_id, req.dst_path)
+    if not src.exists():
+        raise HTTPException(404, f"源文件不存在：{req.src_path}")
+    _BLOCKED = {".py", ".sh", ".bash", ".exe", ".bat", ".cmd", ".ps1"}
+    if dst.suffix.lower() in _BLOCKED:
+        raise HTTPException(400, f"禁止复制为 {dst.suffix} 类型文件")
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    _shutil.copy2(src, dst)
+    return {"ok": True, "src": req.src_path, "dst": req.dst_path, "size": dst.stat().st_size}
+
+
+class WsFileRenameRequest(BaseModel):
+    src_path: str
+    new_name: str   # 仅文件名，不含路径分隔符
+
+
+@router.post("/workspaces/{workspace_id}/files/rename")
+async def rename_ws_file(workspace_id: str, req: WsFileRenameRequest):
+    """重命名工作区文件（保持同目录）"""
+    if "/" in req.new_name or "\\" in req.new_name:
+        raise HTTPException(400, "new_name 不能含路径分隔符")
+    _BLOCKED = {".py", ".sh", ".bash", ".exe", ".bat", ".cmd", ".ps1"}
+    if _Path(req.new_name).suffix.lower() in _BLOCKED:
+        raise HTTPException(400, f"禁止重命名为 {_Path(req.new_name).suffix} 类型文件")
+    src = _ws_safe_path(workspace_id, req.src_path)
+    if not src.exists():
+        raise HTTPException(404, f"文件不存在：{req.src_path}")
+    dst = src.parent / req.new_name
+    # 安全检查：dst 也必须在工作区内
+    _ws_safe_path(workspace_id, str(dst.relative_to(_WS_FILE_ROOT / workspace_id)))
+    src.rename(dst)
+    new_path = str(dst.relative_to(_WS_FILE_ROOT / workspace_id))
+    return {"ok": True, "src": req.src_path, "dst": new_path}

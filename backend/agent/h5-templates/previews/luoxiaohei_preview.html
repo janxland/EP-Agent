@@ -1,0 +1,565 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<!--
+  EP-Agent H5 模板：罗小黑（LuoXiaoHei）
+  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  主题色：深夜猫咪 #1A1A2E / 月光紫 #7C5CBF / 温暖橙 #F5A623
+  风格：深夜森林 + 月光 + 猫咪元素 + 温柔动效
+  变量同 apple.html，额外支持：
+    🐱   — 猫咪表情（默认 🐱）
+    深夜的宁静  — 夜晚氛围描述（可选）
+-->
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<meta name="theme-color" content="#0D0D1A">
+<title>坠落星空 — 罗小黑 × EP-Agent</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/abcjs/6.4.4/abcjs-basic-min.js"></script>
+<style>
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+:root {
+  --night:   #0D0D1A;
+  --deep:    #1A1A2E;
+  --purple:  #7C5CBF;
+  --moon:    #E8D5A3;
+  --orange:  #F5A623;
+  --text:    #E8E0F0;
+  --sub:     rgba(200,180,230,0.55);
+  --card:    rgba(26,26,46,0.90);
+  --border:  rgba(124,92,191,0.20);
+  --blur:    20px;
+  --safe-top: env(safe-area-inset-top,0px);
+  --safe-bot: env(safe-area-inset-bottom,0px);
+}
+
+html, body {
+  width: 100%; height: 100%;
+  background: var(--night); color: var(--text);
+  font-family: -apple-system, "PingFang SC", "Helvetica Neue", sans-serif;
+  -webkit-font-smoothing: antialiased;
+  overflow-x: hidden;
+}
+
+/* ── 星空背景 ── */
+#starCanvas {
+  position: fixed; inset: 0; z-index: 0; pointer-events: none;
+  width: 100%; height: 100%;
+}
+
+/* ── 预加载 ── */
+#preloader {
+  position: fixed; inset: 0; z-index: 9999;
+  background: var(--night);
+  display: flex; flex-direction: column;
+  align-items: center; justify-content: center; gap: 20px;
+  transition: opacity 1s ease;
+}
+#preloader.hide { opacity: 0; pointer-events: none; }
+
+.pre-cat {
+  font-size: 64px;
+  animation: catFloat 2s ease-in-out infinite;
+  filter: drop-shadow(0 0 20px rgba(124,92,191,0.6));
+}
+@keyframes catFloat {
+  0%,100% { transform: translateY(0) rotate(-3deg); }
+  50%      { transform: translateY(-12px) rotate(3deg); }
+}
+.pre-moon {
+  font-size: 28px; color: var(--moon);
+  position: absolute; top: calc(50% - 80px); right: calc(50% - 80px);
+  animation: moonGlow 3s ease-in-out infinite;
+}
+@keyframes moonGlow {
+  0%,100% { filter: drop-shadow(0 0 8px rgba(232,213,163,0.4)); }
+  50%      { filter: drop-shadow(0 0 20px rgba(232,213,163,0.8)); }
+}
+.pre-text { font-size: 14px; color: var(--sub); letter-spacing: 0.12em; }
+.pre-bar-wrap { width: 160px; height: 3px; background: rgba(124,92,191,0.15); border-radius: 2px; overflow: hidden; }
+.pre-bar { height: 100%; width: 0%; background: linear-gradient(90deg, var(--purple), var(--orange)); transition: width 0.05s linear; }
+
+/* ── 封面层 ── */
+.cover-layer {
+  position: fixed; inset: 0; height: 100dvh;
+  z-index: 100;
+  display: flex; flex-direction: column;
+  align-items: center; justify-content: flex-end;
+  padding: calc(var(--safe-top)+20px) 24px calc(var(--safe-bot)+44px);
+  transition: transform 0.65s cubic-bezier(0.32,0.72,0,1), opacity 0.65s ease;
+  will-change: transform, opacity;
+  overflow: hidden;
+  opacity: 0;
+  background:
+    radial-gradient(ellipse at 70% 15%, rgba(124,92,191,0.20) 0%, transparent 55%),
+    radial-gradient(ellipse at 30% 80%, rgba(245,166,35,0.10) 0%, transparent 50%),
+    linear-gradient(180deg, #0D0D1A 0%, #1A1A2E 100%);
+}
+.cover-layer.visible { opacity: 1; }
+.cover-layer.pulled  { transform: translateY(-100%); opacity: 0; pointer-events: none; }
+
+/* 月亮装饰 */
+.deco-moon {
+  position: absolute; top: 12%; right: 18%;
+  font-size: 52px;
+  filter: drop-shadow(0 0 20px rgba(232,213,163,0.5));
+  animation: moonFloat 5s ease-in-out infinite;
+}
+@keyframes moonFloat {
+  0%,100% { transform: translateY(0) rotate(-5deg); }
+  50%      { transform: translateY(-8px) rotate(5deg); }
+}
+.deco-stars {
+  position: absolute; top: 8%; left: 10%;
+  font-size: 14px; color: rgba(232,213,163,0.6);
+  animation: starTwinkle 2s ease-in-out infinite;
+  letter-spacing: 12px;
+}
+@keyframes starTwinkle {
+  0%,100% { opacity: 0.4; } 50% { opacity: 1; }
+}
+
+.cover-content { position: relative; z-index: 2; width: 100%; max-width: 400px; text-align: center; }
+
+/* 猫咪唱片 */
+.cat-disc {
+  width: 150px; height: 150px;
+  margin: 0 auto 24px;
+  position: relative;
+  display: flex; align-items: center; justify-content: center;
+}
+.cat-disc-ring {
+  position: absolute; inset: 0; border-radius: 50%;
+  border: 2px solid rgba(124,92,191,0.4);
+  animation: ringRotate 8s linear infinite paused;
+  box-shadow: 0 0 30px rgba(124,92,191,0.3), inset 0 0 20px rgba(124,92,191,0.1);
+}
+.cat-disc-ring::before {
+  content: ""; position: absolute; top: -4px; left: 50%; transform: translateX(-50%);
+  width: 8px; height: 8px; border-radius: 50%;
+  background: var(--orange);
+  box-shadow: 0 0 10px var(--orange);
+}
+.cat-disc-ring.playing { animation-play-state: running; }
+@keyframes ringRotate { to { transform: rotate(360deg); } }
+.cat-emoji {
+  font-size: 72px; position: relative; z-index: 2;
+  filter: drop-shadow(0 4px 16px rgba(124,92,191,0.5));
+  animation: catBob 3s ease-in-out infinite;
+}
+@keyframes catBob {
+  0%,100% { transform: translateY(0); }
+  50%      { transform: translateY(-6px); }
+}
+
+.cover-title {
+  font-size: clamp(20px,5.5vw,30px); font-weight: 700;
+  letter-spacing: -0.01em; line-height: 1.2; margin-bottom: 6px;
+  text-shadow: 0 2px 20px rgba(124,92,191,0.4);
+}
+.cover-sub { font-size: 14px; color: var(--sub); margin-bottom: 6px; }
+.night-mood { font-size: 13px; color: rgba(245,166,35,0.7); margin-bottom: 18px; font-style: italic; }
+
+.pills-row { display: flex; gap: 8px; justify-content: center; flex-wrap: wrap; margin-bottom: 22px; }
+.pill {
+  padding: 5px 13px; border-radius: 20px;
+  background: rgba(124,92,191,0.12); border: 1px solid var(--border);
+  font-size: 12px; font-weight: 600; color: rgba(200,180,240,0.9);
+  letter-spacing: 0.04em;
+  backdrop-filter: blur(var(--blur)); -webkit-backdrop-filter: blur(var(--blur));
+}
+.pill.warm { color: var(--orange); border-color: rgba(245,166,35,0.25); background: rgba(245,166,35,0.08); }
+
+/* 波形 */
+.waveform-wrap {
+  width: 100%; height: 50px;
+  display: flex; align-items: flex-end; gap: 2px;
+  margin-bottom: 22px; padding: 0 4px;
+  background: rgba(124,92,191,0.06); border-radius: 12px; overflow: hidden;
+  border: 1px solid rgba(124,92,191,0.10);
+}
+.wave-bar {
+  flex: 1; border-radius: 2px 2px 0 0; min-height: 3px; opacity: 0.55;
+  background: linear-gradient(to top, var(--purple), var(--moon));
+  transition: opacity 0.1s;
+}
+.wave-bar.active { opacity: 1; box-shadow: 0 0 5px rgba(124,92,191,0.6); }
+
+/* 控件 */
+.player-controls { display: flex; align-items: center; justify-content: center; gap: 18px; margin-bottom: 22px; }
+.ctrl-btn {
+  width: 48px; height: 48px; border-radius: 50%;
+  border: 1px solid var(--border); cursor: pointer;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 20px; background: rgba(124,92,191,0.10); color: var(--text);
+  transition: transform 0.15s, box-shadow 0.15s;
+  -webkit-tap-highlight-color: transparent;
+}
+.ctrl-btn:active { transform: scale(0.88); }
+.ctrl-btn.primary {
+  width: 66px; height: 66px; font-size: 26px;
+  background: linear-gradient(135deg, var(--purple), #9B6FD4);
+  border: none; color: #fff;
+  box-shadow: 0 8px 28px rgba(124,92,191,0.45);
+}
+
+.pull-hint {
+  display: flex; flex-direction: column; align-items: center; gap: 5px;
+  color: var(--sub); font-size: 12px; letter-spacing: 0.06em;
+  animation: hintBounce 2.5s ease-in-out infinite;
+}
+.pull-arrow { width: 24px; height: 24px; border-left: 1.5px solid var(--sub); border-bottom: 1.5px solid var(--sub); transform: rotate(-45deg) translateY(-3px); }
+@keyframes hintBounce { 0%,100%{transform:translateY(0);opacity:0.5;} 50%{transform:translateY(7px);opacity:1;} }
+
+/* ── 详情层 ── */
+.detail-layer { position: relative; z-index: 1; padding-top: 100dvh; min-height: 200dvh; background: var(--night); }
+.detail-inner { padding: 40px 20px calc(var(--safe-bot)+60px); max-width: 480px; margin: 0 auto; }
+
+.card {
+  background: var(--card); border: 1px solid var(--border);
+  border-radius: 20px; padding: 20px; margin-bottom: 14px;
+  backdrop-filter: blur(var(--blur)); -webkit-backdrop-filter: blur(var(--blur));
+  opacity: 0; transform: translateY(20px);
+  transition: opacity 0.5s ease, transform 0.5s ease;
+  position: relative; overflow: hidden;
+}
+/* 猫爪装饰 */
+.card::after {
+  content: "🐾";
+  position: absolute; bottom: 10px; right: 14px;
+  font-size: 16px; opacity: 0.12;
+}
+.card.visible { opacity: 1; transform: translateY(0); }
+
+.section-title {
+  font-size: 12px; font-weight: 600; color: rgba(124,92,191,0.8);
+  text-transform: uppercase; letter-spacing: 0.10em; margin-bottom: 14px;
+}
+.meta-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.meta-item { display: flex; align-items: center; gap: 8px; font-size: 13px; }
+.meta-icon { font-size: 16px; }
+.meta-label { color: var(--sub); font-size: 11px; margin-top: 2px; }
+
+.notes-waterfall { height: 110px; border-radius: 12px; background: rgba(124,92,191,0.05); overflow: hidden; border: 1px solid var(--border); }
+.notes-canvas { width: 100%; height: 100%; }
+
+.abc-output {
+  background: rgba(13,13,26,0.9); border: 1px solid var(--border);
+  border-radius: 14px; padding: 14px; overflow-x: auto;
+}
+.abc-output svg { max-width: 100%; filter: invert(1) hue-rotate(260deg) saturate(0.7); }
+
+.video-wrap { border-radius: 16px; overflow: hidden; background: #000; aspect-ratio: 16/9; }
+.video-wrap video { width: 100%; height: 100%; object-fit: cover; }
+
+.share-section { text-align: center; padding: 24px 0 0; }
+.share-btn {
+  display: inline-flex; align-items: center; gap: 10px;
+  padding: 14px 34px; border-radius: 50px;
+  background: linear-gradient(135deg, var(--purple), #9B6FD4);
+  color: #fff; font-size: 15px; font-weight: 600; border: none; cursor: pointer;
+  box-shadow: 0 8px 28px rgba(124,92,191,0.4);
+  transition: transform 0.15s; -webkit-tap-highlight-color: transparent;
+}
+.share-btn:active { transform: scale(0.95); }
+.brand-tag { margin-top: 14px; font-size: 12px; color: var(--sub); letter-spacing: 0.04em; }
+
+.back-btn {
+  position: fixed; bottom: calc(var(--safe-bot)+24px); right: 20px;
+  z-index: 200; width: 44px; height: 44px; border-radius: 50%;
+  background: var(--card); border: 1px solid var(--border);
+  backdrop-filter: blur(var(--blur)); -webkit-backdrop-filter: blur(var(--blur));
+  display: flex; align-items: center; justify-content: center;
+  font-size: 18px; cursor: pointer; color: var(--moon);
+  opacity: 0; transform: translateY(12px);
+  transition: opacity 0.3s, transform 0.3s;
+  -webkit-tap-highlight-color: transparent;
+}
+.back-btn.visible { opacity: 1; transform: translateY(0); }
+</style>
+</head>
+<body>
+
+<canvas id="starCanvas"></canvas>
+
+<div id="preloader">
+  <div class="pre-moon">🌙</div>
+  <div class="pre-cat">🐱</div>
+  <div class="pre-bar-wrap"><div class="pre-bar" id="preBar"></div></div>
+  <div class="pre-text">深夜加载中...</div>
+</div>
+
+<div class="page-wrapper">
+
+  <div class="cover-layer" id="coverLayer">
+    <div class="deco-moon">🌙</div>
+    <div class="deco-stars">✦ ✦ ✦</div>
+    <div class="cover-content">
+      <div class="cat-disc">
+        <div class="cat-disc-ring" id="coverDisc"></div>
+        <div class="cat-emoji">🐱</div>
+      </div>
+      <div class="cover-title">坠落星空</div>
+      <div class="cover-sub">EP-Agent</div>
+      <div class="night-mood">深夜的宁静</div>
+      <div class="pills-row">
+        <span class="pill">ABC Notation</span>
+        <span class="pill warm">♩=120</span>
+        <span class="pill">C 大调 调</span>
+        <span class="pill">5 音符</span>
+      </div>
+      <div class="waveform-wrap" id="waveformWrap"></div>
+      <div class="player-controls">
+        <button class="ctrl-btn" id="btnRestart">⏮</button>
+        <button class="ctrl-btn primary" id="btnPlay">▶</button>
+        <button class="ctrl-btn" id="btnStop">⏹</button>
+      </div>
+      <div class="pull-hint"><div class="pull-arrow"></div><span>下拉查看详情</span></div>
+    </div>
+  </div>
+
+  <div class="detail-layer">
+    <div class="detail-inner">
+      <div class="card" data-card>
+        <div class="section-title">乐曲信息</div>
+        <div class="meta-grid">
+          <div class="meta-item"><span class="meta-icon">🎵</span>
+            <div><div>坠落星空</div><div class="meta-label">曲名</div></div></div>
+          <div class="meta-item"><span class="meta-icon">🎹</span><div><div>EP-Agent</div><div class="meta-label">作曲</div></div></div>
+          <div class="meta-item"><span class="meta-icon">🎼</span>
+            <div><div>C 大调</div><div class="meta-label">调号</div></div></div>
+          <div class="meta-item"><span class="meta-icon">🥁</span>
+            <div><div>120 BPM</div><div class="meta-label">速度</div></div></div>
+          <div class="meta-item"><span class="meta-icon">🎹</span>
+            <div><div>5</div><div class="meta-label">音符数</div></div></div>
+          <div class="meta-item"><span class="meta-icon">⏱</span>
+            <div><div>0:02</div><div class="meta-label">时长</div></div></div>
+        </div>
+        
+      </div>
+
+      <div class="card" data-card>
+        <div class="section-title">音符可视化</div>
+        <div class="notes-waterfall"><canvas class="notes-canvas" id="notesCanvas"></canvas></div>
+      </div>
+
+      <div class="abc-section card" data-card><h3 class="section-title">🎼 乐谱</h3><div id="abcContainer" style="filter:invert(1) brightness(0.9);margin-top:12px;overflow-x:auto;"></div></div>
+      
+
+      <div class="share-section">
+        <button class="share-btn" id="shareBtn"><span>🌙</span><span>分享给朋友</span></button>
+        <div class="brand-tag">由 EP-Agent 生成 · 罗小黑主题</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<button class="back-btn" id="backBtn">🌙</button>
+
+<script>
+(function() {
+  'use strict';
+  const NOTES       = [{"pitch": "E4", "time_ms": 0, "duration_ms": 400}, {"pitch": "G4", "time_ms": 400, "duration_ms": 400}, {"pitch": "A4", "time_ms": 800, "duration_ms": 600}, {"pitch": "C5", "time_ms": 1400, "duration_ms": 800}, {"pitch": "B4", "time_ms": 2200, "duration_ms": 400}];
+  const WAVEFORM    = [1.0, 0.05, 0.05, 0.05, 0.05, 0.05, 1.0, 0.05, 0.05, 0.05, 0.05, 0.05, 1.0, 0.05, 0.05, 0.05, 0.05, 0.05, 0.05, 0.05, 0.05, 1.0, 0.05, 0.05, 0.05, 0.05, 0.05, 0.05, 0.05, 0.05, 0.05, 0.05, 0.05, 1.0, 0.05, 0.05, 0.05, 0.05, 0.05, 0.05];
+  const ABC_CONTENT = X:1\nT:\u5760\u843d\u661f\u7a7a\nM:4/4\nK:C\nEGAc B2|;
+  const BPM         = 120;
+  const DURATION_MS = 2600;
+
+  // 星空
+  (function initStars() {
+    const canvas = document.getElementById('starCanvas');
+    if (!canvas) return;
+    const ctx = canvas.getContext('2d');
+    let W = window.innerWidth, H = window.innerHeight;
+    canvas.width = W; canvas.height = H;
+    const stars = Array.from({length: 120}, function() {
+      return { x: Math.random()*W, y: Math.random()*H,
+               r: Math.random()*1.5+0.3, o: Math.random()*0.6+0.2,
+               speed: Math.random()*0.8+0.2 };
+    });
+    let frame = 0;
+    function draw() {
+      ctx.clearRect(0,0,W,H);
+      frame++;
+      stars.forEach(function(s, i) {
+        const twinkle = Math.sin(frame*0.02 + i) * 0.3 + 0.7;
+        ctx.beginPath(); ctx.arc(s.x, s.y, s.r, 0, Math.PI*2);
+        ctx.fillStyle = '#E8D5A3';
+        ctx.globalAlpha = s.o * twinkle;
+        ctx.fill();
+      });
+      ctx.globalAlpha = 1;
+      requestAnimationFrame(draw);
+    }
+    draw();
+    window.addEventListener('resize', function() {
+      W = window.innerWidth; H = window.innerHeight;
+      canvas.width = W; canvas.height = H;
+    });
+  })();
+
+  // 预加载
+  const preloader = document.getElementById('preloader');
+  const preBar = document.getElementById('preBar');
+  let prog = 0;
+  const t = setInterval(function() {
+    prog += Math.random()*12+4;
+    if (prog>=95) { clearInterval(t); prog=95; }
+    preBar.style.width = prog+'%';
+  }, 100);
+  window.addEventListener('load', function() {
+    clearInterval(t); preBar.style.width='100%';
+    setTimeout(function() {
+      preloader.classList.add('hide');
+      setTimeout(function() {
+        preloader.style.display='none';
+        document.getElementById('coverLayer').classList.add('visible');
+        document.querySelectorAll('[data-card]').forEach(function(c,i) {
+          setTimeout(function(){c.classList.add('visible');}, i*120);
+        });
+      }, 1000);
+    }, 400);
+  });
+
+  // 波形
+  const waveWrap = document.getElementById('waveformWrap');
+  WAVEFORM.forEach(function(h) {
+    const bar = document.createElement('div');
+    bar.className = 'wave-bar';
+    bar.style.height = Math.max(4, Math.round(h*46))+'px';
+    waveWrap.appendChild(bar);
+  });
+
+  // 播放器
+  let audioCtx=null, isPlaying=false, playStart=0;
+  let scheduledNodes=[], animFrame=null;
+  function getCtx() {
+    if (!audioCtx) audioCtx=new(window.AudioContext||window.webkitAudioContext)();
+    return audioCtx;
+  }
+  function stopAll() {
+    scheduledNodes.forEach(function(n){try{n.stop(0);}catch(e){}});
+    scheduledNodes=[]; if(animFrame){cancelAnimationFrame(animFrame);animFrame=null;}
+    isPlaying=false;
+    document.getElementById('btnPlay').textContent='▶';
+    document.getElementById('coverDisc').classList.remove('playing');
+    waveWrap.querySelectorAll('.wave-bar').forEach(function(b){b.classList.remove('active');});
+  }
+  function playNotes(offset) {
+    const ctx=getCtx();
+    if(ctx.state==='suspended') ctx.resume();
+    stopAll();
+    const now=ctx.currentTime;
+    playStart=now-offset/1000;
+    isPlaying=true;
+    document.getElementById('btnPlay').textContent='⏸';
+    document.getElementById('coverDisc').classList.add('playing');
+    NOTES.forEach(function(note) {
+      const t2=note.time_ms/1000, d=(note.duration_ms||200)/1000;
+      if(t2<offset/1000) return;
+      const osc=ctx.createOscillator(), gain=ctx.createGain();
+      osc.connect(gain); gain.connect(ctx.destination);
+      const freq=note.midi?440*Math.pow(2,(note.midi-69)/12):440;
+      osc.type='sine';
+      osc.frequency.setValueAtTime(freq, now+t2);
+      const st=now+t2;
+      gain.gain.setValueAtTime(0,st);
+      gain.gain.linearRampToValueAtTime(0.14,st+0.015);
+      gain.gain.exponentialRampToValueAtTime(0.001,st+d);
+      osc.start(st); osc.stop(st+d+0.05);
+      scheduledNodes.push(osc);
+    });
+    setTimeout(function(){if(isPlaying)stopAll();}, Math.max(1000,DURATION_MS-offset+500));
+    (function animate(){
+      if(!isPlaying) return;
+      const elapsed=(getCtx().currentTime-playStart)*1000;
+      const idx=Math.floor(Math.min(elapsed/(DURATION_MS||1),1)*waveWrap.children.length);
+      waveWrap.querySelectorAll('.wave-bar').forEach(function(b,i){b.classList.toggle('active',i===idx);});
+      animFrame=requestAnimationFrame(animate);
+    })();
+  }
+  document.getElementById('btnPlay').addEventListener('click',function(){if(isPlaying)stopAll();else playNotes(0);});
+  document.getElementById('btnStop').addEventListener('click',stopAll);
+  document.getElementById('btnRestart').addEventListener('click',function(){stopAll();setTimeout(function(){playNotes(0);},50);});
+
+  // 音符瀑布
+  function drawNotes() {
+    const canvas=document.getElementById('notesCanvas');
+    if(!canvas||!NOTES.length) return;
+    const ctx2=canvas.getContext('2d');
+    const W=canvas.offsetWidth||300, H=canvas.offsetHeight||110;
+    canvas.width=W*devicePixelRatio; canvas.height=H*devicePixelRatio;
+    ctx2.scale(devicePixelRatio,devicePixelRatio);
+    const maxT=NOTES.reduce(function(m,n){return Math.max(m,n.time_ms+(n.duration_ms||200));},1);
+    const pitches=[...new Set(NOTES.map(function(n){return n.midi||n.pitch;}))].sort();
+    const pitchIdx={}; pitches.forEach(function(p,i){pitchIdx[p]=i;});
+    const rows=Math.max(pitches.length,1);
+    ctx2.clearRect(0,0,W,H);
+    NOTES.forEach(function(note) {
+      const x=(note.time_ms/maxT)*W;
+      const pw=Math.max(2,((note.duration_ms||200)/maxT)*W);
+      const pi=pitchIdx[note.midi||note.pitch]||0;
+      const y=H-((pi/rows)*H)-4;
+      const grad=ctx2.createLinearGradient(x,y,x+pw,y);
+      grad.addColorStop(0,'#7C5CBF'); grad.addColorStop(1,'#E8D5A3');
+      ctx2.fillStyle=grad; ctx2.globalAlpha=0.75;
+      ctx2.beginPath();
+      if(ctx2.roundRect) ctx2.roundRect(x,y,pw,4,2); else ctx2.rect(x,y,pw,4);
+      ctx2.fill();
+    });
+    ctx2.globalAlpha=1;
+  }
+
+  function renderAbc() {
+    if(!ABC_CONTENT||!window.ABCJS) return;
+    try{ABCJS.renderAbc('abcOutput',ABC_CONTENT,{responsive:'resize'});}catch(e){}
+  }
+
+  // 下拉
+  const coverLayer=document.getElementById('coverLayer');
+  const backBtn=document.getElementById('backBtn');
+  let coverPulled=false, touchStartY=0;
+  document.addEventListener('touchstart',function(e){touchStartY=e.touches[0].clientY;},{passive:true});
+  document.addEventListener('touchmove',function(e){
+    if(!coverPulled&&e.touches[0].clientY-touchStartY<-60&&window.scrollY<10) pullCover();
+  },{passive:true});
+  document.addEventListener('wheel',function(e){if(!coverPulled&&e.deltaY>80)pullCover();},{passive:true});
+  function pullCover(){
+    if(coverPulled) return; coverPulled=true;
+    coverLayer.classList.add('pulled');
+    setTimeout(function(){window.scrollTo({top:window.innerHeight*0.5,behavior:'smooth'});},200);
+    backBtn.classList.add('visible');
+  }
+  backBtn.addEventListener('click',function(){
+    coverPulled=false; coverLayer.classList.remove('pulled');
+    window.scrollTo({top:0,behavior:'smooth'}); backBtn.classList.remove('visible');
+  });
+  window.addEventListener('scroll',function(){
+    if(window.scrollY>window.innerHeight*0.3){
+      if(!coverPulled){coverPulled=true;coverLayer.classList.add('pulled');}
+      backBtn.classList.add('visible');
+    } else { backBtn.classList.remove('visible'); }
+  },{passive:true});
+
+  // 分享
+  document.getElementById('shareBtn').addEventListener('click',function(){
+    if(navigator.share) navigator.share({title:'坠落星空',url:location.href}).catch(function(){});
+    else navigator.clipboard.writeText(location.href).then(function(){
+      document.querySelector('.share-btn span:last-child').textContent='链接已复制！';
+      setTimeout(function(){document.querySelector('.share-btn span:last-child').textContent='分享给朋友';},2000);
+    }).catch(function(){});
+  });
+
+  if('IntersectionObserver' in window){
+    const obs=new IntersectionObserver(function(entries){
+      entries.forEach(function(e){if(e.isIntersecting){e.target.classList.add('visible');obs.unobserve(e.target);}});
+    },{threshold:0.15});
+    document.querySelectorAll('[data-card]').forEach(function(el){obs.observe(el);});
+  }
+
+  window.addEventListener('load',function(){drawNotes();renderAbc();});
+  window.addEventListener('resize',drawNotes);
+})();
+</script>
+</body>
+</html>

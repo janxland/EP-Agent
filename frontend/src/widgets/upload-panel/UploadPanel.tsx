@@ -2,6 +2,7 @@
 
 import { useCallback, useState } from 'react'
 import { useScoreStore } from '@/entities/session/store'
+import { useWorkspaceStore } from '@/features/workspace/store/workspace.store'
 import { createSession, convertJSON } from '@/shared/lib/api'
 
 /**
@@ -16,6 +17,7 @@ export function UploadPanel({ compact = false }: { compact?: boolean }) {
 
   // SSE 订阅由 page.tsx 统一管理，UploadPanel 不再自建 EventSource
   const { setSessionId, setScore, setPipelineState, appendLog, reset, sessionId } = useScoreStore()
+  const { activeWorkspaceId } = useWorkspaceStore()
 
   const handleFile = useCallback(
     async (file: File) => {
@@ -51,7 +53,8 @@ export function UploadPanel({ compact = false }: { compact?: boolean }) {
         reset()
 
         // 创建新 Session（每次上传都强制新建，避免旧 session 历史污染）
-        const { session_id } = await createSession()
+        // 传入 activeWorkspaceId，确保 session 归属正确工作区，侧边栏可见
+        const { session_id } = await createSession(activeWorkspaceId ?? undefined)
         const sid = session_id
         setSessionId(sid)  // 这会触发 page.tsx 的 useEffect 重新建立 SSE
 
@@ -80,7 +83,7 @@ export function UploadPanel({ compact = false }: { compact?: boolean }) {
         setIsLoading(false)
       }
     },
-    [sessionId, setSessionId, setScore, setPipelineState, appendLog, reset]
+    [sessionId, activeWorkspaceId, setSessionId, setScore, setPipelineState, appendLog, reset]
   )
 
   const onDrop = useCallback(
