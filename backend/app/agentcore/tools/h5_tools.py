@@ -44,6 +44,21 @@ _H5_OUTPUT_DIR = Path(config.H5_OUTPUT_DIR)
 _H5_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 
+# ── 模板静态文件复制辅助函数 ──────────────────────────────────────────────────
+def _copy_template_statics(tpl_dir: Path, dest_dir: Path) -> None:
+    """
+    将模板根目录下的非 HTML 静态文件（CSS / JS 等）复制到目标目录。
+    跳过 index.html、meta.json 和子目录（assets/ 由调用方单独处理）。
+    """
+    if not tpl_dir.exists():
+        return
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    skip_files = {"index.html", "meta.json"}
+    for f in tpl_dir.iterdir():
+        if f.is_file() and f.name not in skip_files:
+            shutil.copy2(f, dest_dir / f.name)
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # 解析工具
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -237,14 +252,14 @@ def generate_h5_from_abc(
 
 
 @tool(group="h5")
-def save_h5_file(html: str, filename: str = "", workspace_id: str = "") -> dict:
+def save_h5_file(html: str, filename: str = "") -> dict:
     """
     将 H5 HTML 字符串保存为文件，返回文件路径和访问 URL。
-    同时将文件复制到工作区 h5/ 目录（若提供 workspace_id），使其出现在文件树中。
+    同时自动写入当前项目 h5/ 目录（通过 ContextVar 推断，无需传 ID 参数）。
+    ⚠️ 不需要传 workspace_id / project_id，系统自动从当前会话推断，禁止猜测 ID 参数。
 
     html: 完整的 HTML 字符串
     filename: 文件名（不含扩展名，可选，默认自动生成）
-    workspace_id: 工作区 ID（可选，提供时同步写入工作区 h5/ 目录）
     返回: {"file_path": str, "url_path": str, "size_kb": float, "workspace_path": str}
     """
     if not filename:
@@ -258,18 +273,19 @@ def save_h5_file(html: str, filename: str = "", workspace_id: str = "") -> dict:
     except Exception as e:
         return {"error": f"文件保存失败: {e}"}
 
-    # 同步写入工作区 h5/ 目录，使文件树可见
+    # 自动写入当前项目 h5/ 目录（不需要 LLM 传参）
     ws_path = ""
-    if workspace_id:
-        try:
-            from app.agentcore.tools.workspace_tools import _WS_ROOT
-            ws_h5_dir = _WS_ROOT / workspace_id / "h5"
+    try:
+        from app.agentcore.session_context import get_current_project_root
+        _proj_root = get_current_project_root()
+        if _proj_root:
+            ws_h5_dir = Path(_proj_root) / "h5"
             ws_h5_dir.mkdir(parents=True, exist_ok=True)
             ws_file = ws_h5_dir / f"{safe_name}.html"
             ws_file.write_text(html, encoding="utf-8")
             ws_path = f"h5/{safe_name}.html"
-        except Exception:
-            pass
+    except Exception:
+        pass
 
     return {
         "file_path":      str(out_path),
@@ -278,6 +294,45 @@ def save_h5_file(html: str, filename: str = "", workspace_id: str = "") -> dict:
         "size_kb":        round(len(html.encode("utf-8")) / 1024, 1),
         "workspace_path": ws_path,
     }
+
+
+@tool(group="h5")
+def get_h5_template(template_name: str) -> dict:
+    """
+    读取指定模板的 HTML 源码（含 {{VAR}} 占位符），用于模板定制流程。
+    先调用 list_h5_templates() 获取可用模板名，再调用此工具读取内容。
+
+    template_name: 模板名称（如 apple / miku / neon，不含 .html 后缀）
+    返回: {"name": str, "html": str, "variables": list[str], "size_kb": float}
+    """
+    try:
+        html = read_h5_template(template_name)
+    except FileNotFoundError as e:
+        return {"error": str(e)}
+
+    import re as _re
+    variables = sorted(set(_re.findall(r"\{\{(\w+)\}\}", html)))
+    return {
+        "name":      template_name,
+        "html":      html,
+        "variables": variables,
+        "size_kb":   round(len(html.encode("utf-8")) / 1024, 1),
+    }
+
+
+@tool(group="h5")
+def save_h5_template(template_name: str, html_content: str) -> dict:
+    """
+    将修改后的 HTML 保存为新模板（或覆盖已有模板），自动热重载注册表。
+    保存后可立即用新模板名调用 generate_h5_* 工具，无需重启服务。
+
+    template_name: 模板名称（不含 .html 后缀，建议用英文小写+下划线）
+    html_content:  完整 HTML 字符串（应含 {{VAR}} 占位符）
+    返回: {"name": str, "path": str, "size_kb": float, "variables": list[str]}
+    """
+    if not html_content or not html_content.strip():
+        return {"error": "html_content 不能为空"}
+    return _write_h5_template(template_name, html_content)
 
 
 @tool(group="h5")
@@ -314,87 +369,57 @@ def list_h5_templates() -> dict:
     }
 
 
-@tool(group="h5")
-def get_h5_template(template_name: str) -> dict:
-    """
-    读取指定 H5 模板文件的原始 HTML 内容，供 LLM 查看和定制。
-
-    template_name: 模板名称（apple / miku / luoxiaohei / neon / ins）
-    返回: {"name": str, "html": str, "variables": list[str], "size_kb": float}
-    """
-    try:
-        html = read_h5_template(template_name)
-        variables = sorted(set(__import__("re").findall(r"\{\{(\w+)\}\}", html)))
-        return {
-            "name":      template_name,
-            "html":      html,
-            "variables": variables,
-            "size_kb":   round(len(html.encode("utf-8")) / 1024, 1),
-        }
-    except FileNotFoundError as e:
-        return {"error": str(e)}
-
-
-@tool(group="h5")
-def save_h5_template(template_name: str, html_content: str) -> dict:
-    """
-    保存（新建或覆盖）一个 H5 模板文件。
-    LLM 可调用此工具定制专属主题模板，写入后立即可用。
-
-    template_name: 模板名称（不含 .html 后缀，如 "cyberpunk" "genshin"）
-    html_content:  完整 HTML 字符串（建议包含 {{TITLE}} {{NOTES_JSON}} 等占位符）
-    返回: {"path": str, "size_kb": float, "variables": list[str]}
-    """
-    try:
-        result = _write_h5_template(template_name, html_content)
-        return result
-    except Exception as e:
-        return {"error": f"模板保存失败: {e}"}
-
 
 
 @tool(group="h5")
 def generate_h5_from_midi(
     midi_workspace_path: str,
-    workspace_id: str,
     title: str = "",
     template: str = "apple",
     composer: str = "",
     extra_info: str = "",
 ) -> dict:
     """
-    【快捷工具】从工作区 MIDI 文件路径一步生成 H5 海报并保存到工作区。
-    智能相对路径：H5 保存在 workspace/h5/xxx.html，MIDI 在 workspace/.sky/xxx.mid，
-    两者同属工作区，H5 直接用相对路径 ../{midi_workspace_path} 加载 MIDI，
-    无需复制文件，路径始终正确。
+    【快捷工具】从项目内 MIDI 文件路径一步生成 H5 海报并保存到项目 h5/ 目录。
+    智能相对路径：H5 保存在项目 h5/xxx.html，MIDI 在项目 .sky/xxx.mid，
+    H5 直接用相对路径 ../{midi_workspace_path} 加载 MIDI，无需复制文件。
 
-    midi_workspace_path: 工作区内 MIDI 文件的相对路径（如 .sky/song.mid）
-    workspace_id: 工作区 ID
+    midi_workspace_path: 项目内 MIDI 文件的相对路径（如 .sky/song.mid）
+    ⚠️ 不需要传 workspace_id / project_id，系统自动从当前会话推断，禁止猜测 ID 参数。
     title: 乐曲标题（可选，未提供时从文件名推断）
     template: 视觉模板 apple/miku/luoxiaohei/neon/ins（默认 apple）
     composer: 作曲者（可选）
     extra_info: 额外说明（可选）
     返回: {"file_saved": true, "url_path": str, "workspace_path": str, "title": str, "midi_url": str}
     """
-    import shutil
-    from app.agentcore.tools.workspace_tools import _WS_ROOT
+    # ── 自动推断项目根目录（ContextVar，不依赖 LLM 传参）────────────────────
+    try:
+        from app.agentcore.session_context import get_current_project_root
+        _project_root = get_current_project_root()
+    except Exception:
+        _project_root = ""
 
+    if not _project_root:
+        return {"error": "无法确定项目根目录，请确保在有效会话中调用此工具"}
+
+    proj_root = Path(_project_root)
     fallback_title = title or Path(midi_workspace_path).stem
 
-    # 工作区 MIDI 文件的真实路径（安全校验）
-    ws_dir   = _WS_ROOT / workspace_id
-    src_path = (ws_dir / midi_workspace_path).resolve()
-    if not str(src_path).startswith(str(ws_dir.resolve())):
+    # ── MIDI 文件路径安全校验（必须在项目目录内）──────────────────────────────
+    src_path = (proj_root / midi_workspace_path).resolve()
+    if not str(src_path).startswith(str(proj_root.resolve())):
         return {"error": "路径越界拒绝"}
     if not src_path.exists():
-        return {"error": f"MIDI 文件不存在: {midi_workspace_path}"}
+        return {"error": f"MIDI 文件不存在: {midi_workspace_path}（项目目录: {_project_root}）"}
 
-    # ── 智能相对路径：H5 在 h5/xxx.html，MIDI 在 .sky/xxx.mid
-    # 从 h5/ 目录出发，相对路径为 ../{midi_workspace_path}
-    # 例：midi_workspace_path=".sky/song.mid" → midi_url="../.sky/song.mid"
-    midi_url = f"../{midi_workspace_path}"
+    # ── MIDI 文件名（复制到 h5/ 同目录，用同级相对路径加载）
+    # 例：midi_workspace_path=".sky/如果的事.mid" → midi_filename="如果的事.mid"
+    #     H5 保存在 h5/xxx.html，MIDI 复制到 h5/如果的事.mid
+    #     midi_url="./如果的事.mid"，浏览器可直接加载 ✅
+    midi_filename = Path(midi_workspace_path).name
+    midi_url = f"./{midi_filename}"
 
-    # 生成 H5（只传 URL，CDN 库自行加载，LLM 不碰二进制）
+    # 生成 H5（只传相对 URL，CDN 库自行加载，LLM 不碰二进制）
     try:
         html = render_score_to_h5(
             title=fallback_title,
@@ -412,8 +437,9 @@ def generate_h5_from_midi(
             extra_info=extra_info, source_format="midi",
         )
 
-    # ── 自动保存 1：H5 输出目录（静态服务访问）─────────────────────────────
-    safe_name  = re.sub(r"[^\w\-]", "_", fallback_title) or "h5_midi"
+    safe_name = re.sub(r"[^\w\-]", "_", fallback_title) or "h5_midi"
+
+    # ── 自动保存 1：H5 全局输出目录（静态服务 /h5/ 路径访问）────────────────
     out_path   = _H5_OUTPUT_DIR / f"{safe_name}.html"
     url_path   = ""
     file_saved = False
@@ -421,7 +447,13 @@ def generate_h5_from_midi(
         out_path.write_text(html, encoding="utf-8")
         url_path   = f"/h5/{safe_name}.html"
         file_saved = True
-        # 复制模板 assets/ 目录（图片等静态资源，供相对路径 assets/xxx.png 访问）
+        # 复制 MIDI 到全局输出目录（同级相对路径 ./xxx.mid）
+        midi_out = _H5_OUTPUT_DIR / midi_filename
+        if not midi_out.exists():
+            shutil.copy2(src_path, midi_out)
+        # 复制模板根目录静态文件（style.css / player.js 等）
+        _copy_template_statics(_TEMPLATE_DIR / template, _H5_OUTPUT_DIR)
+        # 复制模板 assets/ 目录（图片等静态资源）
         tpl_assets = _TEMPLATE_DIR / template / "assets"
         if tpl_assets.exists():
             out_assets = _H5_OUTPUT_DIR / "assets"
@@ -429,41 +461,42 @@ def generate_h5_from_midi(
     except Exception:
         pass
 
-    # ── 自动保存 2：工作区 h5/ 目录（文件树可见）─────────────────────────────
+    # ── 自动保存 2：项目 h5/ 目录（文件树可见，MIDI 相对路径正确）──────────
     ws_path = ""
     try:
-        ws_h5_dir = _WS_ROOT / workspace_id / "h5"
-        ws_h5_dir.mkdir(parents=True, exist_ok=True)
-        ws_file = ws_h5_dir / f"{safe_name}.html"
+        proj_h5_dir = proj_root / "h5"
+        proj_h5_dir.mkdir(parents=True, exist_ok=True)
+        ws_file = proj_h5_dir / f"{safe_name}.html"
         ws_file.write_text(html, encoding="utf-8")
         ws_path = f"h5/{safe_name}.html"
-        # 工作区同样复制 assets/
+        # 复制模板根目录静态文件（style.css / player.js 等）
+        _copy_template_statics(_TEMPLATE_DIR / template, proj_h5_dir)
+        # 同步复制 assets/（供模板图片相对路径访问）
         tpl_assets = _TEMPLATE_DIR / template / "assets"
         if tpl_assets.exists():
-            ws_assets = ws_h5_dir / "assets"
-            shutil.copytree(tpl_assets, ws_assets, dirs_exist_ok=True)
-        # MIDI 无需复制：H5 用相对路径 ../{midi_workspace_path} 直接引用工作区原文件
+            proj_assets = proj_h5_dir / "assets"
+            shutil.copytree(tpl_assets, proj_assets, dirs_exist_ok=True)
+        # 复制 MIDI 到 h5/ 目录（同级相对路径 ./xxx.mid，文件列表可见）
+        midi_dest = proj_h5_dir / midi_filename
+        if not midi_dest.exists():
+            shutil.copy2(src_path, midi_dest)
     except Exception:
         pass
 
-    # ── URL 优先级：工作区路径 > H5 输出目录路径 ──────────────────────────────
-    # 工作区 H5（/workspace/ws_xxx/h5/xxx.html）中的相对路径 ../.sky/song.mid
-    # 浏览器解析为 /workspace/ws_xxx/.sky/song.mid → 命中工作区静态服务 ✅
-    # /h5/xxx.html 中的 ../.sky/song.mid → 解析为 /.sky/song.mid → 404 ❌
-    # 因此前端应优先使用工作区访问路径
-    ws_url_path = f"/workspace/{workspace_id}/h5/{safe_name}.html" if ws_path else ""
-    final_url   = ws_url_path or url_path  # 工作区路径优先
+    # ── 构造访问 URL ──────────────────────────────────────────────────────────
+    # 项目 H5 路径下，相对路径 ../.sky/song.mid 能正确解析到项目 .sky/ 目录 ✅
+    # /h5/xxx.html 路径下，相对路径 ../.sky/ 解析错误（无项目上下文）❌
+    # 因此优先使用项目内路径（通过工作区静态服务暴露）
+    final_url = url_path  # 前端通过 workspace_path 定位文件，url_path 作备用
 
     return {
-        "file_saved":      file_saved or bool(ws_path),
-        "url_path":        final_url,
-        "h5_output_path":  url_path,        # /h5/ 静态服务路径（备用，MIDI 相对路径在此无效）
-        "workspace_url":   ws_url_path,     # /workspace/ 路径（MIDI 相对路径正确）
-        "file_path":       str(out_path) if file_saved else "",
-        "workspace_path":  ws_path,
-        "title":           fallback_title,
-        "midi_url":        midi_url,
-        "template":        template,
-        "size_kb":         round(len(html.encode("utf-8")) / 1024, 1),
-        "_note":           "H5 已自动保存到工作区 h5/ 目录。url_path 为工作区访问路径，MIDI 相对路径正确。无需再调 save_h5_file。",
+        "file_saved":     file_saved or bool(ws_path),
+        "url_path":       final_url,
+        "workspace_path": ws_path,
+        "file_path":      str(out_path) if file_saved else "",
+        "title":          fallback_title,
+        "midi_url":       midi_url,
+        "template":       template,
+        "size_kb":        round(len(html.encode("utf-8")) / 1024, 1),
+        "_note":          "H5 已自动保存到项目 h5/ 目录。无需再调 save_h5_file。",
     }

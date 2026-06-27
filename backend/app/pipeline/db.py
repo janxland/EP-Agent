@@ -44,9 +44,23 @@ CREATE TABLE IF NOT EXISTS workspaces (
     updated_at   TEXT
 );
 
+-- 项目层（workspace → project → session/topic）
+-- 每个 project 在文件系统中有独立目录：workspace/{ws_id}/projects/{proj_id}/
+-- session 绑定 project，只能操作所属 project 的文件，不能跨 project
+CREATE TABLE IF NOT EXISTS projects (
+    id           TEXT PRIMARY KEY,
+    workspace_id TEXT NOT NULL,
+    name         TEXT NOT NULL DEFAULT '新项目',
+    description  TEXT DEFAULT '',
+    created_at   TEXT,
+    updated_at   TEXT,
+    FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE
+);
+
 CREATE TABLE IF NOT EXISTS sessions (
     id             TEXT PRIMARY KEY,
-    workspace_id   TEXT,                   -- 所属工作区（可为空，兼容旧数据）
+    workspace_id   TEXT,                   -- 所属工作区（冗余存储，便于查询）
+    project_id     TEXT,                   -- 所属项目（文件隔离边界）
     title          TEXT DEFAULT '新对话',  -- 对话标题（自动从谱子名更新）
     score_title    TEXT,
     score_key      TEXT,
@@ -57,7 +71,8 @@ CREATE TABLE IF NOT EXISTS sessions (
     extra          TEXT DEFAULT '{}',      -- JSON 扩展字段（存储 role_id 等）
     created_at     TEXT,
     updated_at     TEXT,
-    FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE
+    FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE,
+    FOREIGN KEY (project_id)   REFERENCES projects(id)   ON DELETE SET NULL
 );
 
 CREATE TABLE IF NOT EXISTS messages (
@@ -128,16 +143,31 @@ def _migrate(conn: sqlite3.Connection):
         )
     """)
 
-    # 2. 为 sessions 补充缺失列
+    # 2. 确保 projects 表存在（workspace → project → session 三层）
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS projects (
+            id           TEXT PRIMARY KEY,
+            workspace_id TEXT NOT NULL,
+            name         TEXT NOT NULL DEFAULT '新项目',
+            description  TEXT DEFAULT '',
+            created_at   TEXT,
+            updated_at   TEXT,
+            FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE
+        )
+    """)
+
+    # 3. 为 sessions 补充缺失列
     cols = {r[1] for r in conn.execute("PRAGMA table_info(sessions)").fetchall()}
     if "workspace_id" not in cols:
         conn.execute("ALTER TABLE sessions ADD COLUMN workspace_id TEXT")
+    if "project_id" not in cols:
+        conn.execute("ALTER TABLE sessions ADD COLUMN project_id TEXT")
     if "title" not in cols:
         conn.execute("ALTER TABLE sessions ADD COLUMN title TEXT DEFAULT '新对话'")
     if "extra" not in cols:
         conn.execute("ALTER TABLE sessions ADD COLUMN extra TEXT DEFAULT '{}'")
 
-    # 3. 将无 workspace_id 的旧 session 关联到默认工作区
+    # 4. 将无 workspace_id 的旧 session 关联到默认工作区
     orphans = conn.execute(
         "SELECT COUNT(*) FROM sessions WHERE workspace_id IS NULL OR workspace_id=''"
     ).fetchone()[0]
@@ -153,8 +183,37 @@ def _migrate(conn: sqlite3.Connection):
             (default_ws_id,),
         )
 
-    # 4. 补充索引
+    # 5. 为无 project_id 的旧 session 自动创建默认项目（每个 workspace 一个）
+    # 查找有 workspace_id 但无 project_id 的 sessions
+    ws_without_proj = conn.execute(
+        "SELECT DISTINCT workspace_id FROM sessions "
+        "WHERE (project_id IS NULL OR project_id='') AND workspace_id IS NOT NULL AND workspace_id!=''"
+    ).fetchall()
+    for (ws_id,) in ws_without_proj:
+        # 检查该 workspace 是否已有默认项目
+        existing_proj = conn.execute(
+            "SELECT id FROM projects WHERE workspace_id=? LIMIT 1", (ws_id,)
+        ).fetchone()
+        if existing_proj:
+            proj_id = existing_proj[0]
+        else:
+            proj_id = f"proj_{uuid.uuid4().hex[:8]}"
+            conn.execute(
+                "INSERT OR IGNORE INTO projects (id, workspace_id, name, description, created_at, updated_at) "
+                "VALUES (?,?,?,?,?,?)",
+                (proj_id, ws_id, "默认项目", "迁移自旧数据", now, now),
+            )
+        # 将该 workspace 下无 project_id 的 sessions 关联到默认项目
+        conn.execute(
+            "UPDATE sessions SET project_id=? "
+            "WHERE workspace_id=? AND (project_id IS NULL OR project_id='')",
+            (proj_id, ws_id),
+        )
+
+    # 6. 补充索引
     conn.execute("CREATE INDEX IF NOT EXISTS idx_sessions_workspace ON sessions(workspace_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_sessions_project   ON sessions(project_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_projects_workspace ON projects(workspace_id)")
     conn.commit()
 
 
@@ -237,9 +296,106 @@ def rename_session(session_id: str, title: str) -> bool:
     return cur.rowcount > 0
 
 
+# ─── Project CRUD ─────────────────────────────────────────────────────────────
+# 项目是工作区与话题之间的隔离层：
+#   workspace/{ws_id}/projects/{proj_id}/   ← 项目文件目录
+#   session 绑定 project_id，只能操作本项目的文件，不能跨项目
+
+def create_project(ws_id: str, name: str = "新项目", description: str = "") -> dict:
+    """在指定工作区下创建新项目，自动创建文件系统目录。"""
+    db = get_db()
+    proj_id = f"proj_{uuid.uuid4().hex[:8]}"
+    now = datetime.now().isoformat()
+    db.execute(
+        "INSERT INTO projects (id, workspace_id, name, description, created_at, updated_at) "
+        "VALUES (?,?,?,?,?,?)",
+        (proj_id, ws_id, name, description, now, now),
+    )
+    db.commit()
+    # 创建对应文件系统目录（机械操作，Agent 不感知）
+    try:
+        from pathlib import Path as _Path
+        _WS_ROOT = _Path(__file__).resolve().parent.parent.parent / "data" / "workspace"
+        proj_dir = _WS_ROOT / ws_id / "projects" / proj_id
+        (proj_dir / ".sky").mkdir(parents=True, exist_ok=True)
+        (proj_dir / "shared").mkdir(parents=True, exist_ok=True)
+    except Exception:
+        pass
+    return {"id": proj_id, "workspace_id": ws_id, "name": name,
+            "description": description, "created_at": now, "updated_at": now}
+
+
+def rename_project(proj_id: str, name: str) -> bool:
+    db = get_db()
+    now = datetime.now().isoformat()
+    cur = db.execute(
+        "UPDATE projects SET name=?, updated_at=? WHERE id=?",
+        (name, now, proj_id),
+    )
+    db.commit()
+    return cur.rowcount > 0
+
+
+def delete_project(proj_id: str) -> bool:
+    """级联删除项目及其下所有 sessions（sessions 的消息/工具调用/TODO 也级联删除）。"""
+    db = get_db()
+    sess_ids = [
+        r[0] for r in
+        db.execute("SELECT id FROM sessions WHERE project_id=?", (proj_id,)).fetchall()
+    ]
+    for sid in sess_ids:
+        db.execute("DELETE FROM messages   WHERE session_id=?", (sid,))
+        db.execute("DELETE FROM tool_calls WHERE session_id=?", (sid,))
+        db.execute("DELETE FROM todos      WHERE session_id=?", (sid,))
+    db.execute("DELETE FROM sessions WHERE project_id=?", (proj_id,))
+    cur = db.execute("DELETE FROM projects WHERE id=?", (proj_id,))
+    db.commit()
+    return cur.rowcount > 0
+
+
+def list_projects(ws_id: str) -> list[dict]:
+    """列出工作区下所有项目（含嵌套 sessions）。"""
+    db = get_db()
+    proj_rows = db.execute(
+        "SELECT * FROM projects WHERE workspace_id=? ORDER BY updated_at DESC",
+        (ws_id,),
+    ).fetchall()
+    if not proj_rows:
+        return []
+    proj_ids = [r["id"] for r in proj_rows]
+    placeholders = ",".join("?" * len(proj_ids))
+    sess_rows = db.execute(
+        f"SELECT id, workspace_id, project_id, title, score_title, score_key, score_bpm, "
+        f"score_notes, pipeline_state, created_at, updated_at "
+        f"FROM sessions WHERE project_id IN ({placeholders}) ORDER BY updated_at DESC",
+        proj_ids,
+    ).fetchall()
+    from collections import defaultdict
+    sess_by_proj: dict[str, list[dict]] = defaultdict(list)
+    for r in sess_rows:
+        d = dict(r)
+        pid = d.get("project_id") or ""
+        if pid:
+            sess_by_proj[pid].append(d)
+    result = []
+    for p in proj_rows:
+        pd = dict(p)
+        pd["sessions"] = sess_by_proj.get(pd["id"], [])
+        result.append(pd)
+    return result
+
+
+def get_project_info(proj_id: str) -> dict | None:
+    db = get_db()
+    row = db.execute("SELECT * FROM projects WHERE id=?", (proj_id,)).fetchone()
+    return dict(row) if row else None
+
+
 def list_workspaces() -> list[dict]:
     """
-    列出所有工作区并附带 sessions，通过一次额外查询消除 N+1 问题。
+    列出所有工作区，附带 projects（含嵌套 sessions）。
+    结构：workspace → projects[] → sessions[]
+    同时保留顶层 sessions 字段（向后兼容旧前端）。
     """
     db = get_db()
     ws_rows = db.execute(
@@ -248,24 +404,49 @@ def list_workspaces() -> list[dict]:
     if not ws_rows:
         return []
 
-    # 一次性取出所有 sessions，按 workspace_id 分组
+    ws_ids = [r["id"] for r in ws_rows]
+    placeholders = ",".join("?" * len(ws_ids))
+
+    # 一次性取出所有 projects
+    proj_rows = db.execute(
+        f"SELECT * FROM projects WHERE workspace_id IN ({placeholders}) ORDER BY updated_at DESC",
+        ws_ids,
+    ).fetchall()
+
+    # 一次性取出所有 sessions
     sess_rows = db.execute(
-        "SELECT id, workspace_id, title, score_title, score_key, score_bpm, "
+        "SELECT id, workspace_id, project_id, title, score_title, score_key, score_bpm, "
         "score_notes, pipeline_state, created_at, updated_at "
         "FROM sessions ORDER BY updated_at DESC"
     ).fetchall()
 
     from collections import defaultdict
-    sess_by_ws: dict[str, list[dict]] = defaultdict(list)
+    proj_by_ws:  dict[str, list[dict]] = defaultdict(list)
+    sess_by_proj: dict[str, list[dict]] = defaultdict(list)
+    sess_by_ws:  dict[str, list[dict]] = defaultdict(list)  # 向后兼容
+
+    for p in proj_rows:
+        pd = dict(p)
+        proj_by_ws[pd["workspace_id"]].append(pd)
+
     for r in sess_rows:
         d = dict(r)
+        pid  = d.get("project_id") or ""
         wsid = d.get("workspace_id") or ""
+        if pid:
+            sess_by_proj[pid].append(d)
         if wsid:
             sess_by_ws[wsid].append(d)
+
+    # 将 sessions 嵌入 projects
+    for pd in [p for plist in proj_by_ws.values() for p in plist]:
+        pd["sessions"] = sess_by_proj.get(pd["id"], [])
 
     result = []
     for ws in ws_rows:
         wd = dict(ws)
+        wd["projects"] = proj_by_ws.get(wd["id"], [])
+        # 向后兼容：顶层 sessions = 该 workspace 下所有 sessions
         wd["sessions"] = sess_by_ws.get(wd["id"], [])
         result.append(wd)
     return result
@@ -274,7 +455,7 @@ def list_workspaces() -> list[dict]:
 def get_workspace_sessions(ws_id: str) -> list[dict]:
     db = get_db()
     rows = db.execute(
-        "SELECT id, workspace_id, title, score_title, score_key, score_bpm, "
+        "SELECT id, workspace_id, project_id, title, score_title, score_key, score_bpm, "
         "score_notes, pipeline_state, created_at, updated_at "
         "FROM sessions WHERE workspace_id=? ORDER BY updated_at DESC",
         (ws_id,),
@@ -289,11 +470,13 @@ def upsert_session(
     score=None,
     pipeline_state: str = "idle",
     workspace_id: str | None = None,
+    project_id: str | None = None,
     title: str | None = None,
     extra: dict | None = None,
 ):
     """
     upsert session 记录。
+    project_id: 所属项目 ID（文件隔离边界），传 None 表示不修改。
     extra: 扩展 JSON 字段（如 {"role_id": "abc_expert"}）。
            传 None 表示不修改 extra；传 {} 表示清空。
            采用合并策略：只更新传入的 key，不覆盖已有 key。
@@ -323,11 +506,12 @@ def upsert_session(
     if extra is None:
         # extra 未传：不修改 extra 字段
         db.execute("""
-            INSERT INTO sessions (id, workspace_id, title, score_title, score_key, score_bpm,
+            INSERT INTO sessions (id, workspace_id, project_id, title, score_title, score_key, score_bpm,
                                   score_notes, abc_notation, pipeline_state, extra, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, '{}', ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '{}', ?, ?)
             ON CONFLICT(id) DO UPDATE SET
                 workspace_id   = COALESCE(NULLIF(excluded.workspace_id,''), workspace_id),
+                project_id     = COALESCE(NULLIF(excluded.project_id,''),  project_id),
                 title          = excluded.title,
                 score_title    = excluded.score_title,
                 score_key      = excluded.score_key,
@@ -337,7 +521,7 @@ def upsert_session(
                 pipeline_state = excluded.pipeline_state,
                 updated_at     = excluded.updated_at
         """, (
-            session_id, workspace_id, _title,
+            session_id, workspace_id, project_id, _title,
             score.meta.title if score else None,
             score.meta.key   if score else None,
             score.meta.bpm   if score else None,
@@ -348,11 +532,12 @@ def upsert_session(
     else:
         # extra 已传：同时更新 extra 字段（合并后的值）
         db.execute("""
-            INSERT INTO sessions (id, workspace_id, title, score_title, score_key, score_bpm,
+            INSERT INTO sessions (id, workspace_id, project_id, title, score_title, score_key, score_bpm,
                                   score_notes, abc_notation, pipeline_state, extra, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET
                 workspace_id   = COALESCE(NULLIF(excluded.workspace_id,''), workspace_id),
+                project_id     = COALESCE(NULLIF(excluded.project_id,''),  project_id),
                 title          = excluded.title,
                 score_title    = excluded.score_title,
                 score_key      = excluded.score_key,
@@ -363,7 +548,7 @@ def upsert_session(
                 extra          = excluded.extra,
                 updated_at     = excluded.updated_at
         """, (
-            session_id, workspace_id, _title,
+            session_id, workspace_id, project_id, _title,
             score.meta.title if score else None,
             score.meta.key   if score else None,
             score.meta.bpm   if score else None,
@@ -379,6 +564,7 @@ async def async_upsert_session(
     score=None,
     pipeline_state: str = "idle",
     workspace_id: str | None = None,
+    project_id: str | None = None,
     title: str | None = None,
     extra: dict | None = None,
 ):
@@ -386,7 +572,7 @@ async def async_upsert_session(
     loop = asyncio.get_running_loop()
     await loop.run_in_executor(
         None,
-        lambda: upsert_session(session_id, score, pipeline_state, workspace_id, title, extra)
+        lambda: upsert_session(session_id, score, pipeline_state, workspace_id, project_id, title, extra)
     )
 
 
@@ -510,7 +696,7 @@ def get_session_todos(session_id: str) -> list[dict]:
 def list_sessions(limit: int = 50) -> list[dict]:
     db = get_db()
     rows = db.execute(
-        "SELECT id, workspace_id, title, score_title, score_key, score_bpm, "
+        "SELECT id, workspace_id, project_id, title, score_title, score_key, score_bpm, "
         "score_notes, pipeline_state, created_at, updated_at "
         "FROM sessions ORDER BY updated_at DESC LIMIT ?",
         (limit,)
@@ -545,7 +731,7 @@ def delete_session_cascade(session_id: str) -> bool:
 def get_session_info(session_id: str) -> dict | None:
     db = get_db()
     row = db.execute(
-        "SELECT id, workspace_id, title, score_title, score_key, score_bpm, "
+        "SELECT id, workspace_id, project_id, title, score_title, score_key, score_bpm, "
         "score_notes, abc_notation, pipeline_state, extra, created_at, updated_at "
         "FROM sessions WHERE id=?",
         (session_id,)

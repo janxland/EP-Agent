@@ -95,6 +95,8 @@ def get_registered_groups() -> list[str]:
 
 async def call_tool(name: str, arguments: dict) -> Any:
     """执行工具调用，跨分组均可，支持同步和异步函数"""
+    import contextvars
+
     # 在所有分组中查找
     fn = None
     for group_fns in _registry.values():
@@ -109,8 +111,12 @@ async def call_tool(name: str, arguments: dict) -> Any:
     if asyncio.iscoroutinefunction(fn):
         return await fn(**arguments)
     else:
+        # 同步工具在线程池执行时，必须用 copy_context().run() 把当前协程的
+        # ContextVar 快照（含 session_id）传入线程，否则线程内 ContextVar 全为默认值。
+        # 这是 Python 官方推荐的跨线程传递 ContextVar 的唯一正确方式。
+        ctx = contextvars.copy_context()
         loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(None, lambda: fn(**arguments))
+        return await loop.run_in_executor(None, ctx.run, lambda: fn(**arguments))
 
 
 # ─── Schema 生成（从类型注解推导）────────────────────────────────────────────

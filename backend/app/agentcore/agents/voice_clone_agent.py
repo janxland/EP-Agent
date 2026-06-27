@@ -60,7 +60,9 @@ class VoiceCloneAgent:
         sovits_online = await self._check_sovits_online()
 
         provider = "sovits" if sovits_online else "minimax"
-        tool_groups = ["sovits"] if sovits_online else ["audio"]
+        # workspace 组：sovits_save_audio 保存文件后可用 list_workspace_files 确认
+        # finish_task 通过 get_tool_schemas() 全量兜底获取（不依赖特定组）
+        tool_groups = ["sovits", "workspace"] if sovits_online else ["audio", "workspace"]
 
         await publish("tool.call", {
             "call_id":   f"call_voice_{session_id[:8]}",
@@ -172,11 +174,13 @@ class VoiceCloneAgent:
         tools = []
         for g in tool_groups:
             tools.extend(get_tool_schemas(g))
+        # finish_task 兜底：sovits/audio 组均不含 finish_task，从全量工具中补充
+        _ft = [t for t in get_tool_schemas() if t["function"]["name"] == "finish_task"]
+        if _ft and not any(t["function"]["name"] == "finish_task" for t in tools):
+            tools.extend(_ft[:1])
 
-        # 构造 user prompt（注入附件信息和工作区 ID）
+        # 构造 user prompt（注入附件信息，工具通过 ContextVar 自动推断项目路径）
         user_parts = [message]
-        if workspace_id:
-            user_parts.append(f"\n[workspace_id: {workspace_id}]")
         if attachment_b64 and attachment_name:
             user_parts.append(
                 f"\n[参考音频附件: {attachment_name}，已 base64 编码，"

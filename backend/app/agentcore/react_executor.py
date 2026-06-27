@@ -228,6 +228,14 @@ class ReactExecutor:
                 })
 
                 try:
+                    # 注入 session_id 到 ContextVar，工具内部可通过
+                    # get_current_session_id() / get_current_workspace_id() 自动推断
+                    if session_id:
+                        try:
+                            from app.agentcore.session_context import set_current_session_id
+                            set_current_session_id(session_id)
+                        except Exception:
+                            pass
                     result = await call_tool(tool_name, arguments)
                     result_str = (
                         result if isinstance(result, str)
@@ -262,6 +270,14 @@ class ReactExecutor:
                                 extra["template"] = _gen_result.get("template", "apple")
                             if "midi_url" in _gen_result:
                                 extra["midi_url"] = _gen_result.get("midi_url", "")
+                            # generate_h5_from_midi 直接保存文件并返回路径，
+                            # 与 save_h5_file 一样需要捕获 url_path/file_path/size_kb/workspace_path
+                            # 供 H5Agent 推送 h5.ready 事件
+                            if _gen_result.get("url_path") or _gen_result.get("workspace_path"):
+                                extra["url_path"]       = _gen_result.get("url_path", "")
+                                extra["file_path"]      = _gen_result.get("file_path", "")
+                                extra["size_kb"]        = _gen_result.get("size_kb", 0)
+                                extra["workspace_path"] = _gen_result.get("workspace_path", "")
                         except Exception:
                             pass
 
@@ -310,6 +326,33 @@ class ReactExecutor:
                         "content":      result_str,
                     })
                     tool_succeeded_count += 1
+
+                    # ── 文件写入类工具：推送 workspace.files.changed 事件 ──────────
+                    # 前端文件树监听此事件后自动刷新，无需手动点击刷新按钮
+                    _FILE_WRITE_TOOLS = {
+                        "write_file", "append_file", "delete_file",
+                        "copy_file", "rename_file", "move_file",
+                        "abc_to_midi", "generate_h5_from_midi",
+                        "generate_h5_from_abc", "sovits_save_audio",
+                        "save_h5_file", "save_score_to_workspace",
+                    }
+                    if tool_name in _FILE_WRITE_TOOLS and session_id:
+                        try:
+                            _changed_path = ""
+                            if isinstance(result, dict):
+                                _changed_path = (
+                                    result.get("workspace_path")
+                                    or result.get("file_path")
+                                    or result.get("path")
+                                    or ""
+                                )
+                            await publish("workspace.files.changed", {
+                                "tool":    tool_name,
+                                "path":    _changed_path,
+                                "trigger": "tool_call",
+                            }, display=False)
+                        except Exception:
+                            pass  # 推送失败不影响主流程
 
                     # ── 落库 tool message（刷新后 SSE replay 恢复）──────────────
                     if session_id:

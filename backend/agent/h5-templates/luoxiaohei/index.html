@@ -216,6 +216,11 @@
 <!-- 返回顶部 -->
 <button id="backBtn" title="返回封面">↑</button>
 
+<!-- 模板变量注入（供 player.js 读取，替换占位符） -->
+<script>
+  window._EP_MIDI_URL    = "{{MIDI_URL}}";
+  window._EP_ABC_CONTENT = "{{ABC_CONTENT}}";
+</script>
 <!-- 播放器逻辑 -->
 <script src="player.js"></script>
 </body>

@@ -135,9 +135,10 @@ function FileContent({ tab }: { tab: FileTab }) {
   const [text, setText] = useState<string | null>(null)
   const [loading, setLoading] = useState(false)
 
-  const { file, workspaceId } = tab
-  const rawUrl = getFileRawUrl(workspaceId, file.path)
-  const dlUrl  = getFileDownloadUrl(workspaceId, file.path)
+  const { file, workspaceId, projectId } = tab
+  // projectId 存在时走三层路径 workspace/{ws}/projects/{proj}/，否则退回两层（向后兼容）
+  const rawUrl = getFileRawUrl(workspaceId, file.path, projectId)
+  const dlUrl  = getFileDownloadUrl(workspaceId, file.path, projectId)
   const isImg  = IMAGE_EXTS.has(file.ext)
   const isHtml = file.ext === 'html' || file.ext === 'htm'
   const isText = TEXT_EXTS.has(file.ext) && !isHtml

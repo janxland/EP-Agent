@@ -37,6 +37,7 @@ export type FileTab = {
   title: string
   file: WorkspaceFile
   workspaceId: string
+  projectId?: string   // 项目 ID，用于构造正确的三层路径
 }
 
 export type LogsTab = {
@@ -191,8 +192,8 @@ export const usePreviewTabsStore = create<PreviewTabsState>((set, get) => ({
 // ─── 便捷 dispatch 函数（无需 hook，可在事件处理器中调用）──────────────────────
 
 export const previewTabs = {
-  openFile: (file: WorkspaceFile, workspaceId: string) =>
-    usePreviewTabsStore.getState().openTab({ type: 'file', title: file.name, file, workspaceId }),
+  openFile: (file: WorkspaceFile, workspaceId: string, projectId?: string) =>
+    usePreviewTabsStore.getState().openTab({ type: 'file', title: file.name, file, workspaceId, projectId }),
 
   openAbc: (abc: string, title?: string, scoreTitle?: string) =>
     usePreviewTabsStore.getState().openTab({ type: 'abc', title: title ?? '乐谱预览', abc, scoreTitle }),

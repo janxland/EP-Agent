@@ -67,9 +67,13 @@ def _evict_expired():
 
 def create_session(
     workspace_id: str | None = None,
+    project_id: str | None = None,
     title: str = "新对话",
 ) -> Session:
-    """创建 Session，支持直接关联工作区，避免二次写入。"""
+    """
+    创建 Session，一次性写入 workspace_id + project_id，消灭两步写入竞态。
+    project_id 是文件隔离边界，必须在创建时就写入，不能依赖后续 upsert 补写。
+    """
     sess = Session()
     save_session(sess)
     try:
@@ -78,6 +82,7 @@ def create_session(
             score=None,
             pipeline_state="idle",
             workspace_id=workspace_id or None,
+            project_id=project_id or None,
             title=title,
         )
     except Exception as e:
@@ -320,10 +325,11 @@ async def export_score(session_id: str, fmt: str, instrument: int = 0) -> tuple[
 async def universal_chat(
     session_id: str,
     message: str,
+    project_id: str = "",
     attachment_content: str = "",
     attachment_name: str = "",
-    attachment_workspace_path: str = "",  # 工作区相对路径（MIDI/图片/音频）
-    attachment_b64: str = "",              # 音频 base64（仅音色克隆直接上传）
+    attachment_workspace_path: str = "",
+    attachment_b64: str = "",
     publish=None,
     role_id: str | None = None,
 ) -> dict:
@@ -359,14 +365,12 @@ async def universal_chat(
     except Exception as e:
         _logger.warning("[service] 用户消息落库失败 session=%s: %s", session_id, e)
 
-    # ── 2. 注入 Session 上下文（重要记忆架构）───────────────────────────────────
-    # 让 session_context 模块持有 getter/saver，后续所有 SubAgent 可直接读写记忆，
-    # 无需再透传 session_getter/saver 参数（Phase 3 目标：彻底消除参数透传）。
-    try:
-        from app.agentcore.session_context import set_session_context
-        set_session_context(get_session, save_session)
-    except Exception as _sce:
-        _logger.warning("[service] set_session_context 失败: %s", _sce)
+    # ── 2. 注入 session_id 到 ContextVar（必须在任何工具调用前完成）────────────
+    # 无论如何都要执行，不能被 try/except 吞掉
+    from app.agentcore.session_context import set_session_context, set_current_session_id
+    set_session_context(get_session, save_session)
+    set_current_session_id(session_id)
+    print(f"[EP-Agent] service.universal_chat: 已注入 session_id={session_id!r}", flush=True)
 
     # ── 3. 执行意图路由（透传 role_id，若未传则 runner 内部从 session extra 恢复）──
     # 优先使用调用方传入的 role_id；若为 None，runner 会从 DB session.extra 读取

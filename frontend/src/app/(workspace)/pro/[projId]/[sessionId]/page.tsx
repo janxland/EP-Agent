@@ -1,13 +1,12 @@
 'use client'
 
 /**
- * /pro/[sessionId] — 动态路由专业模式页面
+ * /pro/[projId]/[sessionId] — 专业模式主工作台
  *
- * 核心功能：
- *   - 从 URL 读取 sessionId，刷新后直接恢复对话状态
- *   - 调用 restoreFromSessionId() 恢复 workspaceId
- *   - SSE 双分发：scoreStore + chatStore
- *   - 与 /pro 页面共享相同 UI，仅 sessionId 来源不同
+ * 相比旧版 /pro/[sessionId]：
+ *   - URL 中直接包含 projId，无需异步查询即可定位文件系统路径
+ *   - restoreFromSessionId 仍保留作为兜底（处理旧书签/直接输入 URL）
+ *   - projId 从 URL 读取后立即写入 store，彻底消灭 activeProjectId 为空的时序问题
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent } from 'react'
@@ -56,8 +55,9 @@ const CHAT_MAX_W = 640
 const CHAT_DEFAULT_W = 380
 
 export default function ProSessionPage() {
-  const params = useParams()
-  const router = useRouter()
+  const params    = useParams()
+  const router    = useRouter()
+  const projId    = params.projId    as string
   const sessionId = params.sessionId as string
 
   const { setSessionId, abcNotation, score, handleSSEEvent, reset: resetScore } = useScoreStore()
@@ -70,77 +70,73 @@ export default function ProSessionPage() {
       restoreRoleFromSession: s.restoreRoleFromSession,
     })
   )
-  const { restoreFromSessionId, setActiveSessionId, _pendingNavigateSessionId, clearPendingNavigate, activeSessions } = useWorkspaceStore()
+  const {
+    restoreFromSessionId,
+    setActiveSessionId,
+    setActiveProjectId,
+    _pendingNavigateSessionId,
+    clearPendingNavigate,
+    activeSessions,
+    activeWorkspaceId,
+  } = useWorkspaceStore()
 
-  // 用 useMemo 缓存 activeSessions 结果，避免每次渲染都重新遍历 workspaces
-  // activeSessions() 依赖 workspaces，workspaces 变化时自动重新计算
   const { workspaces } = useWorkspaceStore()
   const activeSessionsList = useMemo(() => activeSessions(), [activeSessions, workspaces])
-
-  // 从 workspace store 读取当前 session 的标题（比 sessionId 截断更友好）
   const sessionTitle = activeSessionsList.find((s) => s.id === sessionId)?.title ?? null
 
-  const [chatWidth, setChatWidth]       = useState(CHAT_DEFAULT_W)
-  const [sidebarOpen, setSidebarOpen]   = useState(true)
-  // 历史恢复状态（防止重复加载）
+  const [chatWidth, setChatWidth]     = useState(CHAT_DEFAULT_W)
+  const [sidebarOpen, setSidebarOpen] = useState(true)
   const historyLoadedRef = useRef<string | null>(null)
-
   const unsubRef = useRef<(() => void) | null>(null)
 
-  // ── 监听删除后的跳转信号 ─────────────────────────────────────────────────────
-  // 用 useRef 存 router 避免 router 对象变化引发多余 re-run
   const routerRef = useRef(router)
   useEffect(() => { routerRef.current = router })
 
+  // ── 监听删除后的跳转信号 ──────────────────────────────────────────────────────
   useEffect(() => {
     if (_pendingNavigateSessionId === undefined) return
     clearPendingNavigate()
     if (_pendingNavigateSessionId) {
-      routerRef.current.replace(`/pro/${_pendingNavigateSessionId}`)
+      // 找到目标 session 的 projId
+      const targetProjId = workspaces
+        .flatMap((w) => w.projects ?? [])
+        .find((p) => p.sessions?.some((s) => s.id === _pendingNavigateSessionId))?.id
+        ?? projId  // 兜底：同项目
+      routerRef.current.replace(`/pro/${targetProjId}/${_pendingNavigateSessionId}`)
     } else {
       routerRef.current.replace('/pro')
     }
-  }, [_pendingNavigateSessionId, clearPendingNavigate])
+  }, [_pendingNavigateSessionId, clearPendingNavigate, projId, workspaces])
+
+  // ── 关键修复：URL 中的 projId 直接写入 store，消灭时序问题 ─────────────────────
+  // 旧版只有 sessionId，需要异步查询才能知道 projId，导致首次发消息时 project_id 为空。
+  // 新版 URL 直接携带 projId，同步写入，彻底消灭这个时序窗口。
+  useEffect(() => {
+    if (projId) setActiveProjectId(projId)
+  }, [projId, setActiveProjectId])
 
   // ── Session 切换：原子初始化（清空 → 加载历史 → 建立 SSE）────────────────────
-  //
-  // ⚠️ 关键设计：三个步骤必须在同一个 effect 中串行执行，不能拆成多个 effect。
-  // 原因：多个 effect 都依赖 [sessionId] 时，React 不保证执行顺序，会导致：
-  //   - 旧 session 的历史消息在 setMessages([]) 之后才写入（竞态）
-  //   - SSE replay 在 store 清空前到达，污染新 session
-  //   - 历史加载请求在 sessionId 已切换后才返回，覆盖新 session 的空状态
-  //
-  // 正确顺序（严格串行）：
-  //   1. 断开旧 SSE
-  //   2. 清空 store（同步）
-  //   3. 加载新 session 历史（异步，有 cancelled 守卫）
-  //   4. 建立新 SSE（在清空和历史加载之后）
   useEffect(() => {
     if (!sessionId) return
 
-    // ── Step 1：断开旧 SSE，防止旧 replay 事件污染新 session ──
     unsubRef.current?.()
     unsubRef.current = null
 
-    // ── Step 2：同步清空所有状态（必须在异步操作前完成）──
     resetScore()
     resetRuntime()
-    // 直接调用 store 的 setState，绕过 setMessages 的去重合并逻辑，强制清空
     useChatStore.setState({ messages: [], todos: [], todoSummary: '', todoDomain: '' })
-    historyLoadedRef.current = sessionId   // 提前标记，防止重复加载
+    historyLoadedRef.current = sessionId
 
-    // 同步更新 workspace/session 关联
     setSessionId(sessionId)
     setActiveSessionId(sessionId)
+    // projId 已在上方 effect 写入，此处 restoreFromSessionId 作为兜底（补全 wsId）
     restoreFromSessionId(sessionId)
     restoreRoleFromSession(sessionId)
 
-    // ── Step 3：异步加载历史（cancelled 守卫防止旧请求污染）──
     let cancelled = false
 
     const loadHistory = async () => {
       try {
-        // 3a. 加载历史消息
         const { messages: rawMsgs } = await getSessionMessages(sessionId)
         if (cancelled) return
         if (rawMsgs && rawMsgs.length > 0) {
@@ -154,12 +150,10 @@ export default function ProSessionPage() {
               ...(m.role === 'assistant' ? { kind: 'turn' as const } : {}),
             }))
           if (chatMsgs.length > 0 && !cancelled) {
-            // 强制覆盖（此时 store 已清空，不需要去重合并）
             useChatStore.setState({ messages: chatMsgs })
           }
         }
 
-        // 3b. 加载历史 TODO
         const { todos: rawTodos } = await getSessionTodos(sessionId)
         if (cancelled) return
         if (rawTodos && rawTodos.length > 0) {
@@ -175,8 +169,6 @@ export default function ProSessionPage() {
         if (!cancelled) console.warn('[EP-Agent] 历史恢复失败:', err)
       }
 
-      // ── Step 4：历史加载完成后再建立 SSE（避免 replay 与 HTTP 历史竞态）──
-      // 用 setTimeout(0) 确保本轮 React 批量更新先完成
       if (!cancelled) {
         setTimeout(() => {
           if (cancelled) return
@@ -195,22 +187,20 @@ export default function ProSessionPage() {
       unsubRef.current?.()
       unsubRef.current = null
     }
-  // ⚠️ 依赖数组只放「真正会导致需要重新初始化」的值：sessionId（路由变化）
-  // handleSSEEvent / chatHandleSSE 是 zustand store 方法，引用稳定，但放入依赖
-  // 会在父组件每次渲染时触发不必要的 effect 重跑（清空 + 重新加载历史）。
-  // 其余 setter 函数同理，用 useRef 或直接从 store 读取，不放入依赖。
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionId])
 
-  // 监听工作区文件预览事件 → dispatch 到 preview-tabs store
+  // 监听工作区文件预览事件
   useEffect(() => {
     const handler = (e: Event) => {
-      const file = (e as CustomEvent).detail as WsFile & { workspaceId: string }
-      previewTabs.openFile(file, file.workspaceId)
+      const file = (e as CustomEvent).detail as WsFile & { workspaceId: string; projectId?: string }
+      const wsId   = file.workspaceId || useWorkspaceStore.getState().activeWorkspaceId || ''
+      const pId    = file.projectId   || projId || useWorkspaceStore.getState().activeProjectId || undefined
+      previewTabs.openFile(file, wsId, pId)
     }
     window.addEventListener(FILE_PREVIEW_EVENT, handler)
     return () => window.removeEventListener(FILE_PREVIEW_EVENT, handler)
-  }, [])
+  }, [projId])
 
   // ABC 更新时自动打开/更新 abc 标签
   useEffect(() => {
@@ -228,7 +218,6 @@ export default function ProSessionPage() {
 
       {/* ── 顶栏 ── */}
       <header className="h-10 bg-white border-b border-gray-100 flex items-center px-4 gap-3 shrink-0 shadow-sm shadow-gray-50 z-10">
-        {/* 侧边栏折叠按钮 */}
         <button
           onClick={() => setSidebarOpen(v => !v)}
           className="w-6 h-6 flex items-center justify-center rounded-md hover:bg-gray-100 text-gray-400 hover:text-gray-600 transition-colors shrink-0"
@@ -250,7 +239,27 @@ export default function ProSessionPage() {
         <span className="text-gray-200 text-xs">│</span>
         <span className="text-xs text-gray-400 font-medium">专业模式</span>
 
-
+        {/* 面包屑：工作区 → 项目 → 对话 */}
+        {activeWorkspaceId && (
+          <>
+            <span className="text-gray-200 text-xs">│</span>
+            <Link
+              href={`/pro/workspace/${activeWorkspaceId}`}
+              className="text-xs text-gray-400 hover:text-orange-500 transition-colors font-mono"
+              title="返回工作区"
+            >
+              {activeWorkspaceId.slice(0, 8)}…
+            </Link>
+            {projId && (
+              <>
+                <span className="text-gray-200 text-xs">/</span>
+                <span className="text-xs text-gray-500 font-mono" title={projId}>
+                  {projId.slice(0, 8)}…
+                </span>
+              </>
+            )}
+          </>
+        )}
 
         <div className="ml-auto flex items-center gap-2">
           <div className="flex items-center gap-1.5">
@@ -274,34 +283,22 @@ export default function ProSessionPage() {
 
       {/* ── 主体 ── */}
       <div className="flex flex-1 overflow-hidden">
-
-        {/* ── 左侧：工作区侧边栏（可折叠）── */}
-        {/* 工作区图标栏始终可见（即使内容区折叠），保证用户可以随时展开 */}
-        <aside
-          className={[
-            'flex overflow-hidden shrink-0 bg-white transition-all duration-200',
-            sidebarOpen ? 'w-14 border-r border-gray-100' : 'w-0',
-          ].join(' ')}
-        >
+        <aside className={['flex overflow-hidden shrink-0 bg-white transition-all duration-200', sidebarOpen ? 'w-14 border-r border-gray-100' : 'w-0'].join(' ')}>
           <WorkspaceSidebar />
         </aside>
 
-        {/* ── 左侧面板：工作区文件树 ── */}
         <aside className="flex bg-white border-r border-gray-100 shrink-0 overflow-hidden" style={{ width: 192 }}>
           <div className="w-full flex flex-col overflow-hidden">
             <WorkspaceFileTree />
           </div>
         </aside>
 
-        {/* ── 中央：多标签预览区（解耦，状态由 preview-tabs.store 管理）── */}
         <main className="flex-1 flex flex-col overflow-hidden bg-white border-r border-gray-100 min-w-0">
           <PreviewTabs />
         </main>
 
-        {/* ── 可拖拽分隔条 ── */}
         <ResizeDivider onDrag={handleResizeDrag} />
 
-        {/* ── 右侧：对话面板 ── */}
         <aside style={{ width: chatWidth }} className="flex flex-col overflow-hidden shrink-0 bg-white">
           <details className="border-b border-gray-100 group shrink-0">
             <summary className="px-3 py-2 text-xs font-semibold text-gray-400 uppercase tracking-wider cursor-pointer hover:text-gray-600 flex items-center gap-1.5 select-none list-none transition-colors hover:bg-gray-50">

@@ -209,11 +209,16 @@ export function ChatPanel() {
     createSession,
     deleteSession,
     activeWorkspaceId,
+    activeProjectId,
     setActiveSessionId,
     setActiveWorkspaceId,
     workspaces,
     triggerFileTreeRefresh,
+    activeProject,
   } = useWorkspaceStore()
+  // 确保 activeProjectId / activeWorkspaceId 始终有效：若为空则从 activeProject() 推断
+  const resolvedProjectId  = activeProjectId  ?? activeProject()?.id ?? ''
+  const resolvedWorkspaceId = activeWorkspaceId ?? ''
   const {
     messages,
     streaming,
@@ -351,6 +356,9 @@ export function ChatPanel() {
       // 使用 displayText（含 [@文件名] chip）而非原始 text，
       // 保证后端落库内容与前端乐观显示一致，刷新后 SSE replay 能正确还原 chip
       message: displayText,
+      // workspace_id + project_id 必带：工具层通过这两个 ID 定位文件系统路径
+      workspace_id: resolvedWorkspaceId,
+      project_id: resolvedProjectId,
       attachment_name: att?.name ?? '',
       // 工作区路径（优先）：后端 Runner 层直接使用
       attachment_workspace_path: att?.workspace_path ?? '',
@@ -381,10 +389,11 @@ export function ChatPanel() {
     // page.tsx 的 [sessionId] effect 也会清空，这里是双保险，确保视觉上立即生效
     useChatStore.setState({ messages: [], todos: [], todoSummary: '', todoDomain: '' })
     try {
-      const sess = await createSession(activeWorkspaceId, '新对话')
-      router.push(`/pro/${sess.id}`)
+      // resolvedProjectId 确保新对话挂在正确的项目下，防止文件区域错位
+      const sess = await createSession(activeWorkspaceId, '新对话', resolvedProjectId || undefined)
+      router.push(`/pro/${resolvedProjectId || ''}/${sess.id}`)
     } catch { /* error 已在 store 中设置 */ }
-  }, [activeWorkspaceId, createSession, router])
+  }, [activeWorkspaceId, resolvedProjectId, createSession, router])
 
   // 切换对话
   const handleSelectSession = useCallback((id: string) => {
@@ -397,7 +406,11 @@ export function ChatPanel() {
       }
     }
     setActiveSessionId(id)
-    router.push(`/pro/${id}`)
+    // 找到该 session 所属的 projId
+    const selProjId = useWorkspaceStore.getState().workspaces
+      .flatMap((w) => w.projects ?? [])
+      .find((p) => p.sessions?.some((s) => s.id === id))?.id ?? resolvedProjectId ?? ''
+    router.push(`/pro/${selProjId}/${id}`)
   }, [activeSessionId, workspaces, setActiveWorkspaceId, setActiveSessionId, router])
 
   // 删除对话（自制弹窗确认）
@@ -415,7 +428,7 @@ export function ChatPanel() {
     } catch { /* error 已在 store 中设置 */ }
   }, [deleteConfirmSessionId, deleteSession])
 
-  // ── 角色恢复已统一由 /pro/[sessionId]/page.tsx 初始化 effect 调用 ─────────────
+  // ── 角色恢复已统一由 /pro/[projId]/[sessionId]/page.tsx 初始化 effect 调用 ──────
   // ChatPanel 不再重复调用 restoreRoleFromSession，避免 session 切换时双重 fetch。
   // 角色状态通过 useChatStore 订阅，page.tsx 调用后会自动触发 re-render。
 
@@ -471,21 +484,18 @@ export function ChatPanel() {
       const isMidi  = file.type.includes('midi') || /\.(mid|midi)$/i.test(file.name)
 
       if ((isAudio || isMidi) && activeWorkspaceId) {
-        // ✅ 新架构：MIDI/音频先上传到工作区，存 workspace_path，不存 base64
-        // 这样 LLM context 中永远不会出现二进制内容，彻底避免超时
+        // MIDI/音频先上传到项目目录，存 workspace_path，不存 base64
         const kind: AttachmentKind = isAudio ? 'audio' : 'midi'
         const subdir = isMidi ? '.sky' : 'shared'
         const destPath = `${subdir}/${file.name}`
         setImgUploadTip({ status: 'uploading', name: file.name })
         try {
-          await uploadFileToWorkspace(activeWorkspaceId, file, destPath)
+          await uploadFileToWorkspace(activeWorkspaceId, file, destPath, resolvedProjectId)
           setAttachment({ kind, name: file.name, content: '', workspace_path: destPath, size: file.size })
           setImgUploadTip({ status: 'done', name: file.name })
-          // 上传成功：自动插入 @mention，不显示顶部胶囊
           insertMentionRef.current?.(destPath, file.name, file.size)
           triggerFileTreeRefresh()
         } catch {
-          // 上传失败降级：仍然设置附件，但用 base64 路径（旧兼容路径）
           const reader = new FileReader()
           reader.onload = () => {
             const b64 = (reader.result as string).split(',')[1] ?? ''
@@ -495,7 +505,7 @@ export function ChatPanel() {
           setImgUploadTip({ status: 'error', name: file.name })
         }
       } else if (isAudio || isMidi) {
-        // 无工作区时降级用 base64（兼容旧路径）
+        // 无工作区时降级用 base64
         const reader = new FileReader()
         reader.onload = () => {
           const b64 = (reader.result as string).split(',')[1] ?? ''
@@ -504,14 +514,13 @@ export function ChatPanel() {
         }
         reader.readAsDataURL(file)
       } else {
-        // txt / json 等文本文件：上传到工作区 + 插入 mention 胶囊
-        const ext = file.name.split('.').pop()?.toLowerCase() ?? ''
-        const subdir = ext === 'json' ? 'shared' : 'shared'
+        // txt / json 等文本文件：上传到项目目录 + 插入 mention 胶囊
+        const subdir = 'shared'
         const destPath = `${subdir}/${file.name}`
         if (activeWorkspaceId) {
           setImgUploadTip({ status: 'uploading', name: file.name })
           try {
-            await uploadFileToWorkspace(activeWorkspaceId, file, destPath)
+            await uploadFileToWorkspace(activeWorkspaceId, file, destPath, resolvedProjectId)
             const text = await file.text()
             const kind = detectKind(file.name, text)
             setAttachment({ kind, name: file.name, content: text, workspace_path: destPath, size: file.size })
@@ -519,7 +528,6 @@ export function ChatPanel() {
             insertMentionRef.current?.(destPath, file.name, file.size)
             triggerFileTreeRefresh()
           } catch {
-            // 上传失败降级：读内容但无胶囊
             const text = await file.text()
             const kind = detectKind(file.name, text)
             setAttachment({ kind, name: file.name, content: text, workspace_path: '', size: file.size })
@@ -550,7 +558,7 @@ export function ChatPanel() {
         }
       })
     }
-  }, [activeWorkspaceId, triggerFileTreeRefresh])
+  }, [activeWorkspaceId, resolvedProjectId, triggerFileTreeRefresh])
 
   const isRunning        = status === 'running'
   const hasStreamContent = streaming.content || streaming.tool_calls.length > 0 || streaming.reasoning_content

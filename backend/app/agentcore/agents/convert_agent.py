@@ -189,16 +189,12 @@ class ConvertAgent:
             "meta":    meta,
         })
 
-        # 落盘到工作区 .sky/ 目录
+        # 落盘到项目 .sky/ 目录（通过 ContextVar 推断路径，无需查 DB）
         _ws_abc_path = ""
         try:
-            from app.pipeline import db as _db_ref
-            _si = _db_ref.get_session_info(session_id)
-            _ws_id = (_si or {}).get("workspace_id") or ""
-            if _ws_id and result.get("abc_notation"):
+            if result.get("abc_notation"):
                 from app.agentcore.tools.workspace_tools import save_score_to_workspace_impl
                 _save_r = save_score_to_workspace_impl(
-                    workspace_id=_ws_id,
                     abc_notation=result["abc_notation"],
                     title=meta.get("title") or "score",
                     overwrite=True,
@@ -306,21 +302,16 @@ class ConvertAgent:
             "meta":    meta,
         })
 
-        # 落盘到工作区 .sky/ 目录
+        # 落盘到项目 .sky/ 目录（通过 ContextVar 推断路径，无需查 DB）
         try:
-            from app.pipeline import db as _db_ref
-            _si = _db_ref.get_session_info(session_id)
-            _ws_id = (_si or {}).get("workspace_id") or ""
-            if _ws_id:
-                from app.agentcore.tools.workspace_tools import save_score_to_workspace_impl
-                _save_r = save_score_to_workspace_impl(
-                    workspace_id=_ws_id,
-                    abc_notation=abc,
-                    title=meta["title"],
-                    overwrite=True,
-                )
-                from app.agentcore.session_context import remember_workspace_file
-                remember_workspace_file(session_id, _save_r["path"], meta["title"])
+            from app.agentcore.tools.workspace_tools import save_score_to_workspace_impl
+            _save_r = save_score_to_workspace_impl(
+                abc_notation=abc,
+                title=meta["title"],
+                overwrite=True,
+            )
+            from app.agentcore.session_context import remember_workspace_file
+            remember_workspace_file(session_id, _save_r["path"], meta["title"])
         except Exception:
             pass
 

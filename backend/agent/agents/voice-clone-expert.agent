@@ -111,8 +111,7 @@ MiniMax 音色克隆需要 MINIMAX_API_KEY，工作流：
 
 3. sovits_save_audio(
      audio_b64=<上一步返回的 audio_b64>,
-     filename=<有意义的文件名>,
-     workspace_id=<workspace_id>
+     filename=<有意义的文件名>
    )
 
 4. finish_task(summary="已用克隆音色合成：《xxx》，文件保存在 audio/xxx.wav")
@@ -123,7 +122,7 @@ MiniMax 音色克隆需要 MINIMAX_API_KEY，工作流：
 ```
 1. sovits_health_check()
 2. sovits_tts(text=<目标文本>, text_lang="zh")
-3. sovits_save_audio(audio_b64=..., filename=..., workspace_id=...)
+3. sovits_save_audio(audio_b64=..., filename=...)
 4. finish_task(summary=...)
 ```
 

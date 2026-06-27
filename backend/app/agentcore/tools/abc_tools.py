@@ -473,13 +473,12 @@ def abc_to_midi(
     abc: str,
     output_filename: str = "",
     instrument: int = 0,
-    workspace_id: str = "",
 ) -> dict:
-    """将 ABC 谱转换为 MIDI 文件，保存到工作区 .sky/ 目录，返回工作区相对路径。
+    """将 ABC 谱转换为 MIDI 文件，保存到当前项目 .sky/ 目录，返回项目内相对路径。
     abc: 完整的 ABC Notation 字符串
     output_filename: 输出文件名（不含路径），留空则自动从 T: 字段生成
     instrument: GM 音色编号（0=钢琴, 25=吉他, 40=小提琴, 73=长笛）
-    workspace_id: 工作区 ID，留空时自动从环境推断（通常无需填写）
+    ⚠️ 不需要传 workspace_id / project_id，系统自动从当前会话推断，禁止猜测 ID 参数。
     """
     import re as _re
     from pathlib import Path as _Path
@@ -513,13 +512,23 @@ def abc_to_midi(
     except Exception as e:
         return {"ok": False, "error": f"Sky JSON→QuantizedScore 失败: {e}"}
 
-    # ── 4. 确定输出目录（workspace_id 可选，留空时写到临时目录）──────────────
+    # ── 4. 获取项目根目录（从 ContextVar 自动推断，不依赖 LLM 传参）──────────
+    # ReactExecutor 在每次工具调用前已通过 set_current_session_id() 注入 session_id，
+    # session_context.get_current_project_root() 自动查询 DB 返回项目根目录。
+    try:
+        from app.agentcore.session_context import get_current_project_root
+        _project_root = get_current_project_root()
+    except Exception:
+        _project_root = ""
+
+    if not _project_root:
+        return {"ok": False, "error": "无法确定项目根目录，请确保在有效会话中调用此工具"}
+
+    # ── 5. 写入 MIDI 文件到项目 .sky/ 目录 ──────────────────────────────────
     try:
         from tools.midi_writer import to_midi
-        from app.agentcore.tools.workspace_tools import _WS_ROOT
-        # workspace_id 为空时：写到 _WS_ROOT/shared/.sky/（通用临时区）
-        ws_id = workspace_id.strip() or "shared"
-        midi_dir = _WS_ROOT / ws_id / ".sky"
+        from pathlib import Path as _Path
+        midi_dir = _Path(_project_root) / ".sky"
         midi_dir.mkdir(parents=True, exist_ok=True)
         midi_path = str(midi_dir / output_filename)
         to_midi(score, midi_path, instrument=instrument,
@@ -536,7 +545,9 @@ def abc_to_midi(
         "note_count": len(score.notes),
         "bpm": score.bpm,
         "duration_ms": int(score.duration_ms()),
-        "message": f"✅ MIDI 已生成：{ws_path}（{len(score.notes)} 音符，{score.bpm:.0f} BPM）",
+        "message": (
+            f"✅ MIDI 已生成：{ws_path}（{len(score.notes)} 音符，{score.bpm:.0f} BPM）"
+        ),
     }
 
 

@@ -327,14 +327,13 @@ async def sovits_set_model(
 def sovits_save_audio(
     audio_b64: str,
     filename: str = "",
-    workspace_id: str = "",
     media_type: str = "wav",
 ) -> dict:
-    """将 GPT-SoVITS 合成的音频保存到工作区，返回文件路径。
+    """将 GPT-SoVITS 合成的音频保存到当前项目 audio/ 目录，返回文件路径。
+    ⚠️ 不需要传 workspace_id / project_id，系统自动从当前会话推断，禁止猜测 ID 参数。
 
     audio_b64: 音频的 base64 编码字符串（sovits_tts 的返回值）
     filename: 文件名（不含扩展名，默认自动生成）
-    workspace_id: 工作区 ID（提供时写入工作区 audio/ 目录）
     media_type: 音频格式 wav/mp3/ogg（默认 wav）
     返回: {"file_path": str, "workspace_path": str, "size_bytes": int, "url_path": str}
     """
@@ -347,28 +346,28 @@ def sovits_save_audio(
         return {"error": f"base64 解码失败: {e}"}
 
     safe_name = filename or f"sovits_{uuid.uuid4().hex[:8]}"
-    # 清理文件名中的非法字符
     safe_name = "".join(c if c.isalnum() or c in "-_" else "_" for c in safe_name)
     fname = f"{safe_name}.{media_type}"
 
-    # 写入临时输出目录
+    # 写入全局临时输出目录（静态服务备用）
     out_dir = Path(getattr(config, "H5_OUTPUT_DIR", "/tmp/ep_agent_h5")).parent / "ep_agent_audio"
     out_dir.mkdir(parents=True, exist_ok=True)
     out_path = out_dir / fname
     out_path.write_bytes(audio_bytes)
 
-    # 写入工作区 audio/ 目录（可选）
+    # 自动写入当前项目 audio/ 目录（ContextVar 推断，不依赖 LLM 传参）
     ws_path = ""
-    if workspace_id:
-        try:
-            from app.agentcore.tools.workspace_tools import _WS_ROOT
-            ws_audio_dir = _WS_ROOT / workspace_id / "audio"
-            ws_audio_dir.mkdir(parents=True, exist_ok=True)
-            ws_file = ws_audio_dir / fname
+    try:
+        from app.agentcore.session_context import get_current_project_root
+        _proj_root = get_current_project_root()
+        if _proj_root:
+            proj_audio_dir = Path(_proj_root) / "audio"
+            proj_audio_dir.mkdir(parents=True, exist_ok=True)
+            ws_file = proj_audio_dir / fname
             ws_file.write_bytes(audio_bytes)
             ws_path = f"audio/{fname}"
-        except Exception:
-            pass
+    except Exception:
+        pass
 
     return {
         "file_path":      str(out_path),

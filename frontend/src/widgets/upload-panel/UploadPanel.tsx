@@ -17,7 +17,9 @@ export function UploadPanel({ compact = false }: { compact?: boolean }) {
 
   // SSE 订阅由 page.tsx 统一管理，UploadPanel 不再自建 EventSource
   const { setSessionId, setScore, setPipelineState, appendLog, reset, sessionId } = useScoreStore()
-  const { activeWorkspaceId } = useWorkspaceStore()
+  const { activeWorkspaceId, activeProjectId, activeProject } = useWorkspaceStore()
+  // project_id 必须随 createSession 传递，确保 session 有文件系统隔离边界
+  const resolvedProjectId = activeProjectId ?? activeProject()?.id ?? undefined
 
   const handleFile = useCallback(
     async (file: File) => {
@@ -54,7 +56,7 @@ export function UploadPanel({ compact = false }: { compact?: boolean }) {
 
         // 创建新 Session（每次上传都强制新建，避免旧 session 历史污染）
         // 传入 activeWorkspaceId，确保 session 归属正确工作区，侧边栏可见
-        const { session_id } = await createSession(activeWorkspaceId ?? undefined)
+        const { session_id } = await createSession(activeWorkspaceId ?? undefined, undefined, resolvedProjectId)
         const sid = session_id
         setSessionId(sid)  // 这会触发 page.tsx 的 useEffect 重新建立 SSE
 
@@ -68,6 +70,11 @@ export function UploadPanel({ compact = false }: { compact?: boolean }) {
           meta: result.meta,
           version: 1,
         })
+
+        // 上传成功后触发侧边栏文件树刷新
+        if (typeof window !== 'undefined') {
+          window.dispatchEvent(new CustomEvent('ep:workspace-refresh'))
+        }
 
         appendLog({
           type: 'step',

@@ -43,12 +43,9 @@ async def _save_attachment_to_workspace(
     attachment_b64: str,
     attachment_name: str,
     workspace_id: str,
+    project_id: str = "",
 ) -> str:
-    """
-    将 base64 附件保存到工作区，返回工作区相对路径。
-    MIDI/音频等二进制文件写到 .sky/ 目录；其他写到 shared/。
-    这样 H5Agent 只需传路径，LLM 不接触二进制内容。
-    """
+    """将 base64 附件保存到项目目录，返回项目内相对路径（MIDI→.sky/，其他→shared/）。"""
     import base64 as _b64
     from app.agentcore.tools.workspace_tools import _WS_ROOT
 
@@ -56,7 +53,10 @@ async def _save_attachment_to_workspace(
     is_midi = ext in (".mid", ".midi")
     subdir = ".sky" if is_midi else "shared"
 
-    ws_dir = _WS_ROOT / workspace_id / subdir
+    if project_id:
+        ws_dir = _WS_ROOT / workspace_id / "projects" / project_id / subdir
+    else:
+        ws_dir = _WS_ROOT / workspace_id / subdir
     ws_dir.mkdir(parents=True, exist_ok=True)
     dest = ws_dir / attachment_name
 
@@ -110,24 +110,31 @@ class UniversalChatRunner:
             except Exception:
                 role_id = DEFAULT_ROLE_ID
 
-        # 获取工作区 ID 和谱子库上下文
+        # 获取 workspace_id + project_id（仅用于附件保存到文件系统，不流转给工具函数）
+        # 工具函数统一通过 ContextVar 推断项目根目录，无需 ID 参数
         workspace_id = ""
-        workspace_scores_context = ""
+        project_id = ""
         try:
             from app.pipeline import db as _db_ws
             _si = _db_ws.get_session_info(session_id)
             workspace_id = (_si or {}).get("workspace_id") or ""
-            if workspace_id:
-                from app.agentcore.tools.workspace_tools import list_workspace_scores_impl
-                _scores = list_workspace_scores_impl(workspace_id)
-                if _scores:
-                    _lines = [f"  - {s['title']} ({s['name']}, {s['size']} bytes)" for s in _scores]
-                    workspace_scores_context = (
-                        f"\n\n【工作区谱子库（.sky/ 目录）】\n"
-                        f"当前工作区已有 {len(_scores)} 首谱子：\n"
-                        + "\n".join(_lines)
-                        + "\n用户可以引用这些谱子进行编辑、改编或生成 H5。"
-                    )
+            project_id   = (_si or {}).get("project_id")   or ""
+        except Exception:
+            pass
+
+        # 获取谱子库上下文（通过 ContextVar 推断项目根目录，无需查 DB 获取 workspace_id）
+        workspace_scores_context = ""
+        try:
+            from app.agentcore.tools.workspace_tools import list_workspace_scores_impl
+            _scores = list_workspace_scores_impl()
+            if _scores:
+                _lines = [f"  - {s['title']} ({s['name']}, {s['size']} bytes)" for s in _scores]
+                workspace_scores_context = (
+                    f"\n\n【项目谱子库（.sky/ 目录）】\n"
+                    f"当前项目已有 {len(_scores)} 首谱子：\n"
+                    + "\n".join(_lines)
+                    + "\n用户可以引用这些谱子进行编辑、改编或生成 H5。"
+                )
         except Exception:
             pass
 
@@ -309,7 +316,7 @@ class UniversalChatRunner:
                     _chain_att_path = attachment_workspace_path or ""
                     if not _chain_att_path and attachment_b64 and attachment_name and _chain_ws_id:
                         _chain_att_path = await _save_attachment_to_workspace(
-                            attachment_b64, attachment_name, _chain_ws_id
+                            attachment_b64, attachment_name, _chain_ws_id, project_id
                         )
                     return await H5Agent().run(
                         session_id=session_id,
@@ -429,7 +436,7 @@ class UniversalChatRunner:
             _att_ws_path = attachment_workspace_path or ""
             if not _att_ws_path and attachment_b64 and attachment_name and _ws_id:
                 _att_ws_path = await _save_attachment_to_workspace(
-                    attachment_b64, attachment_name, _ws_id
+                    attachment_b64, attachment_name, _ws_id, project_id
                 )
             # 附件路径登记到 Session.extra（一次即可）
             if _att_ws_path and _ws_id:

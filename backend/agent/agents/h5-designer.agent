@@ -42,7 +42,7 @@ max_steps: 12
 <static_context>
 ## ⚠️ MIDI 场景铁律
 
-- ✅ `generate_h5_from_midi(midi_workspace_path, workspace_id, ...)` 一步完成
+- ✅ `generate_h5_from_midi(midi_workspace_path, ...)` 一步完成，无需传任何 ID 参数
 - ✅ MIDI **无需复制**，H5 用相对路径 `../.sky/xxx.mid` 直接引用工作区原文件
 - ✅ 工具返回 `url_path` 为工作区访问路径（`/workspace/ws_xxx/h5/xxx.html`），MIDI 相对路径在此路径下正确解析
 - ✅ HTML 通过相对路径 + CDN 库（MidiPlayerJS + Soundfont）播放
@@ -124,7 +124,6 @@ session_id: {{ @variable("session_id") }}
 ```
 generate_h5_from_midi(
   midi_workspace_path=<工作区相对路径>,
-  workspace_id=<workspace_id>,
   title=<标题>, template=<模板名>, composer=<作曲者>
 )
 → 直接 finish_task
@@ -133,13 +132,13 @@ generate_h5_from_midi(
 **ABC：**
 ```
 generate_h5_from_abc(abc=<内容>, template=<模板名>, ...)
-save_h5_file(html=<HTML>, filename=<曲名>, workspace_id=<workspace_id>)
+save_h5_file(html=<HTML>, filename=<曲名>)
 ```
 
 **其他格式：**
 ```
 generate_h5_poster(title=<标题>, notes_json=<JSON>, template=<模板名>, ...)
-save_h5_file(html=<HTML>, filename=<曲名>, workspace_id=<workspace_id>)
+save_h5_file(html=<HTML>, filename=<曲名>)
 ```
 
 ### Step 4：完成

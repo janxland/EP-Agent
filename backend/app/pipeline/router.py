@@ -230,7 +230,10 @@ async def sse_stream(session_id: str, request: Request):
                 _ws_id_replay = (session_info or {}).get("workspace_id") or ""
                 if _ws_id_replay:
                     from app.agentcore.tools.workspace_tools import list_workspace_scores_impl
-                    _scores = list_workspace_scores_impl(_ws_id_replay)
+                    from app.agentcore.session_context import set_current_session_id as _set_sid
+                    # 注入 session_id，让 list_workspace_scores_impl 通过 ContextVar 推断项目根目录
+                    _set_sid(session_id)
+                    _scores = list_workspace_scores_impl()
                     if _scores:
                         scores_evt = {
                             "id": new_id("evt"),
@@ -287,12 +290,13 @@ class CreateWorkspaceRequest(BaseModel):
 
 @router.get("/workspaces")
 async def list_workspaces_route():
-    """列出所有工作区（含每个工作区的 session 列表）"""
+    """列出所有工作区（含三层结构：projects → sessions）"""
     workspaces = _db.list_workspaces()
     result = []
     for ws in workspaces:
-        sessions = _db.get_workspace_sessions(ws["id"])
-        result.append({**ws, "sessions": sessions})
+        projects = _db.list_projects(ws["id"])          # 含嵌套 sessions
+        all_sessions = [s for p in projects for s in p.get("sessions", [])]
+        result.append({**ws, "projects": projects, "sessions": all_sessions})
     return {"workspaces": result}
 
 @router.post("/workspaces", status_code=201)
@@ -321,23 +325,107 @@ async def delete_workspace_route(ws_id: str):
         except Exception:
             pass
 
+# ─── Project CRUD ─────────────────────────────────────────────
+# 三层架构：Workspace → Project → Session(Topic)
+# Project 是文件系统隔离边界，Session 只能操作所属 Project 的文件
+
+class CreateProjectRequest(BaseModel):
+    name: str = "新项目"
+    description: str = ""
+
+class RenameProjectRequest(BaseModel):
+    name: str
+
+@router.get("/workspaces/{ws_id}/projects")
+async def list_projects_route(ws_id: str):
+    """列出工作区下所有项目（含嵌套 sessions）"""
+    projects = _db.list_projects(ws_id)
+    return {"workspace_id": ws_id, "projects": projects}
+
+@router.post("/workspaces/{ws_id}/projects", status_code=201)
+async def create_project_route(ws_id: str, req: CreateProjectRequest):
+    """在指定工作区下创建新项目，自动创建文件系统目录"""
+    # 确认工作区存在
+    ws_list = _db.list_workspaces()
+    if not any(w["id"] == ws_id for w in ws_list):
+        raise HTTPException(404, f"workspace not found: {ws_id}")
+    proj = _db.create_project(ws_id, req.name, req.description)
+    return proj
+
+@router.patch("/projects/{proj_id}")
+async def rename_project_route(proj_id: str, req: RenameProjectRequest):
+    """重命名项目"""
+    name = req.name.strip()
+    if not name:
+        raise HTTPException(400, "name 不能为空")
+    ok = _db.rename_project(proj_id, name)
+    if not ok:
+        raise HTTPException(404, f"project not found: {proj_id}")
+    return {"ok": True, "project_id": proj_id, "name": name}
+
+@router.delete("/projects/{proj_id}", status_code=204)
+async def delete_project_route(proj_id: str):
+    """删除项目及其下所有 sessions（级联）"""
+    proj = _db.get_project_info(proj_id)
+    if not proj:
+        raise HTTPException(404, f"project not found: {proj_id}")
+    # 收集该项目下所有 session_id，用于清理内存
+    sessions_in_proj = _db.list_projects(proj["workspace_id"])
+    for p in sessions_in_proj:
+        if p["id"] == proj_id:
+            for sess in p.get("sessions", []):
+                try:
+                    service.remove_session_from_memory(sess["id"])
+                except Exception:
+                    pass
+            break
+    _db.delete_project(proj_id)
+
+@router.get("/projects/{proj_id}")
+async def get_project_route(proj_id: str):
+    """获取项目详情"""
+    proj = _db.get_project_info(proj_id)
+    if not proj:
+        raise HTTPException(404, f"project not found: {proj_id}")
+    return proj
+
 # ─── Session ──────────────────────────────────────────────────
 
 class CreateSessionRequest(BaseModel):
     workspace_id: str = ""
+    project_id: str = ""      # 所属项目 ID（空 = 使用工作区默认项目）
     title: str = "新对话"
 
 @router.post("/sessions", status_code=201)
 async def create_session(req: CreateSessionRequest = CreateSessionRequest()):
-    # 一次写入：直接将 workspace_id/title 传入 service，避免二次落库
+    """
+    创建新对话（Session/Topic）。
+    project_id 为空时：若工作区有项目则使用第一个项目；否则自动创建默认项目。
+    """
+    ws_id = req.workspace_id or None
+    proj_id = req.project_id or None
+
+    # 自动关联项目：若未指定 project_id，但指定了 workspace_id，则使用/创建默认项目
+    if ws_id and not proj_id:
+        projects = _db.list_projects(ws_id)
+        if projects:
+            proj_id = projects[0]["id"]   # 使用最近更新的项目
+        else:
+            # 工作区下没有项目，自动创建默认项目
+            default_proj = _db.create_project(ws_id, "默认项目", "自动创建的默认项目")
+            proj_id = default_proj["id"]
+
+    # 一次性写入 workspace_id + project_id，消灭两步写入竞态
     sess = service.create_session(
-        workspace_id=req.workspace_id or None,
+        workspace_id=ws_id,
+        project_id=proj_id,
         title=req.title,
     )
     return {
-        "session_id": sess.id,
-        "workspace_id": req.workspace_id or None,
-        "title": req.title,
+        "session_id":  sess.id,
+        "workspace_id": ws_id,
+        "project_id":  proj_id,
+        "title":       req.title,
     }
 
 @router.get("/sessions/{session_id}")
@@ -350,6 +438,7 @@ async def get_session(session_id: str):
             "session_id":     sess.id,          # 兼容旧代码
             "pipeline_state": sess.pipeline_state,
             "workspace_id":   info.get("workspace_id"),
+            "project_id":     info.get("project_id"),   # ← fix22: 补上 project_id，工具层 ContextVar 依赖此字段
             "title":          info.get("title", "新对话"),
             "score_title":    info.get("score_title"),
             "score_key":      info.get("score_key"),
@@ -368,6 +457,7 @@ async def get_session(session_id: str):
             "session_id":     session_id,       # 兼容旧代码
             "pipeline_state": info.get("pipeline_state", "idle"),
             "workspace_id":   info.get("workspace_id"),
+            "project_id":     info.get("project_id"),   # ← fix22: 补上 project_id
             "title":          info.get("title", "新对话"),
             "score_title":    info.get("score_title"),
             "score_key":      info.get("score_key"),
@@ -445,10 +535,12 @@ async def edit(session_id: str, req: EditRequest):
 
 class UniversalChatRequest(BaseModel):
     message: str
-    attachment_content: str = ""          # 文本附件内容（ABC/JSON/TXT，可进 LLM context）
-    attachment_name: str = ""             # 附件文件名
-    attachment_workspace_path: str = ""  # 工作区相对路径（MIDI/图片/音频，Runner 层处理）
-    attachment_b64: str = ""              # 音频 base64（仅音色克隆直接上传场景）
+    workspace_id: str = ""   # 工作区 ID（必带，与 project_id 共同定位文件系统路径）
+    project_id: str = ""    # 项目 ID（必带，工具层文件隔离边界）
+    attachment_content: str = ""
+    attachment_name: str = ""
+    attachment_workspace_path: str = ""
+    attachment_b64: str = ""
 
 @router.post("/sessions/{session_id}/chat")
 async def universal_chat(session_id: str, req: UniversalChatRequest):
@@ -491,22 +583,70 @@ async def universal_chat(session_id: str, req: UniversalChatRequest):
         if isinstance(_info_extra, dict):
             sess.extra = _info_extra
         service.save_session(sess)
-        # 重建后同步一次，确保 workspace_id / extra（含 role_id）不丢失
+        # 重建后同步一次，确保 workspace_id / project_id / extra（含 role_id）不丢失
         _db.upsert_session(
             session_id,
             score=sess.score,
             pipeline_state=sess.pipeline_state,
             workspace_id=info.get("workspace_id"),
+            project_id=info.get("project_id"),   # ← 必须带上，防止重建后 project_id 丢失
             title=info.get("title", "新对话"),
             extra=_info_extra if isinstance(_info_extra, dict) else None,
         )
 
-    # 从 session extra 读取 role_id，透传给 universal_chat → universal_runner
+    # ── workspace_id / project_id 守门 + 自动修复 ────────────────────────────
+    # 三重保障：
+    #   1. 前端传来的值优先写入（fix12 新前端）
+    #   2. DB 已有值直接复用（session 创建时已写入）
+    #   3. 若 ws_id 缺失但 proj_id 有值，从 projects 表反查 ws_id（兼容旧 session）
+    import logging as _logging
+    _chat_logger = _logging.getLogger(__name__)
+    try:
+        _chat_info   = _db.get_session_info(session_id)
+        _db_proj_id  = (_chat_info.get("project_id")   or "").strip() if _chat_info else ""
+        _db_ws_id    = (_chat_info.get("workspace_id") or "").strip() if _chat_info else ""
+        _req_proj_id = (req.project_id   or "").strip()
+        _req_ws_id   = (req.workspace_id or "").strip()
+
+        # 最终使用的 proj_id / ws_id：前端传值 > DB 已有值
+        _final_proj_id = _req_proj_id or _db_proj_id
+        _final_ws_id   = _req_ws_id   or _db_ws_id
+
+        # 自动修复：ws_id 缺失但 proj_id 有值 → 从 projects 表反查
+        if _final_proj_id and not _final_ws_id:
+            try:
+                _proj_info = _db.get_project_info(_final_proj_id)
+                if _proj_info:
+                    _final_ws_id = (_proj_info.get("workspace_id") or "").strip()
+                    print(f"[EP-Agent] /chat 守门: 从 projects 反查 ws_id={_final_ws_id!r} (proj={_final_proj_id!r})", flush=True)
+            except Exception:
+                pass
+
+        # 有任何字段需要更新时写入 DB
+        _need_update = (
+            (_final_proj_id and _final_proj_id != _db_proj_id) or
+            (_final_ws_id   and _final_ws_id   != _db_ws_id)
+        )
+        if _need_update:
+            _db.upsert_session(session_id,
+                               workspace_id=_final_ws_id or None,
+                               project_id=_final_proj_id or None)
+            print(f"[EP-Agent] /chat 守门: session={session_id} ws={_final_ws_id!r} proj={_final_proj_id!r} 已写入DB", flush=True)
+            _chat_logger.info("[chat] session %s 绑定 ws=%s proj=%s", session_id, _final_ws_id, _final_proj_id)
+            _chat_info = _db.get_session_info(session_id)
+        elif not _final_proj_id:
+            _chat_logger.warning("[chat] session %s 无 project_id，工具调用将失败", session_id)
+        else:
+            print(f"[EP-Agent] /chat 守门: session={session_id} ws={_final_ws_id!r} proj={_final_proj_id!r} DB已是最新", flush=True)
+    except Exception as _ge:
+        _chat_logger.warning("[chat] project_id 守门异常 session=%s: %s", session_id, _ge)
+        _chat_info = None
+
+    # 从 session extra 读取 role_id（复用上方已查询的 _chat_info，避免重复查 DB）
     _role_id: str | None = None
     try:
-        _sess_info = _db.get_session_info(session_id)
-        if _sess_info:
-            _extra = _sess_info.get("extra") or {}
+        if _chat_info:
+            _extra = _chat_info.get("extra") or {}
             if isinstance(_extra, str):
                 import json as _json
                 try:
@@ -523,6 +663,7 @@ async def universal_chat(session_id: str, req: UniversalChatRequest):
             await service.universal_chat(
                 session_id=session_id,
                 message=req.message,
+                project_id=req.project_id,
                 attachment_content=req.attachment_content,
                 attachment_name=req.attachment_name,
                 attachment_workspace_path=req.attachment_workspace_path,
@@ -788,8 +929,8 @@ async def get_session_role(session_id: str):
 
 
 # ─── 工作区文件系统 API ────────────────────────────────────────────────────────
-# 提供工作区文件的 CRUD，供前端文件树和 Agent 工具共用同一套存储。
-# 文件存储路径：data/workspace/{workspace_id}/...
+# 前端文件树和 Agent 工具共用同一套存储。
+# 路径规则：data/workspace/{ws_id}/projects/{proj_id}/
 
 from pathlib import Path as _Path
 import base64 as _base64
@@ -802,18 +943,31 @@ _BLOCKED_EXTS = {".py", ".sh", ".bash", ".exe", ".bat", ".cmd", ".ps1"}
 _MAX_UPLOAD_BYTES = 20 * 1024 * 1024  # 20 MB
 
 
-def _ws_safe_path(workspace_id: str, rel: str) -> _Path:
-    base = (_WS_FILE_ROOT / workspace_id).resolve()
-    target = (base / rel).resolve()
-    if not str(target).startswith(str(base)):
+def _ws_safe_path(workspace_id: str, rel: str, project_id: str = "") -> _Path:
+    """安全路径解析，防止路径遍历，支持中文/特殊字符文件名。"""
+    import os as _os
+    if project_id:
+        base = (_WS_FILE_ROOT / workspace_id / "projects" / project_id).resolve()
+    else:
+        base = (_WS_FILE_ROOT / workspace_id).resolve()
+    norm_rel = _os.path.normpath(rel)
+    if norm_rel.startswith("..") or norm_rel.startswith("/") or norm_rel.startswith("\\"):
         raise HTTPException(400, "路径越界")
-    return target
+    target = base / norm_rel
+    target_abs = _os.path.abspath(str(target))
+    base_abs   = _os.path.abspath(str(base))
+    if not target_abs.startswith(base_abs + _os.sep) and target_abs != base_abs:
+        raise HTTPException(400, "路径越界")
+    return _Path(target_abs)
 
 
 @router.get("/workspaces/{workspace_id}/files")
-async def list_ws_files(workspace_id: str, subdir: str = ""):
-    """列出工作区文件树"""
-    base = _WS_FILE_ROOT / workspace_id
+async def list_ws_files(workspace_id: str, project_id: str = "", subdir: str = ""):
+    """列出项目文件树（有 project_id 时限定在项目目录内）"""
+    if project_id:
+        base = _WS_FILE_ROOT / workspace_id / "projects" / project_id
+    else:
+        base = _WS_FILE_ROOT / workspace_id
     scan = (base / subdir) if subdir else base
     if not scan.exists():
         return {"files": []}
@@ -835,15 +989,15 @@ async def list_ws_files(workspace_id: str, subdir: str = ""):
                     ".csv", ".svg", ".log",
                 },
             })
-    return {"workspace_id": workspace_id, "files": files}
+    return {"workspace_id": workspace_id, "project_id": project_id, "files": files}
 
 
 @router.get("/workspaces/{workspace_id}/files/content")
-async def get_ws_file(workspace_id: str, path: str, encoding: str = "text"):
-    """读取工作区文件内容（encoding=text 返回文本，encoding=base64 返回 b64，encoding=raw 直接返回二进制）"""
+async def get_ws_file(workspace_id: str, path: str, encoding: str = "text", project_id: str = ""):
+    """读取项目文件内容（encoding=text 返回文本，encoding=base64 返回 b64，encoding=raw 直接返回二进制）"""
     import mimetypes as _mimetypes
     from fastapi.responses import Response as _Response
-    target = _ws_safe_path(workspace_id, path)
+    target = _ws_safe_path(workspace_id, path, project_id)
     if not target.exists():
         raise HTTPException(404, f"文件不存在: {path}")
     if encoding == "raw":
@@ -863,32 +1017,43 @@ class WsFileWriteRequest(BaseModel):
 
 
 @router.put("/workspaces/{workspace_id}/files")
-async def put_ws_file(workspace_id: str, req: WsFileWriteRequest):
-    """写入/创建工作区文件"""
-    ext = _Path(req.path).suffix.lower()
-    if ext in _BLOCKED_EXTS:
-        raise HTTPException(400, f"禁止写入 {ext} 类型文件")
-    target = _ws_safe_path(workspace_id, req.path)
-    target.parent.mkdir(parents=True, exist_ok=True)
-    if req.encoding == "base64":
-        data = _base64.b64decode(req.content)
-        if len(data) > _MAX_UPLOAD_BYTES:
-            raise HTTPException(400, "文件超过 20MB 限制")
-        target.write_bytes(data)
-        return {"ok": True, "path": req.path, "size": len(data)}
-    else:
-        raw = req.content.encode("utf-8")
-        if len(raw) > _MAX_UPLOAD_BYTES:
-            raise HTTPException(400, "文件超过 20MB 限制")
-        target.write_text(req.content, encoding="utf-8")
-        return {"ok": True, "path": req.path, "size": len(raw)}
+async def put_ws_file(workspace_id: str, req: WsFileWriteRequest, project_id: str = ""):
+    """写入/创建项目文件（支持中文/特殊字符文件名）"""
+    import logging as _logging
+    _log = _logging.getLogger("ep_agent.ws_files")
+    try:
+        ext = _Path(req.path).suffix.lower()
+        if ext in _BLOCKED_EXTS:
+            raise HTTPException(400, f"禁止写入 {ext} 类型文件")
+        target = _ws_safe_path(workspace_id, req.path, project_id)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if req.encoding == "base64":
+            try:
+                data = _base64.b64decode(req.content)
+            except Exception as b64_err:
+                raise HTTPException(400, f"base64 解码失败：{b64_err}")
+            if len(data) > _MAX_UPLOAD_BYTES:
+                raise HTTPException(400, "文件超过 20MB 限制")
+            target.write_bytes(data)
+            return {"ok": True, "path": req.path, "size": len(data)}
+        else:
+            raw = req.content.encode("utf-8")
+            if len(raw) > _MAX_UPLOAD_BYTES:
+                raise HTTPException(400, "文件超过 20MB 限制")
+            target.write_text(req.content, encoding="utf-8")
+            return {"ok": True, "path": req.path, "size": len(raw)}
+    except HTTPException:
+        raise
+    except Exception as e:
+        _log.exception("[put_ws_file] 写入失败 workspace=%s path=%r", workspace_id, req.path)
+        raise HTTPException(500, f"文件写入失败：{e}")
 
 
 @router.delete("/workspaces/{workspace_id}/files")
-async def delete_ws_file(workspace_id: str, path: str):
-    """删除工作区文件或目录（目录递归删除）"""
+async def delete_ws_file(workspace_id: str, path: str, project_id: str = ""):
+    """删除项目文件或目录（目录递归删除）"""
     import shutil as _shutil
-    target = _ws_safe_path(workspace_id, path)
+    target = _ws_safe_path(workspace_id, path, project_id)
     if not target.exists():
         return {"ok": True, "message": "文件不存在（已删除）"}
     if target.is_dir():
@@ -904,11 +1069,11 @@ class WsFileCopyRequest(BaseModel):
 
 
 @router.post("/workspaces/{workspace_id}/files/copy")
-async def copy_ws_file(workspace_id: str, req: WsFileCopyRequest):
-    """复制工作区文件到新路径"""
+async def copy_ws_file(workspace_id: str, req: WsFileCopyRequest, project_id: str = ""):
+    """复制项目文件到新路径"""
     import shutil as _shutil
-    src = _ws_safe_path(workspace_id, req.src_path)
-    dst = _ws_safe_path(workspace_id, req.dst_path)
+    src = _ws_safe_path(workspace_id, req.src_path, project_id)
+    dst = _ws_safe_path(workspace_id, req.dst_path, project_id)
     if not src.exists():
         raise HTTPException(404, f"源文件不存在：{req.src_path}")
     _BLOCKED = {".py", ".sh", ".bash", ".exe", ".bat", ".cmd", ".ps1"}
@@ -1010,19 +1175,40 @@ class WsFileRenameRequest(BaseModel):
 
 
 @router.post("/workspaces/{workspace_id}/files/rename")
-async def rename_ws_file(workspace_id: str, req: WsFileRenameRequest):
-    """重命名工作区文件（保持同目录）"""
+async def rename_ws_file(workspace_id: str, req: WsFileRenameRequest, project_id: str = ""):
+    """重命名项目文件（保持同目录）"""
     if "/" in req.new_name or "\\" in req.new_name:
         raise HTTPException(400, "new_name 不能含路径分隔符")
     _BLOCKED = {".py", ".sh", ".bash", ".exe", ".bat", ".cmd", ".ps1"}
     if _Path(req.new_name).suffix.lower() in _BLOCKED:
         raise HTTPException(400, f"禁止重命名为 {_Path(req.new_name).suffix} 类型文件")
-    src = _ws_safe_path(workspace_id, req.src_path)
+    base = (_WS_FILE_ROOT / workspace_id / "projects" / project_id) if project_id else (_WS_FILE_ROOT / workspace_id)
+    src = _ws_safe_path(workspace_id, req.src_path, project_id)
     if not src.exists():
         raise HTTPException(404, f"文件不存在：{req.src_path}")
     dst = src.parent / req.new_name
-    # 安全检查：dst 也必须在工作区内
-    _ws_safe_path(workspace_id, str(dst.relative_to(_WS_FILE_ROOT / workspace_id)))
+    _ws_safe_path(workspace_id, str(dst.relative_to(base)), project_id)
     src.rename(dst)
-    new_path = str(dst.relative_to(_WS_FILE_ROOT / workspace_id))
+    new_path = str(dst.relative_to(base))
     return {"ok": True, "src": req.src_path, "dst": new_path}
+
+
+class WsFileMoveRequest(BaseModel):
+    src_path: str
+    dst_path: str   # 目标完整相对路径（含文件名），可跨目录
+
+
+@router.post("/workspaces/{workspace_id}/files/move")
+async def move_ws_file(workspace_id: str, req: WsFileMoveRequest, project_id: str = ""):
+    """移动项目文件到新路径（可跨目录，相当于 rename + mkdir）"""
+    import shutil as _shutil
+    _BLOCKED = {".py", ".sh", ".bash", ".exe", ".bat", ".cmd", ".ps1"}
+    if _Path(req.dst_path).suffix.lower() in _BLOCKED:
+        raise HTTPException(400, f"禁止移动为 {_Path(req.dst_path).suffix} 类型文件")
+    src = _ws_safe_path(workspace_id, req.src_path, project_id)
+    dst = _ws_safe_path(workspace_id, req.dst_path, project_id)
+    if not src.exists():
+        raise HTTPException(404, f"源文件不存在：{req.src_path}")
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    _shutil.move(str(src), str(dst))
+    return {"ok": True, "src": req.src_path, "dst": req.dst_path, "size": dst.stat().st_size}

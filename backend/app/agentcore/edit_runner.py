@@ -95,7 +95,6 @@ def _build_user_prompt(
     meta: ScoreMeta,
     current_abc: str,
     context_summary: str = "",
-    workspace_id: str = "",
 ) -> str:
     """构造编辑任务的用户消息（注入谱子上下文）。"""
     parts = [
@@ -104,8 +103,6 @@ def _build_user_prompt(
         f"BPM={meta.bpm:.0f}，拍号={meta.time_sig_num}/{meta.time_sig_den}，"
         f"音符数={meta.note_count}",
     ]
-    if workspace_id:
-        parts.append(f"工作区 ID：{workspace_id}（调用 abc_to_midi 时请传入此值）")
     if context_summary:
         parts.append(f"历史上下文：{context_summary}")
     parts.append(f"\n当前 ABC 谱：\n{current_abc}")
@@ -121,7 +118,7 @@ async def run_edit(
     todo_mgr: TodoManager,
     scene: Scene = "editor",
     session_id: str = "",   # 传入后 ReactExecutor 自动落库 tool message
-    workspace_id: str = "", # 注入到 user prompt，供 abc_to_midi 等工具使用
+    workspace_id: str = "", # 保留参数兼容旧调用，内部不再使用（工具通过 ContextVar 推断路径）
 ) -> dict:
     """
     执行 ABC 编辑（v3.1：使用 ReactExecutor，不再内嵌 ReAct Loop）。
@@ -152,17 +149,14 @@ async def run_edit(
     })
 
     # ── 构造 messages ─────────────────────────────────────────────────────────
-    tools = get_tool_schemas("abc_edit") + get_tool_schemas("output")
-    # 同时注册 analyze_abc 工具（复杂编辑时 LLM 可选择先分析）
-    try:
-        analyze_tools = get_tool_schemas("analyze")
-        tools = analyze_tools + tools
-    except Exception:
-        pass  # analyze 工具组不存在时不影响主流程
+    # default 组：analyze_abc / validate_abc / transpose_abc / abc_to_sky_json 等
+    # abc_edit 组：abc_to_midi / load_abc_score
+    # workspace 组：list_workspace_files / read_workspace_file 等（编辑时可能需要读文件）
+    tools = get_tool_schemas("default") + get_tool_schemas("abc_edit") + get_tool_schemas("workspace")
     messages = [
         {"role": "system", "content": _build_system_prompt()},
         {"role": "user",   "content": _build_user_prompt(
-            intent, meta, current_abc, context_summary, workspace_id
+            intent, meta, current_abc, context_summary
         )},
     ]
 

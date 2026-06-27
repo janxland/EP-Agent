@@ -7,7 +7,7 @@
  *   1. 若 localStorage 中有 activeSessionId → 直接跳转到 /pro/{sessionId}（恢复上次）
  *   2. 否则加载工作区列表，创建新 session 后跳转
  *
- * 真正的 UI 渲染在 /pro/[sessionId]/page.tsx 中，此页面不渲染任何业务 UI。
+ * 真正的 UI 渲染在 /pro/[projId]/[sessionId]/page.tsx 中，此页面不渲染任何业务 UI。
  */
 
 import { useEffect, useRef } from 'react'
@@ -39,7 +39,19 @@ export default function ProPage() {
     if (_pendingNavigateSessionId === undefined) return
     clearPendingNavigate()
     if (_pendingNavigateSessionId) {
-      routerRef.current.replace(`/pro/${_pendingNavigateSessionId}`)
+      // 从 workspaces 树中查找目标 session 所属 projId，避免 activeProject() 为空
+      const state = useWorkspaceStore.getState()
+      const pendingProjId = state.workspaces
+        .flatMap((w) => w.projects ?? [])
+        .find((p) => p.sessions?.some((s) => s.id === _pendingNavigateSessionId))?.id
+        ?? state.activeProjectId
+        ?? ''
+      if (!pendingProjId) {
+        // projId 实在找不到，回到 /pro 重新走守卫逻辑
+        routerRef.current.replace('/pro')
+        return
+      }
+      routerRef.current.replace(`/pro/${pendingProjId}/${_pendingNavigateSessionId}`)
     } else {
       routerRef.current.replace('/pro')
     }
@@ -52,9 +64,49 @@ export default function ProPage() {
       initializedRef.current = true
       // 验证 session 是否仍然有效（后端可能已删除）
       fetch(`/api/sessions/${persistedSessionId}`)
-        .then((res) => {
+        .then(async (res) => {
           if (res.ok) {
-            router.replace(`/pro/${persistedSessionId}`)
+            // 额外检查 stale 字段：后端内存中无此 session 时返回 stale:true（HTTP 200）
+            // stale session 仍可跳转，后端发消息时会自动重建（含 workspace_id/project_id 恢复）
+            // 但若 stale 且后端 DB 中也无此 session，则清除并重建
+            let restoredProjId = ''
+            try {
+              const data = await res.json()
+              if (data?.stale && !data?.workspace_id) {
+                // DB 中也找不到工作区归属，此 session 已完全失效，重建
+                setActiveSessionId(null)
+                initializedRef.current = false
+                loadWorkspaces()
+                return
+              }
+              // 优先用接口返回的 project_id（fix22 已修复该字段）
+              if (data?.project_id) {
+                restoredProjId = data.project_id
+              } else {
+                // 接口没有 project_id，从已加载的 workspaces 树中查找
+                const state = useWorkspaceStore.getState()
+                restoredProjId = state.workspaces
+                  .flatMap((w) => w.projects ?? [])
+                  .find((p) => p.sessions?.some((s) => s.id === persistedSessionId))?.id
+                  ?? state.activeProjectId
+                  ?? ''
+              }
+            } catch {
+              // json 解析失败：从 store 取
+              const state = useWorkspaceStore.getState()
+              restoredProjId = state.activeProjectId ?? ''
+            }
+            if (!restoredProjId) {
+              // projId 仍为空：先加载工作区列表再重试
+              await loadWorkspaces()
+              const state = useWorkspaceStore.getState()
+              restoredProjId = state.workspaces
+                .flatMap((w) => w.projects ?? [])
+                .find((p) => p.sessions?.some((s) => s.id === persistedSessionId))?.id
+                ?? state.workspaces.flatMap((w) => w.projects ?? [])[0]?.id
+                ?? ''
+            }
+            router.replace(`/pro/${restoredProjId}/${persistedSessionId}`)
           } else {
             // session 已失效（404 或其他错误）→ 清除持久化 ID，走步骤 2 创建新 session
             setActiveSessionId(null)
@@ -64,7 +116,8 @@ export default function ProPage() {
         })
         .catch(() => {
           // 网络错误时乐观跳转（后端可能只是暂时不可用）
-          router.replace(`/pro/${persistedSessionId}`)
+          const fallbackProjId = useWorkspaceStore.getState().activeProject()?.id ?? ''
+          router.replace(`/pro/${fallbackProjId}/${persistedSessionId}`)
         })
     } else {
       // 无历史 session，触发工作区加载，为步骤 2 准备
@@ -90,9 +143,17 @@ export default function ProPage() {
           const newWs = await useWorkspaceStore.getState().createWorkspace('默认工作区')
           wsId = newWs.id
         }
-        const sess = await wsCreateSession(wsId, '新对话')
+        // 传入 activeProjectId（若有），确保 session 归属正确项目，工具层文件隔离生效
+        const resolvedProjId = useWorkspaceStore.getState().activeProject()?.id
+        const sess = await wsCreateSession(wsId, '新对话', resolvedProjId)
         setActiveSessionId(sess.id)
-        router.replace(`/pro/${sess.id}`)
+        // createSession 返回的 session 含 project_id（store 已乐观插入），优先使用
+        const newProjId = sess.project_id
+          ?? resolvedProjId
+          ?? useWorkspaceStore.getState().activeProject()?.id
+          ?? useWorkspaceStore.getState().workspaces.find((w) => w.id === wsId)?.projects?.[0]?.id
+          ?? ''
+        router.replace(`/pro/${newProjId}/${sess.id}`)
       } catch (e) {
         console.error('[EP-Agent] 创建 session 失败', e)
         // 降级：直接调用 apiCreateSession，不依赖工作区
@@ -104,16 +165,25 @@ export default function ProPage() {
             const newWs = await state.createWorkspace('默认工作区')
             fallbackWsId = newWs.id
           }
-          const { session_id } = await apiCreateSession(fallbackWsId, '新对话')
+          // 获取降级工作区下的项目 ID（确保 session 有文件隔离边界）
+          const fallbackState2 = useWorkspaceStore.getState()
+          const fallbackProjId2 = fallbackState2.workspaces
+            .find((w) => w.id === fallbackWsId)?.projects?.[0]?.id
+          const { session_id } = await apiCreateSession(fallbackWsId, '新对话', fallbackProjId2)
           setActiveSessionId(session_id)
-          router.replace(`/pro/${session_id}`)
+          router.replace(`/pro/${fallbackProjId2 ?? ''}/${session_id}`)
         } catch (e2) {
           console.error('[EP-Agent] 降级创建 session 也失败', e2)
-          // 最终兜底：直接创建无工作区 session
+          // 最终兜底：必须有工作区，否则工具层无法定位文件系统路径
+          // 此时工作区列表为空，再创建一次工作区再建 session
           try {
-            const { session_id } = await apiCreateSession(undefined, '新对话')
+            const emergencyWs = await useWorkspaceStore.getState().createWorkspace('默认工作区')
+            // 新工作区刚创建，需等 store 更新后读取自动生成的默认项目 ID
+            const emergencyProjId = useWorkspaceStore.getState()
+              .workspaces.find((w) => w.id === emergencyWs.id)?.projects?.[0]?.id
+            const { session_id } = await apiCreateSession(emergencyWs.id, '新对话', emergencyProjId)
             setActiveSessionId(session_id)
-            router.replace(`/pro/${session_id}`)
+            router.replace(`/pro/${emergencyProjId ?? ''}/${session_id}`)
           } catch (e3) {
             console.error('[EP-Agent] 最终兜底也失败', e3)
           }

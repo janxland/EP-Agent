@@ -4,8 +4,19 @@ FastAPI + uvicorn
 """
 import os
 import sys
+import logging
 from pathlib import Path
 import uvicorn
+
+# ── 日志配置（启动时立即生效）────────────────────────────────────────────────
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    datefmt="%H:%M:%S",
+    force=True,  # 覆盖 uvicorn 默认 handler
+)
+# ep_agent 命名空间全部 INFO 级别输出
+logging.getLogger("ep_agent").setLevel(logging.DEBUG)
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware

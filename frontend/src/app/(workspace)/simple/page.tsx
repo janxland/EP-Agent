@@ -14,14 +14,16 @@ import Link from 'next/link'
 
 export default function SimplePage() {
   const { sessionId, setSessionId, abcNotation, score, handleSSEEvent } = useScoreStore()
-  const { activeWorkspaceId } = useWorkspaceStore()
+  const { activeWorkspaceId, activeProjectId, activeProject } = useWorkspaceStore()
+  const resolvedProjectId = activeProjectId ?? activeProject()?.id ?? undefined
   const [rightTab, setRightTab] = useState<'export' | 'audio'>('export')
   const unsubRef = useRef<(() => void) | null>(null)
 
   useEffect(() => {
     if (!sessionId) {
       // 传入 activeWorkspaceId，确保 session 归属正确工作区，侧边栏可见
-      createSession(activeWorkspaceId ?? undefined)
+      // project_id 必须传递，工具层通过它定位文件系统隔离路径
+      createSession(activeWorkspaceId ?? undefined, undefined, resolvedProjectId)
         .then(({ session_id }) => setSessionId(session_id))
         .catch(console.error)
       return

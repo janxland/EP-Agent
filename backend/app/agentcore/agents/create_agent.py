@@ -258,35 +258,29 @@ class CreateAgent:
             pass
 
         # ── 自动写入工作区文件（.sky/<title>.abc）─────────────────────────────
-        # 谱子是工作区资产，跨会话共享，类似 Cursor 的工作区文件概念
+        # 谱子是项目资产，跨会话共享，通过 ContextVar 自动推断项目路径
         _ws_file_path = ""
         try:
-            from app.pipeline import db as _db_ref
-            _si = _db_ref.get_session_info(session_id)
-            _ws_id = (_si or {}).get("workspace_id") or ""
-            if _ws_id:
-                from app.agentcore.tools.workspace_tools import save_score_to_workspace_impl
-                _save_result = save_score_to_workspace_impl(
-                    workspace_id=_ws_id,
-                    abc_notation=new_abc,
-                    title=header["title"] or "score",
-                    overwrite=True,
-                )
-                _ws_file_path = _save_result["path"]
-                # 写入重要记忆：ABC 文件路径（供 H5Agent 等跨轮次感知）
-                try:
-                    from app.agentcore.session_context import remember_workspace_file
-                    remember_workspace_file(session_id, _ws_file_path,
-                                           header["title"] or "score")
-                except Exception:
-                    pass
-                # 通知前端文件树刷新
-                await publish("workspace.file_saved", {
-                    "workspace_id": _ws_id,
-                    "path":         _ws_file_path,
-                    "type":         "abc",
-                    "title":        header["title"],
-                })
+            from app.agentcore.tools.workspace_tools import save_score_to_workspace_impl
+            _save_result = save_score_to_workspace_impl(
+                abc_notation=new_abc,
+                title=header["title"] or "score",
+                overwrite=True,
+            )
+            _ws_file_path = _save_result["path"]
+            # 写入重要记忆：ABC 文件路径（供 H5Agent 等跨轮次感知）
+            try:
+                from app.agentcore.session_context import remember_workspace_file
+                remember_workspace_file(session_id, _ws_file_path,
+                                       header["title"] or "score")
+            except Exception:
+                pass
+            # 通知前端文件树刷新
+            await publish("workspace.file_saved", {
+                "path":  _ws_file_path,
+                "type":  "abc",
+                "title": header["title"],
+            })
         except Exception:
             pass
 

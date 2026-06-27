@@ -34,10 +34,10 @@ import {
 export const FILE_REF_EVENT     = 'ep:file-ref'
 export const FILE_PREVIEW_EVENT = 'ep:file-preview'
 
-export const emitFileRef = (file: WorkspaceFile & { workspaceId: string }) =>
+export const emitFileRef = (file: WorkspaceFile & { workspaceId: string; projectId?: string }) =>
   window.dispatchEvent(new CustomEvent(FILE_REF_EVENT, { detail: file }))
 
-export const emitFilePreview = (file: WorkspaceFile & { workspaceId: string }) =>
+export const emitFilePreview = (file: WorkspaceFile & { workspaceId: string; projectId?: string }) =>
   window.dispatchEvent(new CustomEvent(FILE_PREVIEW_EVENT, { detail: file }))
 
 // ─── 树形节点类型 ─────────────────────────────────────────────────────────────
@@ -373,9 +373,10 @@ function DeleteDirDialog({ dirPath, onConfirm, onCancel }: {
 
 // ─── 文件行 ───────────────────────────────────────────────────────────────────
 
-function FileRow({ file, workspaceId, selected, depth = 0, onClick, onContextMenu, onRef }: {
+function FileRow({ file, workspaceId, resolvedProjectId, selected, depth = 0, onClick, onContextMenu, onRef }: {
   file: WorkspaceFile
   workspaceId: string
+  resolvedProjectId: string
   selected: boolean
   depth?: number
   onClick: () => void
@@ -417,7 +418,7 @@ function FileRow({ file, workspaceId, selected, depth = 0, onClick, onContextMen
       {isImg && (
         <div className="pointer-events-none absolute left-full top-1/2 -translate-y-1/2 ml-2 z-[600] hidden group-hover:block">
           <div className="bg-white rounded-xl shadow-2xl border border-gray-100 p-1.5 w-48">
-            <img src={getFileRawUrl(workspaceId, file.path)} alt={file.name}
+            <img src={getFileRawUrl(workspaceId, file.path, resolvedProjectId)} alt={file.name}
               className="w-full h-auto rounded-lg object-contain max-h-40" loading="lazy" />
             <p className="mt-1 text-[9px] text-gray-400 text-center truncate px-1">{file.name}</p>
           </div>
@@ -476,12 +477,13 @@ function DirRow({ name, fullPath, depth, expanded, onToggle, onContextMenu }: {
 
 // ─── 递归树节点渲染 ───────────────────────────────────────────────────────────
 
-function TreeNodeRow({ node, depth, expanded, onToggle, workspaceId, selectedPath, onFileClick, onContextMenu, onDirContextMenu, onRef }: {
+function TreeNodeRow({ node, depth, expanded, onToggle, workspaceId, resolvedProjectId, selectedPath, onFileClick, onContextMenu, onDirContextMenu, onRef }: {
   node: TreeNode
   depth: number
   expanded: Set<string>
   onToggle: (path: string) => void
   workspaceId: string
+  resolvedProjectId: string
   selectedPath: string | null
   onFileClick: (file: WorkspaceFile) => void
   onContextMenu: (e: ReactMouseEvent, file: WorkspaceFile) => void
@@ -493,6 +495,7 @@ function TreeNodeRow({ node, depth, expanded, onToggle, workspaceId, selectedPat
       <FileRow
         file={node.file}
         workspaceId={workspaceId}
+        resolvedProjectId={resolvedProjectId}
         selected={selectedPath === node.file.path}
         depth={depth}
         onClick={() => onFileClick(node.file)}
@@ -523,6 +526,7 @@ function TreeNodeRow({ node, depth, expanded, onToggle, workspaceId, selectedPat
               expanded={expanded}
               onToggle={onToggle}
               workspaceId={workspaceId}
+              resolvedProjectId={resolvedProjectId}
               selectedPath={selectedPath}
               onFileClick={onFileClick}
               onContextMenu={onContextMenu}
@@ -544,7 +548,27 @@ type DialogState =
   | null
 
 export function WorkspaceFileTree() {
-  const { activeWorkspaceId, fileTreeRefreshToken } = useWorkspaceStore()
+  const { activeWorkspaceId, activeProjectId, activeProject, fileTreeRefreshToken, workspaces } = useWorkspaceStore()
+  // 切换工作区后 activeProjectId 自动同步，此处再加兜底确保始终有效。
+  // 同时订阅 workspaces，确保 workspaces 异步加载完成后 activeProject() 能正确返回项目 ID。
+  // 场景：session 刚创建时 activeProjectId 有值但 workspaces 为空，activeProject() 返回 null；
+  // 等 loadWorkspaces 完成后 workspaces 更新，此处重新计算 resolvedProjectId，触发 load。
+  const resolvedProjectId = activeProjectId
+    ?? activeProject()?.id
+    ?? workspaces.find(w => w.id === activeWorkspaceId)?.projects?.[0]?.id
+    ?? ''
+
+  // ── 关键修复：用 ref 存储最新的 wsId + projId，确保 load 闭包始终读到最新值 ──
+  // 问题根因：load 是 useCallback，依赖 [activeWorkspaceId, resolvedProjectId]。
+  // 但 restoreFromSessionId 是异步的，首次渲染时 resolvedProjectId 可能为空，
+  // load 已经用空 projId 跑完了。之后 store 更新触发 re-render，新 load 才有正确 projId，
+  // 但 fileTreeRefreshToken/ep:workspace-refresh 触发的是旧闭包里的 load（空 projId）。
+  // 解法：load 内部通过 ref 读取最新值，彻底解耦闭包与 store 状态更新时序。
+  const wsIdRef    = useRef(activeWorkspaceId)
+  const projIdRef  = useRef(resolvedProjectId)
+  useEffect(() => { wsIdRef.current   = activeWorkspaceId  }, [activeWorkspaceId])
+  useEffect(() => { projIdRef.current = resolvedProjectId  }, [resolvedProjectId])
+
   const [files, setFiles]       = useState<WorkspaceFile[]>([])
   const [loading, setLoading]   = useState(false)
   const [error, setError]       = useState<string | null>(null)
@@ -556,11 +580,16 @@ export function WorkspaceFileTree() {
   const [dialog, setDialog]     = useState<DialogState>(null)
   const fileInputRef            = useRef<HTMLInputElement>(null)
 
+  // load 始终从 ref 读取最新的 wsId/projId，不依赖闭包捕获的旧值
+  // 这样无论是 fileTreeRefreshToken、ep:workspace-refresh 还是手动刷新，
+  // 都能用到 restoreFromSessionId 异步完成后的最新 project_id
   const load = useCallback(async () => {
-    if (!activeWorkspaceId) return
+    const wsId   = wsIdRef.current
+    const projId = projIdRef.current
+    if (!wsId) return
     setLoading(true); setError(null)
     try {
-      const loaded = await listWorkspaceFiles(activeWorkspaceId)
+      const loaded = await listWorkspaceFiles(wsId, projId)
       setFiles(loaded)
       // 首次加载时默认展开第一层目录
       setExpanded(prev => {
@@ -571,18 +600,27 @@ export function WorkspaceFileTree() {
     }
     catch (e) { setError(e instanceof Error ? e.message : '加载失败') }
     finally   { setLoading(false) }
-  }, [activeWorkspaceId])
+  }, []) // 空依赖：load 自身稳定，通过 ref 获取最新值
 
-  // 统一刷新触发
-  useEffect(() => { void load() }, [load])
-  useEffect(() => { if (fileTreeRefreshToken > 0) void load() }, [fileTreeRefreshToken]) // eslint-disable-line react-hooks/exhaustive-deps
+  // ── 触发加载的三条路径 ────────────────────────────────────────────────────────
+
+  // 路径 1：wsId 或 projId 变化时重新加载
+  // 用独立 effect 监听，确保 restoreFromSessionId 异步完成后能触发
+  useEffect(() => {
+    if (activeWorkspaceId) void load()
+  }, [activeWorkspaceId, resolvedProjectId, load])
+
+  // 路径 2：fileTreeRefreshToken 递增（文件上传/工具写文件后触发）
+  useEffect(() => { if (fileTreeRefreshToken > 0) void load() }, [fileTreeRefreshToken, load])
+
+  // 路径 3：ep:workspace-refresh 全局事件（SSE tool.call 成功后触发）
   useEffect(() => {
     window.addEventListener('ep:workspace-refresh', load as EventListener)
     return () => window.removeEventListener('ep:workspace-refresh', load as EventListener)
   }, [load])
 
-  // 切换工作区时重置展开状态
-  useEffect(() => { setExpanded(new Set()) }, [activeWorkspaceId])
+  // 切换工作区或项目时重置展开状态（保证新项目展开第一层）
+  useEffect(() => { setExpanded(new Set()) }, [activeWorkspaceId, activeProjectId])
 
   const withOp = useCallback(async (op: () => Promise<void>, errMsg: string) => {
     try   { await op(); await load() }
@@ -593,23 +631,23 @@ export function WorkspaceFileTree() {
     if (!fileList || !activeWorkspaceId) return
     setLoading(true)
     await withOp(
-      () => Promise.all(Array.from(fileList).map(f => uploadFileToWorkspace(activeWorkspaceId, f))).then(() => {}),
+      () => Promise.all(Array.from(fileList).map(f => uploadFileToWorkspace(activeWorkspaceId, f, undefined, resolvedProjectId))).then(() => {}),
       '上传失败'
     )
     setLoading(false)
-  }, [activeWorkspaceId, withOp])
+  }, [activeWorkspaceId, resolvedProjectId, withOp])
 
   const handleFileClick = useCallback(async (file: WorkspaceFile) => {
     if (!activeWorkspaceId) return
     setSelectedPath(file.path)
     if (file.ext === 'abc') {
       try {
-        const abc = await readWorkspaceFile(activeWorkspaceId, file.path)
+        const abc = await readWorkspaceFile(activeWorkspaceId, file.path, resolvedProjectId)
         window.dispatchEvent(new CustomEvent('ep:load-score', { detail: { abc, path: file.path, name: file.name } }))
       } catch { /* ignore */ }
     }
-    emitFilePreview({ ...file, workspaceId: activeWorkspaceId })
-  }, [activeWorkspaceId])
+    emitFilePreview({ ...file, workspaceId: activeWorkspaceId, projectId: resolvedProjectId || undefined })
+  }, [activeWorkspaceId, resolvedProjectId])
 
   const toggleDir = useCallback((path: string) => {
     setExpanded(prev => {
@@ -636,7 +674,7 @@ export function WorkspaceFileTree() {
     >
       {/* 头部 */}
       <div className="flex items-center justify-between px-3 pt-2.5 pb-1 shrink-0">
-        <span className="text-[10px] font-bold text-gray-400 uppercase tracking-widest">工作区文件</span>
+        <span className="text-[10px] font-bold text-gray-400 uppercase tracking-widest">项目文件</span>
         <div className="flex items-center gap-1">
           {loading && (
             <svg className="w-3 h-3 animate-spin text-orange-300" fill="none" viewBox="0 0 24 24">
@@ -694,6 +732,7 @@ export function WorkspaceFileTree() {
                 expanded={expanded}
                 onToggle={toggleDir}
                 workspaceId={activeWorkspaceId}
+                resolvedProjectId={resolvedProjectId}
                 selectedPath={selectedPath}
                 onFileClick={handleFileClick}
                 onContextMenu={(e, file) => setMenu({ x: e.clientX, y: e.clientY, file })}
@@ -740,7 +779,7 @@ export function WorkspaceFileTree() {
           onCancel={() => setDialog(null)}
           onConfirm={() => {
             const f = dialog.file; setDialog(null)
-            void withOp(() => deleteWorkspaceFile(activeWorkspaceId, f.path), '删除失败')
+            void withOp(() => deleteWorkspaceFile(activeWorkspaceId, f.path, resolvedProjectId), '删除失败')
           }}
         />
       )}
@@ -750,7 +789,7 @@ export function WorkspaceFileTree() {
           onCancel={() => setDialog(null)}
           onConfirm={() => {
             const p = dialog.dirPath; setDialog(null)
-            void withOp(() => deleteWorkspaceFile(activeWorkspaceId, p), '删除文件夹失败')
+            void withOp(() => deleteWorkspaceFile(activeWorkspaceId, p, resolvedProjectId), '删除文件夹失败')
           }}
         />
       )}
@@ -763,7 +802,7 @@ export function WorkspaceFileTree() {
           onCancel={() => setDialog(null)}
           onConfirm={(newName) => {
             const f = dialog.file; setDialog(null)
-            void withOp(() => renameWorkspaceFile(activeWorkspaceId, f.path, newName), '重命名失败')
+            void withOp(() => renameWorkspaceFile(activeWorkspaceId, f.path, newName, resolvedProjectId), '重命名失败')
           }}
         />
       )}
@@ -781,7 +820,7 @@ export function WorkspaceFileTree() {
           onCancel={() => setDialog(null)}
           onConfirm={(dst) => {
             const f = dialog.file; setDialog(null)
-            void withOp(() => copyWorkspaceFile(activeWorkspaceId, f.path, dst), '复制失败')
+            void withOp(() => copyWorkspaceFile(activeWorkspaceId, f.path, dst, resolvedProjectId), '复制失败')
           }}
         />
       )}

@@ -81,16 +81,8 @@ class EditAgent:
             "arguments": {"intent": message[:100]},
         })
 
-        # ── 自动查询 workspace_id（若调用方未传）────────────────────────────
-        if not workspace_id:
-            try:
-                from app.pipeline import db as _db_ref
-                _si = _db_ref.get_session_info(session_id)
-                workspace_id = (_si or {}).get("workspace_id") or ""
-            except Exception:
-                pass
-
         # ── 调用 run_edit()（v3.1：直接调用，不再透传 edit_fn）──────────────
+        # workspace_id 不再注入 prompt（abc_to_midi 等工具通过 ContextVar 自动推断路径）
         try:
             from app.agentcore.edit_runner import run_edit
             result = await run_edit(
@@ -102,7 +94,6 @@ class EditAgent:
                 todo_mgr=todo_mgr,
                 scene="editor",
                 session_id=session_id,  # 落库 tool message
-                workspace_id=workspace_id,  # 注入 workspace_id 供 abc_to_midi 使用
             )
         except Exception as e:
             await publish("tool.call", {
@@ -154,31 +145,25 @@ class EditAgent:
 
         # ── 自动写入工作区文件（.sky/<title>.abc）─────────────────────────────
         try:
-            from app.pipeline import db as _db_ref
-            _si = _db_ref.get_session_info(session_id)
-            _ws_id = (_si or {}).get("workspace_id") or ""
-            if _ws_id:
-                from app.agentcore.tools.workspace_tools import save_score_to_workspace_impl
-                _new_header = parse_abc_header(new_abc)
-                _save_result = save_score_to_workspace_impl(
-                    workspace_id=_ws_id,
-                    abc_notation=new_abc,
-                    title=_new_header["title"] or "score",
-                    overwrite=True,
-                )
-                # 写入重要记忆：ABC 文件路径（供 H5Agent 等跨轮次感知）
-                try:
-                    from app.agentcore.session_context import remember_workspace_file
-                    remember_workspace_file(session_id, _save_result["path"],
-                                           _new_header["title"] or "score")
-                except Exception:
-                    pass
-                await publish("workspace.file_saved", {
-                    "workspace_id": _ws_id,
-                    "path":         _save_result["path"],
-                    "type":         "abc",
-                    "title":        _new_header["title"],
-                })
+            from app.agentcore.tools.workspace_tools import save_score_to_workspace_impl
+            _new_header = parse_abc_header(new_abc)
+            _save_result = save_score_to_workspace_impl(
+                abc_notation=new_abc,
+                title=_new_header["title"] or "score",
+                overwrite=True,
+            )
+            # 写入重要记忆：ABC 文件路径（供 H5Agent 等跨轮次感知）
+            try:
+                from app.agentcore.session_context import remember_workspace_file
+                remember_workspace_file(session_id, _save_result["path"],
+                                       _new_header["title"] or "score")
+            except Exception:
+                pass
+            await publish("workspace.file_saved", {
+                "path": _save_result["path"],
+                "type": "abc",
+                "title": _new_header["title"],
+            })
         except Exception:
             pass
 

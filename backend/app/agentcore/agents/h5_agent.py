@@ -45,7 +45,7 @@ MIDI 文件由工具直接从工作区读取，H5 模板内置 CDN 播放库（M
 ```
 list_h5_templates()
 ↓ 选模板
-generate_h5_from_midi(midi_workspace_path=<工作区路径>, workspace_id=<id>, title=<标题>, template=<模板名>)
+generate_h5_from_midi(midi_workspace_path=<工作区路径>, title=<标题>, template=<模板名>)
 ↓ 得到 html + midi_url
 save_h5_file(html=<html>, filename=<安全文件名>)
 ↓
@@ -74,7 +74,7 @@ save_h5_file(...) → finish_task(...)
 
 ### 需要查找工作区文件时
 ```
-list_workspace_files(workspace_id=<id>)
+list_workspace_files()
 ↓ 找到文件路径后按对应流程
 ```
 
@@ -126,7 +126,8 @@ class H5Agent:
 
         # ── 重要记忆感知：若前端未传附件路径，从 Session 记忆中主动发现最新文件 ──
         # 查找优先级：midi → abc → json（MIDI 可直接生成 H5；ABC/JSON 需额外解析步骤）
-        if not attachment_workspace_path and workspace_id:
+        # 从 Session 记忆中主动发现最新文件（无需 workspace_id，ContextVar 自动推断）
+        if not attachment_workspace_path:
             try:
                 from app.agentcore.session_context import recall_latest_file
                 import os
@@ -143,7 +144,7 @@ class H5Agent:
 
         # 构建用户消息（附件信息注入）
         user_content = self._build_user_message(
-            message, attachment_workspace_path, attachment_name, workspace_id,
+            message, attachment_workspace_path, attachment_name,
         )
 
         # ── 记忆前缀注入：将 Session 携带体追加到 system prompt ──────────────
@@ -162,16 +163,8 @@ class H5Agent:
         # 工作区工具：list_workspace_files / read_workspace_file
         workspace_tools = get_tool_schemas("workspace")
 
-        # 获取 finish_task 工具：遍历所有已注册工具组，健壮获取，不依赖特定组
-        finish_tools: list[dict] = []
-        for _grp in ("abc_edit", "abc_create", "query", "audio"):
-            _candidates = [t for t in get_tool_schemas(_grp) if t["function"]["name"] == "finish_task"]
-            if _candidates:
-                finish_tools = _candidates[:1]
-                break
-        # 兜底：若所有组都没有，从全量工具中查找
-        if not finish_tools:
-            finish_tools = [t for t in get_tool_schemas() if t["function"]["name"] == "finish_task"][:1]
+        # finish_task 直接从全量工具中查找（各组均不含，兜底最可靠）
+        finish_tools = [t for t in get_tool_schemas() if t["function"]["name"] == "finish_task"][:1]
 
         all_tools = h5_tools + workspace_tools + finish_tools
 
@@ -226,10 +219,9 @@ class H5Agent:
             # H5 文件已写入工作区 h5/ 目录，触发文件树刷新
             if extra.get("workspace_path"):
                 await publish("workspace.file_saved", {
-                    "workspace_id": workspace_id,
-                    "path":         extra["workspace_path"],
-                    "type":         "h5",
-                    "title":        extra.get("title", ""),
+                    "path":  extra["workspace_path"],
+                    "type":  "h5",
+                    "title": extra.get("title", ""),
                 })
 
         if ids:
@@ -254,16 +246,13 @@ class H5Agent:
         message: str,
         attachment_workspace_path: str,
         attachment_name: str,
-        workspace_id: str = "",
     ) -> str:
         """
         构建用户消息，注入文件路径信息。
         永远不传 base64，只传工作区路径，LLM 通过路径调用工具。
+        工具通过 ContextVar 自动推断项目根目录，无需 workspace_id。
         """
         parts = [message]
-
-        if workspace_id:
-            parts.append(f"\n\n[工作区]\nworkspace_id: {workspace_id}")
 
         if attachment_workspace_path and attachment_name:
             name_lower = attachment_name.lower()
@@ -272,34 +261,38 @@ class H5Agent:
                     f"\n\n[MIDI 文件]\n"
                     f"workspace_path: {attachment_workspace_path}\n"
                     f"⚡ 直接调用：generate_h5_from_midi("
-                    f"midi_workspace_path=\"{attachment_workspace_path}\", "
-                    f"workspace_id=\"{workspace_id}\")"
+                    f"midi_workspace_path=\"{attachment_workspace_path}\", title=<标题>, template=<模板名>)"
                 )
             elif name_lower.endswith(".abc") or name_lower.endswith(".txt"):
                 try:
-                    from app.agentcore.tools.workspace_tools import _WS_ROOT
-                    ws_path = _WS_ROOT / workspace_id / attachment_workspace_path
-                    abc_text = ws_path.read_text(encoding="utf-8", errors="replace")
-                    parts.append(
-                        f"\n\n[ABC 文件内容]\n```abc\n{abc_text[:3000]}\n```\n"
-                        f"⚡ 直接调用：generate_h5_from_abc(abc=<上方 ABC 内容>, template=<模板名>)"
-                    )
+                    from app.agentcore.session_context import get_current_project_root
+                    _root = get_current_project_root()
+                    abc_text = (_root / attachment_workspace_path).read_text(encoding="utf-8", errors="replace") if _root else ""
+                    if abc_text:
+                        parts.append(
+                            f"\n\n[ABC 文件内容]\n```abc\n{abc_text[:3000]}\n```\n"
+                            f"⚡ 直接调用：generate_h5_from_abc(abc=<上方 ABC 内容>, template=<模板名>)"
+                        )
+                    else:
+                        raise ValueError("无法读取")
                 except Exception:
                     parts.append(
                         f"\n\n[ABC 文件]\nworkspace_path: {attachment_workspace_path}\n"
-                        f"请调用 read_workspace_file(workspace_id=\"{workspace_id}\", "
-                        f"file_path=\"{attachment_workspace_path}\") 读取内容，"
+                        f"请调用 read_workspace_file(file_path=\"{attachment_workspace_path}\") 读取内容，"
                         f"再调用 generate_h5_from_abc(abc=<读取的内容>)"
                     )
             elif name_lower.endswith(".json"):
                 try:
-                    from app.agentcore.tools.workspace_tools import _WS_ROOT
-                    ws_path = _WS_ROOT / workspace_id / attachment_workspace_path
-                    json_text = ws_path.read_text(encoding="utf-8", errors="replace")
-                    parts.append(
-                        f"\n\n[Sky JSON 文件内容]\n```json\n{json_text[:3000]}\n```\n"
-                        f"⚡ 直接调用：parse_sky_json_to_json(sky_json_str=<上方 JSON 内容>)"
-                    )
+                    from app.agentcore.session_context import get_current_project_root
+                    _root = get_current_project_root()
+                    json_text = (_root / attachment_workspace_path).read_text(encoding="utf-8", errors="replace") if _root else ""
+                    if json_text:
+                        parts.append(
+                            f"\n\n[Sky JSON 文件内容]\n```json\n{json_text[:3000]}\n```\n"
+                            f"⚡ 直接调用：parse_sky_json_to_json(sky_json_str=<上方 JSON 内容>)"
+                        )
+                    else:
+                        raise ValueError("无法读取")
                 except Exception:
                     parts.append(
                         f"\n\n[JSON 文件]\nworkspace_path: {attachment_workspace_path}\n"
@@ -311,12 +304,12 @@ class H5Agent:
                     f"filename: {attachment_name}"
                 )
 
-        elif workspace_id:
-            # 无指定附件 → 提示从工作区查找（abc_to_midi 生成的 MIDI 已自动记入记忆）
+        else:
+            # 无指定附件 → 提示从项目目录查找（abc_to_midi 生成的 MIDI 已自动记入记忆）
             parts.append(
-                f"\n\n⚡ 请先调用 list_workspace_files(workspace_id=\"{workspace_id}\") "
-                f"查找工作区中的 MIDI（.sky/*.mid）/ ABC / JSON 文件，"
-                f"找到 MIDI 文件后直接调用 generate_h5_from_midi 生成 H5，无需任何额外解析步骤。"
+                "\n\n⚡ 请先调用 list_workspace_files() "
+                "查找项目中的 MIDI（.sky/*.mid）/ ABC / JSON 文件，"
+                "找到 MIDI 文件后直接调用 generate_h5_from_midi 生成 H5，无需任何额外解析步骤。"
             )
 
         return "".join(parts)

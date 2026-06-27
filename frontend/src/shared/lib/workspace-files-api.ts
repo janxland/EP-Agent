@@ -2,7 +2,11 @@
  * 工作区文件系统 API
  * 对接后端 /api/workspaces/{workspace_id}/files 路由
  *
- * 工作区目录约定：
+ * 三层路径规则（与 session_context.get_current_project_root() 完全一致）：
+ *   有 project_id → data/workspace/{ws_id}/projects/{proj_id}/
+ *   无 project_id → data/workspace/{ws_id}/  （向后兼容）
+ *
+ * 目录约定（相对于项目根）：
  *   .sky/          Sky 游戏谱子（JSON / ABC / MIDI）
  *   shared/        通用共享文件（图片、H5、音频等）
  *   shared/images/ 粘贴图片自动上传目标
@@ -11,7 +15,7 @@
 const BASE_URL = process.env.NEXT_PUBLIC_API_URL ?? ''
 
 export interface WorkspaceFile {
-  path: string    // 相对于工作区根目录，如 ".sky/demo.mid"
+  path: string    // 相对于项目根目录，如 ".sky/demo.mid"
   name: string    // 文件名
   ext: string     // 扩展名（不含点）
   size: number    // 字节数
@@ -23,6 +27,22 @@ export interface WorkspaceFile {
 
 export const IMAGE_EXTS = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg'])
 export const SKY_EXTS   = new Set(['json', 'abc', 'mid', 'midi'])
+// Sky 谱 .txt 文件（JSON 格式）也属于谱子库，需路由到 .sky/ 目录
+export const SKY_TXT_MIME_HINT = 'application/x-sky-score'
+
+/**
+ * 检测 .txt 文件是否为 Sky 谱（JSON 数组格式）
+ * 通过读取文件头部内容判断，避免把普通文本误放入 .sky/
+ */
+export const isSkyTxtFile = async (file: File): Promise<boolean> => {
+  if (!file.name.toLowerCase().endsWith('.txt')) return false
+  try {
+    const head = await file.slice(0, 64).text()
+    return head.trimStart().startsWith('[')
+  } catch {
+    return false
+  }
+}
 
 export const FILE_ICONS: Record<string, string> = {
   abc: '🎼', mid: '🎹', midi: '🎹', json: '🎵',
@@ -41,17 +61,22 @@ export const fmtFileSize = (bytes: number): string =>
   :                    `${(bytes / 1048576).toFixed(1)}MB`
 
 /**
- * 构造工作区文件的静态直链 URL（图片/二进制，可用于 <img src> 等）。
- * 走 FastAPI StaticFiles /workspace 挂载，绕开 API 路由，浏览器可直接缓存。
+ * 构造项目文件的静态直链 URL。
+ * 有 project_id 时走三层路径，否则退回工作区根。
  */
-export const getFileRawUrl = (workspaceId: string, filePath: string): string =>
-  `/workspace/${workspaceId}/${filePath}`
+export const getFileRawUrl = (workspaceId: string, filePath: string, projectId = ''): string =>
+  projectId
+    ? `/workspace/${workspaceId}/projects/${projectId}/${filePath}`
+    : `/workspace/${workspaceId}/${filePath}`
 
-/** 构造工作区文件的下载 URL（raw 二进制流，浏览器直接下载，不经过 base64 包装） */
-export const getFileDownloadUrl = (workspaceId: string, filePath: string): string =>
-  `${BASE_URL}/api/workspaces/${workspaceId}/files/content?path=${encodeURIComponent(filePath)}&encoding=raw`
+/** 构造项目文件的下载 URL */
+export const getFileDownloadUrl = (workspaceId: string, filePath: string, projectId = ''): string => {
+  const params = new URLSearchParams({ path: filePath, encoding: 'raw' })
+  if (projectId) params.set('project_id', projectId)
+  return `${BASE_URL}/api/workspaces/${workspaceId}/files/content?${params}`
+}
 
-// ─── API 函数 ─────────────────────────────────────────────────────────────────
+// ─── 内部 fetch 封装 ──────────────────────────────────────────────────────────
 
 const api = async (input: RequestInfo, init?: RequestInit): Promise<Response> => {
   const res = await fetch(input, init)
@@ -59,72 +84,116 @@ const api = async (input: RequestInfo, init?: RequestInit): Promise<Response> =>
   return res
 }
 
-export const listWorkspaceFiles = async (workspaceId: string, subdir = ''): Promise<WorkspaceFile[]> => {
-  const params = new URLSearchParams(subdir ? { subdir } : {})
+// ─── API 函数（所有函数统一接收可选 projectId）────────────────────────────────
+
+export const listWorkspaceFiles = async (
+  workspaceId: string, projectId = '', subdir = ''
+): Promise<WorkspaceFile[]> => {
+  const params = new URLSearchParams()
+  if (projectId) params.set('project_id', projectId)
+  if (subdir)    params.set('subdir', subdir)
   const data = await api(`${BASE_URL}/api/workspaces/${workspaceId}/files?${params}`).then(r => r.json())
   return data.files as WorkspaceFile[]
 }
 
-export const readWorkspaceFile = async (workspaceId: string, filePath: string): Promise<string> => {
+export const readWorkspaceFile = async (
+  workspaceId: string, filePath: string, projectId = ''
+): Promise<string> => {
   const params = new URLSearchParams({ path: filePath, encoding: 'text' })
+  if (projectId) params.set('project_id', projectId)
   const data = await api(`${BASE_URL}/api/workspaces/${workspaceId}/files/content?${params}`).then(r => r.json())
   return data.content as string
 }
 
-export const readWorkspaceFileB64 = async (workspaceId: string, filePath: string): Promise<string> => {
+export const readWorkspaceFileB64 = async (
+  workspaceId: string, filePath: string, projectId = ''
+): Promise<string> => {
   const params = new URLSearchParams({ path: filePath, encoding: 'base64' })
+  if (projectId) params.set('project_id', projectId)
   const data = await api(`${BASE_URL}/api/workspaces/${workspaceId}/files/content?${params}`).then(r => r.json())
   return data.content as string
 }
 
 export const writeWorkspaceFile = async (
-  workspaceId: string, filePath: string, content: string, encoding: 'text' | 'base64' = 'text'
+  workspaceId: string, filePath: string, content: string,
+  encoding: 'text' | 'base64' = 'text', projectId = ''
 ): Promise<void> => {
-  await api(`${BASE_URL}/api/workspaces/${workspaceId}/files`, {
+  const params = new URLSearchParams()
+  if (projectId) params.set('project_id', projectId)
+  await api(`${BASE_URL}/api/workspaces/${workspaceId}/files?${params}`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ path: filePath, content, encoding }),
   })
 }
 
-export const deleteWorkspaceFile = async (workspaceId: string, filePath: string): Promise<void> => {
+export const deleteWorkspaceFile = async (
+  workspaceId: string, filePath: string, projectId = ''
+): Promise<void> => {
   const params = new URLSearchParams({ path: filePath })
+  if (projectId) params.set('project_id', projectId)
   await api(`${BASE_URL}/api/workspaces/${workspaceId}/files?${params}`, { method: 'DELETE' })
 }
 
-export const copyWorkspaceFile = async (workspaceId: string, srcPath: string, dstPath: string): Promise<void> => {
-  await api(`${BASE_URL}/api/workspaces/${workspaceId}/files/copy`, {
+export const copyWorkspaceFile = async (
+  workspaceId: string, srcPath: string, dstPath: string, projectId = ''
+): Promise<void> => {
+  const params = new URLSearchParams()
+  if (projectId) params.set('project_id', projectId)
+  await api(`${BASE_URL}/api/workspaces/${workspaceId}/files/copy?${params}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ src_path: srcPath, dst_path: dstPath }),
   })
 }
 
-export const renameWorkspaceFile = async (workspaceId: string, srcPath: string, newName: string): Promise<void> => {
-  await api(`${BASE_URL}/api/workspaces/${workspaceId}/files/rename`, {
+export const renameWorkspaceFile = async (
+  workspaceId: string, srcPath: string, newName: string, projectId = ''
+): Promise<void> => {
+  const params = new URLSearchParams()
+  if (projectId) params.set('project_id', projectId)
+  await api(`${BASE_URL}/api/workspaces/${workspaceId}/files/rename?${params}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ src_path: srcPath, new_name: newName }),
   })
 }
 
-export const moveWorkspaceFile = async (workspaceId: string, srcPath: string, dstPath: string): Promise<void> => {
-  await api(`${BASE_URL}/api/workspaces/${workspaceId}/files/move`, {
+export const moveWorkspaceFile = async (
+  workspaceId: string, srcPath: string, dstPath: string, projectId = ''
+): Promise<void> => {
+  const params = new URLSearchParams()
+  if (projectId) params.set('project_id', projectId)
+  await api(`${BASE_URL}/api/workspaces/${workspaceId}/files/move?${params}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ src_path: srcPath, dst_path: dstPath }),
   })
 }
 
-/** 上传本地文件到工作区（自动路由目录） */
-export const uploadFileToWorkspace = async (workspaceId: string, file: File, destPath?: string): Promise<void> => {
+/**
+ * 计算文件应上传到的项目内路径（自动路由目录）
+ * - .sky/          : Sky 谱子（json/abc/mid/midi）+ Sky 谱 txt
+ * - shared/images/ : 图片
+ * - shared/        : 其他文件
+ */
+export const resolveUploadPath = (file: File, isSkyTxt = false): string => {
   const ext = file.name.split('.').pop()?.toLowerCase() ?? ''
-  const path = destPath
-    ?? (SKY_EXTS.has(ext)   ? `.sky/${file.name}`
-    :  IMAGE_EXTS.has(ext) || file.type.startsWith('image/') ? `shared/images/${file.name}`
-    :  `shared/${file.name}`)
+  if (SKY_EXTS.has(ext) || isSkyTxt) return `.sky/${file.name}`
+  if (IMAGE_EXTS.has(ext) || file.type.startsWith('image/')) return `shared/images/${file.name}`
+  return `shared/${file.name}`
+}
 
-  // 严格白名单判断文本：音频/MIDI/图片等二进制文件即使扩展名在列表里也走 base64
+/** 上传本地文件到项目（自动路由目录，project_id 决定存储层级） */
+export const uploadFileToWorkspace = async (
+  workspaceId: string, file: File, destPath?: string, projectId = ''
+): Promise<void> => {
+  const skyTxt = !destPath && file.name.toLowerCase().endsWith('.txt')
+    ? await isSkyTxtFile(file)
+    : false
+
+  const path = destPath ?? resolveUploadPath(file, skyTxt)
+
   const isBinary = /\.(mid|midi|mp3|wav|m4a|ogg|flac|png|jpg|jpeg|gif|webp|pdf|zip|rar|7z)$/i.test(file.name)
     || file.type.startsWith('audio/')
     || file.type.startsWith('image/')
@@ -135,9 +204,10 @@ export const uploadFileToWorkspace = async (workspaceId: string, file: File, des
   )
 
   if (isText) {
-    await writeWorkspaceFile(workspaceId, path, await file.text(), 'text')
+    const content = await file.text()
+    await writeWorkspaceFile(workspaceId, path, content, 'text', projectId)
   } else {
-    await writeWorkspaceFile(workspaceId, path, await fileToBase64(file), 'base64')
+    await writeWorkspaceFile(workspaceId, path, await fileToBase64(file), 'base64', projectId)
   }
 }
 

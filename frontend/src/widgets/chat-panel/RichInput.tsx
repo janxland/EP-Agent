@@ -32,6 +32,8 @@ import { useWorkspaceStore } from '@/features/workspace/store/workspace.store'
 import {
   listWorkspaceFiles,
   uploadFileToWorkspace,
+  isSkyTxtFile,
+  resolveUploadPath,
   writeWorkspaceFile,
   fileToBase64,
   getFileIcon,
@@ -450,7 +452,9 @@ export interface RichInputProps {
 }
 
 export function RichInput({ disabled, placeholder, onSend, onPaste, insertTextRef, sendRef, insertMentionRef, onImageUploadStatus }: RichInputProps) {
-  const { activeWorkspaceId } = useWorkspaceStore()
+  const { activeWorkspaceId, activeProjectId, activeProject } = useWorkspaceStore()
+  // 兜底推断：activeProjectId 为 null 时从 activeProject() 获取，防止文件落到 ws 根目录
+  const resolvedProjectId = activeProjectId ?? activeProject()?.id ?? ''
   const wsFilesRef = useRef<WorkspaceFile[]>([])
   const [imgUploading, setImgUploading] = useState(false)
   const [isDragOver, setIsDragOver] = useState(false)
@@ -499,16 +503,18 @@ export function RichInput({ disabled, placeholder, onSend, onPaste, insertTextRe
     await Promise.allSettled(
       files.map(async (file: File) => {
         try {
-          await uploadFileToWorkspace(activeWorkspaceId, file)
+          // 预检测 .txt 是否为 Sky 谱（JSON 数组格式），决定路由目录
+          // 必须在 uploadFileToWorkspace 之前检测，保证路径一致
+          const skyTxt = file.name.toLowerCase().endsWith('.txt')
+            ? await isSkyTxtFile(file)
+            : false
+          const uploadedPath = resolveUploadPath(file, skyTxt)
+
+          await uploadFileToWorkspace(activeWorkspaceId, file, undefined, resolvedProjectId)
           // 刷新文件列表缓存
-          const updatedFiles = await listWorkspaceFiles(activeWorkspaceId)
+          const updatedFiles = await listWorkspaceFiles(activeWorkspaceId, resolvedProjectId)
           wsFilesRef.current = updatedFiles
           // 找到刚上传的文件获取真实 size
-          const ext = file.name.split('.').pop()?.toLowerCase() ?? ''
-          const uploadedPath =
-            ['json', 'abc', 'mid', 'midi'].includes(ext) ? `.sky/${file.name}`
-            : ['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg'].includes(ext) || file.type.startsWith('image/') ? `shared/images/${file.name}`
-            : `shared/${file.name}`
           const uploaded = updatedFiles.find(f => f.path === uploadedPath)
           // 插入 mention 胶囊
           if (editorRef.current) {
@@ -517,6 +523,8 @@ export function RichInput({ disabled, placeholder, onSend, onPaste, insertTextRe
               attrs: { id: uploadedPath, label: file.name, size: uploaded?.size ?? file.size },
             }).insertContent(' ').run()
           }
+          // 触发侧边栏文件树刷新
+          window.dispatchEvent(new CustomEvent('ep:workspace-refresh'))
         } catch (err) {
           console.error('[拖拽上传失败]', file.name, err)
         }
@@ -524,7 +532,7 @@ export function RichInput({ disabled, placeholder, onSend, onPaste, insertTextRe
     )
 
     setDragUploadingCount(0)
-  }, [activeWorkspaceId])
+  }, [activeWorkspaceId, resolvedProjectId])
 
   // ─── 图片粘贴上传 ────────────────────────────────────────────────────────────
   // 将图片 File 上传到工作区 shared/images/ 目录，成功后自动插入 @文件名 mention
@@ -546,10 +554,10 @@ export function RichInput({ disabled, placeholder, onSend, onPaste, insertTextRe
     try {
       // 使用 FileReader 方式上传（修复大文件 btoa spread 栈溢出）
       const b64 = await fileToBase64(file)
-      await writeWorkspaceFile(activeWorkspaceId, destPath, b64, 'base64')
+      await writeWorkspaceFile(activeWorkspaceId, destPath, b64, 'base64', resolvedProjectId)
 
       // 刷新文件列表缓存
-      const files = await listWorkspaceFiles(activeWorkspaceId)
+      const files = await listWorkspaceFiles(activeWorkspaceId, resolvedProjectId)
       wsFilesRef.current = files
       const uploaded = files.find(f => f.path === destPath)
 
@@ -558,6 +566,8 @@ export function RichInput({ disabled, placeholder, onSend, onPaste, insertTextRe
         type: 'mention',
         attrs: { id: destPath, label: fileName, size: uploaded?.size ?? file.size },
       }).insertContent(' ').run()
+      // 触发侧边栏文件树刷新
+      window.dispatchEvent(new CustomEvent('ep:workspace-refresh'))
       onImageUploadStatus?.('done', fileName)
     } catch (err) {
       console.error('[图片上传失败]', err)
@@ -565,7 +575,7 @@ export function RichInput({ disabled, placeholder, onSend, onPaste, insertTextRe
     } finally {
       setImgUploading(false)
     }
-  }, [activeWorkspaceId, onImageUploadStatus])
+  }, [activeWorkspaceId, resolvedProjectId, onImageUploadStatus])
 
   const doSend = useCallback((editorInstance: Editor) => {
     if (disabledRef.current) return
@@ -579,6 +589,9 @@ export function RichInput({ disabled, placeholder, onSend, onPaste, insertTextRe
   }, [])
 
   const editor = useEditor({
+    // Next.js SSR 环境下必须设为 false，避免 hydration mismatch 警告
+    // Tiptap 编辑器只在客户端渲染，服务端无需立即渲染
+    immediatelyRender: false,
     extensions: [
       StarterKit.configure({ heading: false, blockquote: false, code: false, codeBlock: false }),
       buildMentionExtension(() => wsFilesRef.current),
@@ -631,11 +644,11 @@ export function RichInput({ disabled, placeholder, onSend, onPaste, insertTextRe
   useEffect(() => {
     if (!activeWorkspaceId) return
     let cancelled = false
-    listWorkspaceFiles(activeWorkspaceId)
+    listWorkspaceFiles(activeWorkspaceId, resolvedProjectId)
       .then(files => { if (!cancelled) wsFilesRef.current = files })
       .catch(() => {})
     return () => { cancelled = true }
-  }, [activeWorkspaceId])
+  }, [activeWorkspaceId, resolvedProjectId])
 
   // 监听全局文件引用事件（文件树侧边栏 @ 引用按钮）
   useEffect(() => {
