@@ -10,7 +10,7 @@
  *   - 标签栏：Chrome 风格，可关闭，支持溢出滚动
  */
 
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState, type FC } from 'react'
 import { usePreviewTabsStore, type PreviewTab, type FileTab, type AbcTab } from '../store/preview-tabs.store'
 import { getFileRawUrl, getFileDownloadUrl, IMAGE_EXTS } from '@/shared/lib/workspace-files-api'
 import { ABCRenderer } from '@/widgets/abc-editor/ABCRenderer'
@@ -20,6 +20,42 @@ import { ExportPanel } from '@/widgets/export-panel/ExportPanel'
 // ─── 文件类型工具 ────────────────────────────────────────────────────────────────
 
 const TEXT_EXTS = new Set(['abc','txt','md','json','html','htm','css','js','ts','tsx','jsx','xml','yaml','yml','csv','svg','py','go','sh'])
+
+// 代码类文件（需要语法高亮）
+const CODE_EXTS = new Set(['js','ts','tsx','jsx','json','css','py','go','sh','yaml','yml','xml','svg','md','html','htm','abc'])
+
+// highlight.js 语言映射
+const HLJS_LANG: Record<string, string> = {
+  js: 'javascript', ts: 'typescript', tsx: 'typescript', jsx: 'javascript',
+  py: 'python', go: 'go', sh: 'bash', yaml: 'yaml', yml: 'yaml',
+  json: 'json', css: 'css', xml: 'xml', svg: 'xml', html: 'xml', htm: 'xml',
+  md: 'markdown', abc: 'plaintext',
+}
+
+// 动态加载 highlight.js
+let _hljsLoaded = false
+let _hljsLoading: Promise<void> | null = null
+function loadHljs(): Promise<void> {
+  if (_hljsLoaded) return Promise.resolve()
+  if (_hljsLoading) return _hljsLoading
+  _hljsLoading = new Promise((resolve) => {
+    // 加载主样式
+    if (!document.getElementById('hljs-css')) {
+      const link = document.createElement('link')
+      link.id = 'hljs-css'
+      link.rel = 'stylesheet'
+      link.href = 'https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css'
+      document.head.appendChild(link)
+    }
+    // 加载主脚本
+    const script = document.createElement('script')
+    script.src = 'https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js'
+    script.onload = () => { _hljsLoaded = true; resolve() }
+    script.onerror = () => resolve() // 失败时降级为纯文本
+    document.head.appendChild(script)
+  })
+  return _hljsLoading
+}
 
 function fileIcon(ext: string) {
   if (ext === 'html' || ext === 'htm') return '🌐'
@@ -129,6 +165,47 @@ function TabBar() {
   )
 }
 
+// ─── 代码高亮组件 ────────────────────────────────────────────────────────────────
+
+const CodeViewer: FC<{ text: string | null; ext: string; loading: boolean }> = ({ text, ext, loading }) => {
+  const codeRef = useRef<HTMLElement>(null)
+  const isCode = CODE_EXTS.has(ext)
+
+  useEffect(() => {
+    if (!isCode || !text || !codeRef.current) return
+    loadHljs().then(() => {
+      const hljs = (window as unknown as { hljs?: { highlight: (code: string, opts: { language: string }) => { value: string }; highlightElement: (el: HTMLElement) => void } }).hljs
+      if (!hljs || !codeRef.current) return
+      const lang = HLJS_LANG[ext] ?? 'plaintext'
+      try {
+        codeRef.current.innerHTML = hljs.highlight(text, { language: lang }).value
+      } catch {
+        codeRef.current.textContent = text
+      }
+    })
+  }, [text, ext, isCode])
+
+  if (loading) return (
+    <div className="flex items-center justify-center h-full">
+      <span className="text-xs text-gray-400 animate-pulse">加载中…</span>
+    </div>
+  )
+
+  if (!isCode) return (
+    <pre className="p-5 text-[11.5px] font-mono text-gray-700 leading-relaxed whitespace-pre-wrap break-all overflow-auto h-full">{text}</pre>
+  )
+
+  return (
+    <div className="h-full overflow-auto bg-white">
+      <pre className="p-5 text-[11.5px] leading-relaxed m-0 bg-transparent">
+        <code ref={codeRef} className={`language-${HLJS_LANG[ext] ?? 'plaintext'} hljs`}>
+          {text}
+        </code>
+      </pre>
+    </div>
+  )
+}
+
 // ─── 文件内容渲染 ────────────────────────────────────────────────────────────────
 
 function FileContent({ tab }: { tab: FileTab }) {
@@ -193,11 +270,8 @@ function FileContent({ tab }: { tab: FileTab }) {
     </div>
   )
 
-  if (isText) return (
-    loading
-      ? <div className="flex items-center justify-center h-full"><span className="text-xs text-gray-400 animate-pulse">加载中…</span></div>
-      : <pre className="p-5 text-[11.5px] font-mono text-gray-700 leading-relaxed whitespace-pre-wrap break-all overflow-auto h-full">{text}</pre>
-  )
+  if (isText) return <CodeViewer text={text} ext={file.ext} loading={loading} />
+
 
   // 二进制 fallback
   return (

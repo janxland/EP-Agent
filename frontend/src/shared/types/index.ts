@@ -156,6 +156,7 @@ export type SSEEventType =
   | 'h5.ready'               // H5 海报生成完成（含 url_path/file_path/size_kb）
   | 'connection.reconnecting' // SSE 断线重连前通知前端清空 store
   | 'workspace.file_saved'     // 谱子写入 .sky/ 后通知前端刷新文件树
+  | 'workspace.files.changed'  // 文件写入类工具执行后通知前端刷新文件树
   | 'workspace.scores'         // SSE replay 推送工作区谱子列表
   | 'error'
 

@@ -287,19 +287,6 @@ def analyze_abc(abc: str) -> dict:
     return info
 
 
-@tool
-def get_abc_header(abc: str) -> dict:
-    """提取 ABC 谱的所有 header 字段（X/T/C/A/Z/S/M/L/Q/K）。
-    abc: 完整的 ABC Notation 字符串
-    """
-    headers: dict = {}
-    for line in abc.split('\n'):
-        m = re.match(r'^([A-Z]):(.*)', line)
-        if m:
-            headers[m.group(1)] = m.group(2).strip()
-    return headers
-
-
 # ─── LLM 驱动工具（今天用通用模型，未来可换垂直模型）────────
 # TODO: VERTICAL_MODEL - 以下工具可替换为专业音乐模型
 
@@ -522,7 +509,16 @@ def abc_to_midi(
         _project_root = ""
 
     if not _project_root:
-        return {"ok": False, "error": "无法确定项目根目录，请确保在有效会话中调用此工具"}
+        # v4.0 fix46：降级到 workspace_tools._get_project_root()（含 ws 级目录兜底）
+        try:
+            from app.agentcore.tools.workspace_tools import _get_project_root as _wt_root
+            _fallback = _wt_root()
+            if _fallback:
+                _project_root = str(_fallback)
+            else:
+                return {"ok": False, "error": "无法确定项目根目录，请确保 session 已绑定项目"}
+        except Exception:
+            return {"ok": False, "error": "无法确定项目根目录，请确保 session 已绑定项目"}
 
     # ── 5. 写入 MIDI 文件到项目 .sky/ 目录 ──────────────────────────────────
     try:
@@ -551,44 +547,80 @@ def abc_to_midi(
     }
 
 
-@tool(group="abc_edit")
-def load_abc_score(abc: str, title: str = "") -> dict:
-    """将 ABC 谱加载为当前会话谱子，解析元数据（调号/BPM/音符数），
-    用于 ABC 文件直接引用时的加载确认（不做格式转换）。
-    abc: 完整的 ABC Notation 字符串
-    title: 可选标题覆盖，留空则从 T: 字段读取
+# ═══════════════════════════════════════════════════════════════════════════════
+# ABC 谱子工作区持久化（内部实现，供 Agent Runner 直接调用，不注册为工具）
+# 原位于 workspace_tools.py，迁移至此以保持业务逻辑归属清晰
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def save_score_to_workspace_impl(
+    abc_notation: str,
+    title: str = "",
+    overwrite: bool = True,
+    workspace_id: str = "",
+) -> dict:
+    """将 ABC 谱子保存到项目 .sky/ 目录（内部实现）。
+
+    通过 ContextVar 自动推断项目根目录，无需传入 workspace_id / project_id。
+    调用方：create_agent.py / convert_agent.py / edit_agent.py
     """
     import re as _re
-    meta = {"title": title or "未命名", "key": "C", "bpm": 120,
-            "note_count": 0, "time_sig": "4/4"}
-    for line in abc.splitlines():
-        if line.startswith("T:") and not title:
-            meta["title"] = line[2:].strip()
-        elif line.startswith("K:"):
-            meta["key"] = line[2:].strip()
-        elif line.startswith("Q:"):
-            m = _re.search(r"=(\d+)", line)
-            if m:
-                meta["bpm"] = int(m.group(1))
-        elif line.startswith("M:"):
-            meta["time_sig"] = line[2:].strip()
-    # 统计音符数（body 部分）
-    in_body = False
-    for line in abc.splitlines():
-        if line.startswith("K:"):
-            in_body = True
-            continue
-        if in_body and not _re.match(r"^[A-Za-z]:", line):
-            meta["note_count"] += len(_re.findall(r"[A-Ga-g]", line))
-    return {
-        "ok": True,
-        "abc": abc,
-        "meta": meta,
-        "message": (
-            f"✅ 已加载谱子《{meta['title']}》\n"
-            f"- 调号：{meta['key']}\n"
-            f"- BPM：{meta['bpm']}\n"
-            f"- 音符数：{meta['note_count']}\n\n"
-            "你可以继续说「转为 MIDI」「升高八度」「生成 H5」等。"
-        ),
-    }
+    from app.agentcore.tools.workspace_tools import _get_project_root
+    root = _get_project_root()
+    if root is None:
+        return {"error": "会话未绑定项目，无法保存谱子。"}
+
+    safe_title = _re.sub(r'[<>:"/\\|?*\x00-\x1f]', '', title or "score").strip() or "score"
+    file_name  = f"{safe_title}.abc"
+    rel_path   = f".sky/{file_name}"
+
+    sky_dir = root / ".sky"
+    sky_dir.mkdir(parents=True, exist_ok=True)
+    target  = sky_dir / file_name
+
+    existed = target.exists()
+    if not overwrite and existed:
+        import time as _time
+        ts        = int(_time.time()) % 10000
+        file_name = f"{safe_title}_{ts}.abc"
+        rel_path  = f".sky/{file_name}"
+        target    = sky_dir / file_name
+
+    target.write_text(abc_notation, encoding="utf-8")
+    return {"path": rel_path, "existed": existed, "name": file_name}
+
+
+def list_workspace_scores_impl(workspace_id: str = "") -> list[dict]:
+    """列出项目 .sky/ 目录下所有 ABC 谱子文件（内部实现）。
+
+    通过 ContextVar 自动推断项目根目录，无需传入 workspace_id。
+    调用方：universal_runner.py / router.py
+    """
+    from app.agentcore.tools.workspace_tools import _get_project_root
+    root = _get_project_root()
+    if root is None:
+        return []
+
+    sky_dir = root / ".sky"
+    if not sky_dir.exists():
+        return []
+
+    results = []
+    for p in sorted(sky_dir.glob("*.abc")):
+        stat  = p.stat()
+        title = p.stem
+        try:
+            content = p.read_text(encoding="utf-8", errors="replace")
+            for line in content.splitlines():
+                if line.startswith("T:"):
+                    title = line[2:].strip()
+                    break
+        except Exception:
+            pass
+        results.append({
+            "path":  f".sky/{p.name}",
+            "name":  p.name,
+            "title": title,
+            "size":  stat.st_size,
+        })
+    return results
+

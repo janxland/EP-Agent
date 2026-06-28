@@ -16,6 +16,10 @@ from __future__ import annotations
 from typing import Callable, Awaitable
 
 from app.agentcore.todo_manager import TodoManager, assert_finish_gate
+from app.agentcore.agent_registry import register
+
+if False:  # TYPE_CHECKING
+    from app.agentcore.run_context import RunContext
 from app.agentcore.react_executor import stream_text, ReactExecutor
 
 Publisher = Callable[[str, dict], Awaitable[None]]
@@ -28,6 +32,7 @@ _DOMAIN_TOOL_GROUPS: dict[str, list[str]] = {
 }
 
 
+@register("audio", "voice")
 class AudioAgent:
     """音频/音色 SubAgent，委托 audio_chat_fn 或 SoVITS ReactExecutor 执行。"""
 
@@ -144,3 +149,22 @@ class AudioAgent:
             "provider": "sovits",
             **exec_result.get("extra", {}),
         }
+
+    async def run_with_ctx(self, ctx: "RunContext") -> dict:
+        """v4.0 解耦接口：从 RunContext 解包参数，调用原 run()。"""
+        audio_chat_fn = ctx.extra.get("audio_chat_fn") or (lambda *a, **kw: {})
+        todo_mgr      = ctx.extra.get("todo_mgr")
+        if todo_mgr is None:
+            from app.agentcore.todo_manager import TodoManager as _TM
+            todo_mgr = _TM()
+            todo_mgr.session_id = ctx.session_id
+        return await self.run(
+            session_id=ctx.session_id,
+            message=ctx.message,
+            attachment_b64=ctx.attachment_b64,
+            publish=ctx.publish,
+            audio_chat_fn=audio_chat_fn,
+            todo_mgr=todo_mgr,
+            domain=ctx.domain or "audio",
+        )
+

@@ -120,7 +120,7 @@ class TodoManager:
             resp = await complete([
                 {"role": "system", "content": _TODO_SYSTEM},
                 {"role": "user",   "content": context},
-            ])
+            ], tier="lite")  # M1: TODO 规划用轻量模型
             raw = resp if isinstance(resp, str) else resp.get("content", "{}")
             m = re.search(r'\{.*\}', raw, re.DOTALL)
             if m:
@@ -220,7 +220,7 @@ class TodoManager:
             resp = await complete([
                 {"role": "system", "content": _CRITIC_SYSTEM},
                 {"role": "user",   "content": json.dumps(payload, ensure_ascii=False)},
-            ], temperature=0.1)
+            ], temperature=0.1, tier="lite")  # M1: TodoCritic 用轻量模型
             raw = resp if isinstance(resp, str) else resp.get("content", "{}")
             raw = re.sub(r'```[a-z]*\n?', '', raw).strip()
             m = re.search(r'\{.*\}', raw, re.DOTALL)

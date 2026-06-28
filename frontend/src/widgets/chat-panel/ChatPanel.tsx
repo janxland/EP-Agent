@@ -391,7 +391,8 @@ export function ChatPanel() {
     try {
       // resolvedProjectId 确保新对话挂在正确的项目下，防止文件区域错位
       const sess = await createSession(activeWorkspaceId, '新对话', resolvedProjectId || undefined)
-      router.push(`/pro/${resolvedProjectId || ''}/${sess.id}`)
+      const targetProjId = resolvedProjectId || useWorkspaceStore.getState().activeProject()?.id || ''
+      router.push(`/pro/${targetProjId}/${sess.id}`)
     } catch { /* error 已在 store 中设置 */ }
   }, [activeWorkspaceId, resolvedProjectId, createSession, router])
 

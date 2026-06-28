@@ -21,6 +21,10 @@ from typing import Callable, Awaitable
 
 from app.agentcore.llm import complete as llm_complete
 from app.agentcore.todo_manager import TodoManager, assert_finish_gate
+from app.agentcore.agent_registry import register
+
+if False:  # TYPE_CHECKING
+    from app.agentcore.run_context import RunContext
 from app.agentcore.react_executor import stream_text
 from app.agentcore.abc_utils import (
     extract_abc_and_summary, parse_abc_header, count_notes,
@@ -88,6 +92,7 @@ def _infer_bpm_from_style(message: str) -> float:
     return 120.0
 
 
+@register("create")
 class CreateAgent:
     """ABC 谱创作 SubAgent（从零创作 或 基于已有谱子改编）。"""
 
@@ -142,6 +147,15 @@ class CreateAgent:
             session_bpm=session_bpm,
             session_time_sig_num=session_time_sig_num,
         )
+
+        # ── 注入重要记忆前缀（用户意图、已有文件路径等跨轮次携带体）────────────
+        try:
+            from app.agentcore.memory_manager import build_memory_prefix
+            _mem = build_memory_prefix(session_id)
+            if _mem:
+                system = system + _mem
+        except Exception:
+            pass
 
         # 创作场景必须用高 temperature，否则 LLM 输出极度保守、旋律平淡
         # 改编模式（有 base_abc）用 0.85，从零创作用 0.92
@@ -261,7 +275,7 @@ class CreateAgent:
         # 谱子是项目资产，跨会话共享，通过 ContextVar 自动推断项目路径
         _ws_file_path = ""
         try:
-            from app.agentcore.tools.workspace_tools import save_score_to_workspace_impl
+            from app.agentcore.tools.abc_tools import save_score_to_workspace_impl  # 业务逻辑归属 abc_tools
             _save_result = save_score_to_workspace_impl(
                 abc_notation=new_abc,
                 title=header["title"] or "score",
@@ -586,3 +600,24 @@ class CreateAgent:
             pass
 
         return abc, summary
+
+    async def run_with_ctx(self, ctx: "RunContext") -> dict:
+        """v4.0 解耦接口：从 RunContext 解包参数，调用原 run()。"""
+        from app.pipeline import db as _db
+        session_getter = ctx.extra.get("session_getter") or _db.get_session
+        session_saver  = ctx.extra.get("session_saver")  or _db.save_session
+        todo_mgr       = ctx.extra.get("todo_mgr")
+        if todo_mgr is None:
+            from app.agentcore.todo_manager import TodoManager as _TM
+            todo_mgr = _TM()
+            todo_mgr.session_id = ctx.session_id
+        return await self.run(
+            session_id=ctx.session_id,
+            message=ctx.message,
+            publish=ctx.publish,
+            session_getter=session_getter,
+            session_saver=session_saver,
+            todo_mgr=todo_mgr,
+            current_abc=ctx.extra.get("current_abc", ""),
+        )
+

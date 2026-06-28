@@ -643,7 +643,8 @@ export function WorkspaceSidebar() {
       // 取新工作区的第一个项目（setActiveWorkspaceId 已同步 activeProjectId）
       const projId = useWorkspaceStore.getState().activeProject()?.id
       const sess = await createSession(wsId, '新对话', projId)
-      router.push(`/pro/${projId ?? ''}/${sess.id}`)
+      const targetProjId = projId || useWorkspaceStore.getState().activeProject()?.id || sess.project_id || ''
+      router.push(`/pro/${targetProjId}/${sess.id}`)
     } catch { /* error 已在 store 中设置 */ }
   }, [createSession, router, setActiveWorkspaceId])
 

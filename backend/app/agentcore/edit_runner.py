@@ -153,8 +153,20 @@ async def run_edit(
     # abc_edit 组：abc_to_midi / load_abc_score
     # workspace 组：list_workspace_files / read_workspace_file 等（编辑时可能需要读文件）
     tools = get_tool_schemas("default") + get_tool_schemas("abc_edit") + get_tool_schemas("workspace")
+    # ── 注入重要记忆前缀（跨轮次上下文携带体）─────────────────────────────────
+    _memory_prefix = ""
+    if session_id:
+        try:
+            from app.agentcore.memory_manager import build_memory_prefix
+            _memory_prefix = build_memory_prefix(session_id)
+        except Exception:
+            pass
+    _system = _build_system_prompt()
+    if _memory_prefix:
+        _system = _system + _memory_prefix
+
     messages = [
-        {"role": "system", "content": _build_system_prompt()},
+        {"role": "system", "content": _system},
         {"role": "user",   "content": _build_user_prompt(
             intent, meta, current_abc, context_summary
         )},

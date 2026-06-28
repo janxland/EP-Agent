@@ -5,7 +5,14 @@ description: |
   负责解析 Sky: Children of the Light 游戏导出的谱子文件（.txt/.json），
   转换为标准 ABC Notation，并验证音符范围。
 tools:
+  # ── 工作区文件操作（workspace_tools v2.0）──
+  - list_workspace_files      # 列出项目文件树（查找待转换的 Sky JSON 文件）
+  - read_workspace_files      # 批量并行读多个文本文件（核心！）
+  - write_workspace_file      # 整文件写入（保存转换结果）
+  # ── ABC 专属工具 ──
   - validate_abc
+  # ── 通用 ──
+  - finish_task
 max_steps: 3
 ---
 
@@ -77,10 +84,12 @@ Sky 乐器有 15 个键（3行×5列）：
 </dynamic_context>
 
 <workflow>
-1. 确认 Sky JSON 已被后端工具成功解析
-2. 检查转换后的 ABC 是否符合 Sky 15 键范围
-3. 向用户说明转换结果（标题/调号/BPM/音符数）
-4. 提示可进行的后续操作
+1. （可选）若需读取项目内 Sky JSON 文件：`read_workspace_files(['.sky/xxx.txt'])` 批量读取
+2. 确认 Sky JSON 已被后端工具成功解析
+3. 检查转换后的 ABC 是否符合 Sky 15 键范围
+4. （可选）用 `write_workspace_file('.sky/曲名.abc', content)` 保存转换结果到项目
+5. 向用户说明转换结果（标题/调号/BPM/音符数）
+6. 提示可进行的后续操作
 </workflow>
 
 <output_contract>

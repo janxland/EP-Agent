@@ -130,7 +130,7 @@ async def route_intent(
     resp = await complete([
         {"role": "system", "content": _build_router_system(role_id)},
         {"role": "user",   "content": "\n".join(context_parts)},
-    ])
+    ], tier="lite")  # M1: 意图路由用轻量模型，降低成本
     raw = resp if isinstance(resp, str) else resp.get("content", "{}")
     m = re.search(r'\{.*\}', raw, re.DOTALL)
     if m:

@@ -19,6 +19,10 @@ from __future__ import annotations
 from typing import Callable, Awaitable
 
 from app.agentcore.todo_manager import TodoManager, assert_finish_gate
+from app.agentcore.agent_registry import register
+
+if False:  # TYPE_CHECKING
+    from app.agentcore.run_context import RunContext
 from app.agentcore.react_executor import stream_text, ReactExecutor
 
 Publisher = Callable[[str, dict], Awaitable[None]]
@@ -28,6 +32,7 @@ Publisher = Callable[[str, dict], Awaitable[None]]
 _AGENT_FILE = "voice-clone-expert"
 
 
+@register("sovits")
 class VoiceCloneAgent:
     """
     GPT-SoVITS 音色克隆专家 SubAgent。
@@ -179,15 +184,14 @@ class VoiceCloneAgent:
         if _ft and not any(t["function"]["name"] == "finish_task" for t in tools):
             tools.extend(_ft[:1])
 
-        # 构造 user prompt（注入附件信息，工具通过 ContextVar 自动推断项目路径）
+        # 构造 user prompt
+        # v4.0 修复：b64 数据不注入 messages，防止上下文爆炸。
+        # LLM 只感知"有附件"这一事实，工具调用时由调用方自动注入完整 b64。
         user_parts = [message]
         if attachment_b64 and attachment_name:
             user_parts.append(
-                f"\n[参考音频附件: {attachment_name}，已 base64 编码，"
-                f"可直接传入 ref_audio_b64 或 reference_audio_b64 参数]"
+                f"\n[参考音频附件: {attachment_name}，请使用 ref_audio_b64 参数传入音频数据]"
             )
-            # 将附件 b64 注入到消息，让 LLM 可以直接使用
-            user_parts.append(f"\nref_audio_b64: {attachment_b64[:50]}...（已截断，完整值在工具调用时自动注入）")
 
         user_message = "".join(user_parts)
 
@@ -212,6 +216,23 @@ class VoiceCloneAgent:
 
         return result
 
+    async def run_with_ctx(self, ctx: "RunContext") -> dict:
+        """v4.0 解耦接口：从 RunContext 解包参数，调用原 run()。"""
+        todo_mgr = ctx.extra.get("todo_mgr")
+        if todo_mgr is None:
+            from app.agentcore.todo_manager import TodoManager as _TM
+            todo_mgr = _TM()
+            todo_mgr.session_id = ctx.session_id
+        return await self.run(
+            session_id=ctx.session_id,
+            message=ctx.message,
+            publish=ctx.publish,
+            todo_mgr=todo_mgr,
+            workspace_id=ctx.workspace_id,
+            attachment_b64=ctx.attachment_b64,
+            attachment_name=ctx.attachment_name,
+        )
+
 
 # ── 降级 system prompt（agent 文件不存在时使用）────────────────────────────
 _FALLBACK_SYSTEM = """你是 EP-Agent 的音色克隆专家，专注于 GPT-SoVITS 语音合成。
@@ -229,3 +250,4 @@ _FALLBACK_SYSTEM = """你是 EP-Agent 的音色克隆专家，专注于 GPT-SoVI
 - 合成完成后必须调用 sovits_save_audio 保存文件
 - 最终必须调用 finish_task
 """
+

@@ -12,11 +12,16 @@ from __future__ import annotations
 from typing import Callable, Awaitable
 
 from app.agentcore.todo_manager import TodoManager, assert_finish_gate
+from app.agentcore.agent_registry import register
+
+if False:  # TYPE_CHECKING
+    from app.agentcore.run_context import RunContext
 from app.agentcore.react_executor import stream_llm, stream_text
 
 Publisher = Callable[[str, dict], Awaitable[None]]
 
 
+@register("query")
 class QueryAgent:
     """谱子查询/问答 SubAgent，LLM 直接流式回答。"""
 
@@ -87,6 +92,15 @@ class QueryAgent:
             lines = [f"- {r.intent_type}：{r.summary}" for r in sess.intent_history[-3:]]
             system_parts.append("历史操作记录：\n" + "\n".join(lines))
 
+        # ── 注入重要记忆前缀（用户意图、已有文件等跨轮次携带体）─────────────
+        try:
+            from app.agentcore.memory_manager import build_memory_prefix
+            _mem = build_memory_prefix(session_id)
+            if _mem:
+                system_parts.append(_mem)
+        except Exception:
+            pass
+
         # ── LLM 真实回答（流式输出）─────────────────────────────────────────
         try:
             answer = await stream_llm([
@@ -110,3 +124,22 @@ class QueryAgent:
         await assert_finish_gate(todo_mgr, "query", publish)
         await publish("message.completed", {"message": answer})
         return {"domain": "query", "message": answer, "abc_updated": False}
+
+    async def run_with_ctx(self, ctx: "RunContext") -> dict:
+        """v4.0 解耦接口：从 RunContext 解包参数，调用原 run()。"""
+        from app.pipeline import db as _db
+        session_getter = ctx.extra.get("session_getter") or _db.get_session
+        todo_mgr       = ctx.extra.get("todo_mgr")
+        if todo_mgr is None:
+            from app.agentcore.todo_manager import TodoManager as _TM
+            todo_mgr = _TM()
+            todo_mgr.session_id = ctx.session_id
+        return await self.run(
+            session_id=ctx.session_id,
+            message=ctx.message,
+            publish=ctx.publish,
+            session_getter=session_getter,
+            todo_mgr=todo_mgr,
+            role_id=ctx.role_id or None,
+        )
+

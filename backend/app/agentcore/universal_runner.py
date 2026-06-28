@@ -18,9 +18,14 @@ import sys
 from pathlib import Path
 from typing import Callable, Awaitable
 
+import logging as _logging
+import uuid as _uuid
+
 from app.agentcore.intent_router import route_intent, detect_chain_intent
 from app.agentcore.todo_manager import TodoManager, assert_finish_gate
 from app.agentcore.role_config import get_role_or_default, DEFAULT_ROLE_ID
+
+_logger = _logging.getLogger("ep_agent.runner")
 
 Publisher = Callable[[str, dict], Awaitable[None]]
 
@@ -122,6 +127,27 @@ class UniversalChatRunner:
         except Exception:
             pass
 
+        # ── 提前注入 ContextVar（fix38）+ M3 Trace ID（fix40）─────────────────
+        # list_workspace_scores_impl() 等工具在 ReactExecutor 启动前就被调用，
+        # 必须在此处提前注入 session_id，否则 _get_project_root() 返回 None。
+        # trace_id：每请求唯一，全链路日志均携带，便于聚合排查。
+        if session_id:
+            try:
+                from app.agentcore.session_context import (
+                    set_current_session_id,
+                    set_current_trace_id,
+                )
+                set_current_session_id(session_id)
+                _trace_id = _uuid.uuid4().hex
+                set_current_trace_id(_trace_id)
+                _logger.info(
+                    "[trace=%s] 请求开始 session=%s msg=%s",
+                    _trace_id[:8], session_id[:8],
+                    message[:50].replace("\n", " "),
+                )
+            except Exception:
+                pass
+
         # 获取谱子库上下文（通过 ContextVar 推断项目根目录，无需查 DB 获取 workspace_id）
         workspace_scores_context = ""
         try:
@@ -135,8 +161,11 @@ class UniversalChatRunner:
                     + "\n".join(_lines)
                     + "\n用户可以引用这些谱子进行编辑、改编或生成 H5。"
                 )
-        except Exception:
-            pass
+        except Exception as _e:
+            import logging as _logging
+            _logging.getLogger("ep_agent").warning(
+                "[universal_runner] 谱子库上下文查询失败: %s", _e
+            )
 
         # ── Step 1: 意图路由（传入 role_id 限制路由范围）─────────────────────
         call_id = f"call_routing_{session_id[:8]}"
@@ -191,12 +220,12 @@ class UniversalChatRunner:
             "color":     role.color,
         })
 
-        # ── Step 2: TODO 规划（并行启动，不阻塞路由）──────────────────────────
+        # ── Step 2: TODO 规划（v4.0 改为同步等待，消灭并发竞态）─────────────────
+        # 原来 create_task 并发：SubAgent 可能在 plan() 完成前就执行，导致竞态。
+        # 改为 await 同步等待：plan() 用 lite 模型约 1-2s，流程更安全可靠。
         todo_mgr = TodoManager()
-        todo_mgr.session_id = session_id   # 注入 session_id，tick() 回写数据库
-        todos_task = asyncio.create_task(
-            todo_mgr.plan(message, domain, has_score, publish, session_id)
-        )
+        todo_mgr.session_id = session_id
+        await todo_mgr.plan(message, domain, has_score, publish, session_id)
 
         # ── Step 3: 按 domain 调度 SubAgent ───────────────────────────────────
         return await self._dispatch(
@@ -215,7 +244,6 @@ class UniversalChatRunner:
             edit_fn=edit_fn,
             audio_chat_fn=audio_chat_fn,
             todo_mgr=todo_mgr,
-            todos_task=todos_task,
             has_score=has_score,
             role_id=role_id,
             workspace_id=workspace_id,
@@ -238,35 +266,56 @@ class UniversalChatRunner:
         edit_fn,
         audio_chat_fn,
         todo_mgr: TodoManager,
-        todos_task,
         has_score: bool,
         role_id: str | None = None,
         workspace_id: str = "",
     ) -> dict:
-        """按 domain 调度对应 SubAgent，处理降级和链式意图。"""
-        from app.agentcore.agents.convert_agent import ConvertAgent
-        from app.agentcore.agents.edit_agent    import EditAgent
-        from app.agentcore.agents.create_agent  import CreateAgent
-        from app.agentcore.agents.audio_agent   import AudioAgent
-        from app.agentcore.agents.query_agent   import QueryAgent
+        """
+        按 domain 调度对应 SubAgent（v4.0 注册表分发）。
 
-        # role 对象在 _dispatch 中用于降级时重推 role.active，需在此处解析
+        分发优先级：
+          1. convert 域（含降级 + 链式意图）→ 内联处理
+          2. edit 域（无谱子时降级为 create）→ 内联处理
+          3. h5 域（需先保存附件）→ 内联处理
+          4. 注册表 get_agent(domain) → run_with_ctx(ctx)
+          5. 兜底 → QueryAgent
+        """
+        from app.agentcore.agent_registry import get_agent, ensure_all_agents_loaded
+        from app.agentcore.run_context import RunContext
+
+        # 确保所有 Agent 模块已加载（触发 @register 装饰器）
+        ensure_all_agents_loaded()
+
+        # role 对象在降级时重推 role.active
         role = get_role_or_default(role_id)
 
-        # ── convert 域 ────────────────────────────────────────────────────────
+        # ── 构造统一 RunContext（贯穿全链路）─────────────────────────────────
+        # extra 携带旧接口所需回调，供各 Agent 的 run_with_ctx 解包
+        ctx = RunContext(
+            session_id=session_id,
+            workspace_id=workspace_id,
+            role_id=role_id or "",
+            message=message,
+            attachment_content=attachment_content,
+            attachment_name=attachment_name,
+            attachment_workspace_path=attachment_workspace_path,
+            attachment_b64=attachment_b64,
+            has_score=has_score,
+            domain=domain,
+            publish=publish,
+            extra={
+                "session_getter": session_getter,
+                "session_saver":  session_saver,
+                "convert_fn":     convert_fn,
+                "edit_fn":        edit_fn,
+                "audio_chat_fn":  audio_chat_fn,
+                "todo_mgr":       todo_mgr,
+            },
+        )
+
+        # ── convert 域（含降级 + 链式意图，逻辑复杂保留内联）────────────────
         if domain == "convert":
-            await todos_task
-            result = await ConvertAgent().run(
-                session_id=session_id,
-                message=message,
-                attachment_content=attachment_content,
-                attachment_name=attachment_name,
-                publish=publish,
-                convert_fn=convert_fn,
-                todo_mgr=todo_mgr,
-                session_getter=session_getter,
-                session_saver=session_saver,
-            )
+            result = await get_agent("convert")().run_with_ctx(ctx)
 
             # 降级：不是合法 Sky JSON → 重新规划并路由到 create
             if not result.get("valid", True):
@@ -277,17 +326,10 @@ class UniversalChatRunner:
                 fallback_todo_mgr = TodoManager()
                 fallback_todo_mgr.session_id = session_id
                 await fallback_todo_mgr.plan(message, "create", has_score, publish, session_id)
-                return await CreateAgent().run(
-                    session_id=session_id,
-                    message=message,
-                    publish=publish,
-                    session_getter=session_getter,
-                    session_saver=session_saver,
-                    todo_mgr=fallback_todo_mgr,
-                )
+                fallback_ctx = ctx.with_domain("create").with_extra(todo_mgr=fallback_todo_mgr)
+                return await get_agent("create")().run_with_ctx(fallback_ctx)
 
-            # 链式意图：convert 成功后检测是否还有 edit/create
-            # 使用全新 TodoManager 实例（避免复用已 finish_all 的实例）
+            # 链式意图：convert 成功后检测是否还有 edit/create/h5
             extra_domain = detect_chain_intent(message, chain_intents)
             if extra_domain in ("edit", "create", "h5_create", "h5_edit"):
                 await publish("pipeline.step", {
@@ -297,175 +339,65 @@ class UniversalChatRunner:
                 chain_todo_mgr = TodoManager()
                 chain_todo_mgr.session_id = session_id
                 await chain_todo_mgr.plan(message, extra_domain, True, publish, session_id)
-
-                if extra_domain == "edit":
-                    return await EditAgent().run(
-                        session_id=session_id,
-                        message=message,
-                        publish=publish,
-                        edit_fn=edit_fn,
-                        todo_mgr=chain_todo_mgr,
-                        session_getter=session_getter,
-                        session_saver=session_saver,
-                        workspace_id=workspace_id,  # 链式意图也需要传入
-                    )
-                elif extra_domain in ("h5_create", "h5_edit"):
-                    from app.agentcore.agents.h5_agent import H5Agent
-                    # 复用 run() 已查询的 workspace_id
-                    _chain_ws_id = workspace_id
-                    _chain_att_path = attachment_workspace_path or ""
-                    if not _chain_att_path and attachment_b64 and attachment_name and _chain_ws_id:
-                        _chain_att_path = await _save_attachment_to_workspace(
-                            attachment_b64, attachment_name, _chain_ws_id, project_id
+                chain_ctx = ctx.with_domain(extra_domain).with_extra(
+                    todo_mgr=chain_todo_mgr,
+                    current_abc=result.get("abc_notation", ""),
+                )
+                if extra_domain in ("h5_create", "h5_edit"):
+                    _att_path = attachment_workspace_path or ""
+                    if not _att_path and attachment_b64 and attachment_name and workspace_id:
+                        _att_path = await _save_attachment_to_workspace(
+                            attachment_b64, attachment_name, workspace_id, ""
                         )
-                    return await H5Agent().run(
-                        session_id=session_id,
-                        message=message,
-                        attachment_workspace_path=_chain_att_path,
-                        attachment_name=attachment_name,
-                        publish=publish,
-                        todo_mgr=chain_todo_mgr,
-                        domain=extra_domain,
-                        workspace_id=_chain_ws_id,
-                    )
-                else:  # create
-                    return await CreateAgent().run(
-                        session_id=session_id,
-                        message=message,
-                        publish=publish,
-                        session_getter=session_getter,
-                        session_saver=session_saver,
-                        todo_mgr=chain_todo_mgr,
-                        current_abc=result.get("abc_notation", ""),
-                    )
+                    chain_ctx = chain_ctx.with_attachment_path(_att_path)
+                ChainCls = get_agent(extra_domain)
+                if ChainCls:
+                    return await ChainCls().run_with_ctx(chain_ctx)
             return result
 
-        # ── edit 域（无谱子时降级为 create，降级后补推 role.active）────────────
+        # ── edit 域（无谱子时降级为 create）──────────────────────────────────
         if domain == "edit":
             if not has_score:
                 domain = "create"
-                # 降级后重新推送 role.active（domain 已变，前端感知）
                 await publish("role.active", {
                     "role_id":   role.id,
                     "role_name": role.name,
                     "icon":      role.icon,
                     "color":     role.color,
-                    "_degraded": True,   # 调试标记
+                    "_degraded": True,
                 })
-                # 降级时取消旧的 edit 域 TODO 规划，重新规划 create 域 TODO
-                # 避免前端显示「分析谱子/修改」而实际执行「创作旋律/验证」
-                todos_task.cancel()
-                try:
-                    await todos_task  # 等待 cancel 真正生效，吃掉 CancelledError
-                except asyncio.CancelledError:
-                    pass
-                todo_mgr = TodoManager()
-                todo_mgr.session_id = session_id
-                # 重新创建 task，后续 create 分支 await 的是这个新 task
-                todos_task = asyncio.create_task(
-                    todo_mgr.plan(message, "create", has_score, publish, session_id)
-                )
-            else:
-                await todos_task
-                return await EditAgent().run(
-                    session_id=session_id,
-                    message=message,
-                    publish=publish,
-                    edit_fn=edit_fn,
-                    todo_mgr=todo_mgr,
-                    session_getter=session_getter,
-                    session_saver=session_saver,
-                    workspace_id=workspace_id,  # 供 abc_to_midi 等工具使用
-                )
+                # v4.0: plan() 已同步完成，降级时直接重新规划（无竞态）
+                fallback_todo_mgr = TodoManager()
+                fallback_todo_mgr.session_id = session_id
+                await fallback_todo_mgr.plan(message, "create", has_score, publish, session_id)
+                fallback_ctx = ctx.with_domain("create").with_extra(todo_mgr=fallback_todo_mgr)
+                return await get_agent("create")().run_with_ctx(fallback_ctx)
+            return await get_agent("edit")().run_with_ctx(ctx)
 
-        # ── create 域 ─────────────────────────────────────────────────────────
-        if domain == "create":
-            await todos_task
-            # 显式传入 session 中已有的 ABC（改编/延伸时 CreateAgent 以此为基础）
-            # CreateAgent 内部也会自读 session，此处显式传入使链路意图更清晰
-            _create_base_abc = ""
-            try:
-                _cs = session_getter(session_id)
-                if _cs and _cs.score:
-                    _create_base_abc = _cs.score.abc_notation or ""
-            except Exception:
-                pass
-            return await CreateAgent().run(
-                session_id=session_id,
-                message=message,
-                publish=publish,
-                session_getter=session_getter,
-                session_saver=session_saver,
-                todo_mgr=todo_mgr,
-                current_abc=_create_base_abc,
-            )
-
-        # ── audio / voice 域 ──────────────────────────────────────────────────
-        if domain in ("audio", "voice"):
-            await todos_task
-            return await AudioAgent().run(
-                session_id=session_id,
-                message=message,
-                attachment_b64=attachment_b64,
-                publish=publish,
-                audio_chat_fn=audio_chat_fn,
-                todo_mgr=todo_mgr,
-                domain=domain,
-            )
-
-        # ── sovits 域（GPT-SoVITS 音色克隆专家，MiniMax 降级）─────────────────
-        if domain == "sovits":
-            from app.agentcore.agents.voice_clone_agent import VoiceCloneAgent
-            await todos_task
-            return await VoiceCloneAgent().run(
-                session_id=session_id,
-                message=message,
-                publish=publish,
-                todo_mgr=todo_mgr,
-                workspace_id=workspace_id,
-                attachment_b64=attachment_b64,
-                attachment_name=attachment_name,
-            )
-
-        # ── h5_create / h5_edit 域 ────────────────────────────────────────────
+        # ── h5 域（需先保存附件到工作区）─────────────────────────────────────
         if domain in ("h5_create", "h5_edit"):
-            from app.agentcore.agents.h5_agent import H5Agent
-            await todos_task
-            # 复用 run() 已查询的 workspace_id
-            _ws_id = workspace_id
             _att_ws_path = attachment_workspace_path or ""
-            if not _att_ws_path and attachment_b64 and attachment_name and _ws_id:
+            if not _att_ws_path and attachment_b64 and attachment_name and workspace_id:
                 _att_ws_path = await _save_attachment_to_workspace(
-                    attachment_b64, attachment_name, _ws_id, project_id
+                    attachment_b64, attachment_name, workspace_id, ""
                 )
-            # 附件路径登记到 Session.extra（一次即可）
-            if _att_ws_path and _ws_id:
+            if _att_ws_path and workspace_id:
                 try:
                     from app.agentcore.session_context import remember_workspace_file
                     remember_workspace_file(session_id, _att_ws_path, attachment_name)
                 except Exception:
                     pass
-            return await H5Agent().run(
-                session_id=session_id,
-                message=message,
-                attachment_workspace_path=_att_ws_path,
-                attachment_name=attachment_name,
-                publish=publish,
-                todo_mgr=todo_mgr,
-                domain=domain,
-                workspace_id=_ws_id,
-            )
+            h5_ctx = ctx.with_attachment_path(_att_ws_path)
+            return await get_agent(domain)().run_with_ctx(h5_ctx)
 
-        # ── query 域（默认兜底）───────────────────────────────────────────────
-        await todos_task
-        return await QueryAgent().run(
-            session_id=session_id,
-            message=message,
-            publish=publish,
-            session_getter=session_getter,
-            todo_mgr=todo_mgr,
-            role_id=role_id,   # ← 透传角色 ID，注入角色专属 system prompt
-        )
+        # ── 注册表通用分发（create / audio / voice / sovits 等）─────────────
+        AgentCls = get_agent(domain)
+        if AgentCls:
+            return await AgentCls().run_with_ctx(ctx)
+
+        # ── 兜底：query（未知 domain 或注册表未命中）─────────────────────────
+        _logger.warning("[dispatch] 未知 domain=%s，兜底到 QueryAgent", domain)
+        return await get_agent("query")().run_with_ctx(ctx)
 
 
 universal_runner = UniversalChatRunner()

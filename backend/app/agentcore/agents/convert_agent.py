@@ -22,6 +22,10 @@ import re
 from typing import Callable, Awaitable
 
 from app.agentcore.todo_manager import TodoManager, assert_finish_gate
+from app.agentcore.agent_registry import register
+
+if False:  # TYPE_CHECKING
+    from app.agentcore.run_context import RunContext
 from app.agentcore.react_executor import stream_text
 
 Publisher = Callable[[str, dict], Awaitable[None]]
@@ -79,6 +83,7 @@ def _extract_abc(content: str, filename: str) -> str | None:
     return None
 
 
+@register("convert")
 class ConvertAgent:
     """
     Sky JSON / ABC → 加载 SubAgent。
@@ -193,7 +198,7 @@ class ConvertAgent:
         _ws_abc_path = ""
         try:
             if result.get("abc_notation"):
-                from app.agentcore.tools.workspace_tools import save_score_to_workspace_impl
+                from app.agentcore.tools.abc_tools import save_score_to_workspace_impl
                 _save_r = save_score_to_workspace_impl(
                     abc_notation=result["abc_notation"],
                     title=meta.get("title") or "score",
@@ -284,7 +289,7 @@ class ConvertAgent:
                     bpm=float(meta["bpm"]),
                     note_count=meta["note_count"],
                 )
-                session_saver(session_id, sess)
+                session_saver(sess)  # v4.0: save_session(sess) 只需1参数
         except Exception:
             pass
 
@@ -304,7 +309,7 @@ class ConvertAgent:
 
         # 落盘到项目 .sky/ 目录（通过 ContextVar 推断路径，无需查 DB）
         try:
-            from app.agentcore.tools.workspace_tools import save_score_to_workspace_impl
+            from app.agentcore.tools.abc_tools import save_score_to_workspace_impl
             _save_r = save_score_to_workspace_impl(
                 abc_notation=abc,
                 title=meta["title"],
@@ -340,3 +345,27 @@ class ConvertAgent:
             "abc_notation": abc,
             "meta":        meta,
         }
+
+    async def run_with_ctx(self, ctx: "RunContext") -> dict:
+        """v4.0 解耦接口：从 RunContext 解包参数，调用原 run()。"""
+        from app.pipeline import db as _db
+        session_getter = ctx.extra.get("session_getter") or _db.get_session
+        session_saver  = ctx.extra.get("session_saver")  or _db.save_session
+        convert_fn     = ctx.extra.get("convert_fn") or (lambda *a, **kw: {})
+        todo_mgr       = ctx.extra.get("todo_mgr")
+        if todo_mgr is None:
+            from app.agentcore.todo_manager import TodoManager as _TM
+            todo_mgr = _TM()
+            todo_mgr.session_id = ctx.session_id
+        return await self.run(
+            session_id=ctx.session_id,
+            message=ctx.message,
+            attachment_content=ctx.attachment_content,
+            attachment_name=ctx.attachment_name,
+            publish=ctx.publish,
+            convert_fn=convert_fn,
+            todo_mgr=todo_mgr,
+            session_getter=session_getter,
+            session_saver=session_saver,
+        )
+

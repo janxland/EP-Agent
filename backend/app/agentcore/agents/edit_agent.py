@@ -16,15 +16,20 @@ EditAgent — ABC 编辑 SubAgent（v3.1）
 """
 from __future__ import annotations
 
-from typing import Callable, Awaitable
+from typing import Callable, Awaitable, TYPE_CHECKING
 
 from app.agentcore.todo_manager import TodoManager, assert_finish_gate
 from app.agentcore.react_executor import stream_text
 from app.agentcore.abc_utils import parse_abc_header, count_notes
+from app.agentcore.agent_registry import register
+
+if TYPE_CHECKING:
+    from app.agentcore.run_context import RunContext
 
 Publisher = Callable[[str, dict], Awaitable[None]]
 
 
+@register("edit")
 class EditAgent:
     """
     ABC 编辑 SubAgent。
@@ -145,7 +150,7 @@ class EditAgent:
 
         # ── 自动写入工作区文件（.sky/<title>.abc）─────────────────────────────
         try:
-            from app.agentcore.tools.workspace_tools import save_score_to_workspace_impl
+            from app.agentcore.tools.abc_tools import save_score_to_workspace_impl  # 业务逻辑归属 abc_tools
             _new_header = parse_abc_header(new_abc)
             _save_result = save_score_to_workspace_impl(
                 abc_notation=new_abc,
@@ -171,7 +176,7 @@ class EditAgent:
         new_header = parse_abc_header(new_abc)
         await publish("abc.updated", {
             "abc":     new_abc,
-            "version": 2,
+            "version": (getattr(getattr(session_getter(session_id), 'score', None), 'latest_version', lambda: 2)() if session_getter else 2),
             "summary": summary,
             "meta": {
                 "title":       new_header["title"] or getattr(meta, "title", ""),
@@ -199,3 +204,25 @@ class EditAgent:
             "summary":      summary,
             **result,
         }
+
+    async def run_with_ctx(self, ctx: "RunContext") -> dict:
+        """v4.0 解耦接口：从 RunContext 解包参数，调用原 run()。"""
+        from app.pipeline import db as _db
+        session_getter = ctx.extra.get("session_getter") or _db.get_session
+        session_saver  = ctx.extra.get("session_saver")  or _db.save_session
+        edit_fn        = ctx.extra.get("edit_fn") or (lambda *a, **kw: None)
+        todo_mgr       = ctx.extra.get("todo_mgr")
+        if todo_mgr is None:
+            from app.agentcore.todo_manager import TodoManager as _TM
+            todo_mgr = _TM()
+            todo_mgr.session_id = ctx.session_id
+        return await self.run(
+            session_id=ctx.session_id,
+            message=ctx.message,
+            publish=ctx.publish,
+            edit_fn=edit_fn,
+            todo_mgr=todo_mgr,
+            session_getter=session_getter,
+            session_saver=session_saver,
+            workspace_id=ctx.workspace_id,
+        )

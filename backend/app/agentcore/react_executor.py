@@ -109,6 +109,12 @@ class ReactExecutor:
         extra: dict = {}
         final_content = ""
         round_idx = 0
+        # P1: 连续全失败计数器（工具全部失败时避免无限重试）
+        _consecutive_all_fail = 0
+        _MAX_CONSECUTIVE_FAIL = 2   # 连续 2 轮工具全失败则强制退出
+        # P4: 重复工具调用检测（tool_name + arguments hash → 出现次数）
+        _tool_call_seen: dict[str, int] = {}
+        _MAX_TOOL_REPEAT = 2        # 同一工具+参数最多重复 2 次
 
         for round_idx in range(max_rounds):
             # ── 上下文压力检测：超过 80% 触发 LLM 自主压缩 ────────────────────
@@ -162,6 +168,23 @@ class ReactExecutor:
             tool_calls   = response.get("tool_calls") or []
             finish_reason = response.get("finish_reason", "stop")
 
+            # P3: finish_reason='length' — 上下文超限，content 可能是截断残片
+            # 触发一次压缩后继续，而不是当作正常 stop 处理
+            if finish_reason == "length":
+                import logging as _log
+                _log.getLogger("ep_agent.react").warning(
+                    "[ReAct] finish_reason=length（上下文超限），触发压缩后继续 round=%d",
+                    round_idx,
+                )
+                await publish("pipeline.step", {
+                    "step":   "context_length_exceeded",
+                    "status": "warning",
+                    "text":   "⚠️ 上下文超限，正在压缩后继续...",
+                })
+                messages = await compress_messages(messages, session_id=session_id)
+                # 不 break，继续下一轮（让 LLM 基于压缩后的 context 重新输出）
+                continue
+
             # 清理 content 中的 tool_call XML 残片（LLM 流式输出偶发混入）
             # 同时清理 messages 里的内容，避免污染后续 LLM context
             content_clean = _clean_content(content)
@@ -190,7 +213,7 @@ class ReactExecutor:
 
             # ── Stop：LLM 完成输出 ────────────────────────────────────────────
             if finish_reason == "stop" or not tool_calls:
-                final_content = content
+                final_content = content_clean
                 # running TODO → done（已开始执行，LLM 认为完成）
                 for rid in todo_manager.get_running_ids():
                     await todo_manager.complete_one(rid, publish)
@@ -213,11 +236,33 @@ class ReactExecutor:
                 except json.JSONDecodeError:
                     arguments = {}
 
+                # P4: 重复工具调用检测（同一工具+参数 hash 超限则跳过）
+                _call_key = f"{tool_name}:{json.dumps(arguments, sort_keys=True, ensure_ascii=False)[:200]}"
+                _tool_call_seen[_call_key] = _tool_call_seen.get(_call_key, 0) + 1
+                if _tool_call_seen[_call_key] > _MAX_TOOL_REPEAT:
+                    import logging as _log
+                    _log.getLogger("ep_agent.react").warning(
+                        "[ReAct] 检测到重复工具调用 tool=%s（第%d次），跳过",
+                        tool_name, _tool_call_seen[_call_key],
+                    )
+                    messages.append({
+                        "role":         "tool",
+                        "tool_call_id": tc["id"],
+                        "content":      f"[跳过] 工具 {tool_name} 已重复调用 {_tool_call_seen[_call_key]} 次（相同参数），请换用其他工具或直接输出结果。",
+                    })
+                    continue
+
                 # 推送工具调用开始（过滤超长字段，防止 SSE 消息过大）
                 safe_args = {
                     k: (v[:200] + "..." if isinstance(v, str) and len(v) > 200 else v)
                     for k, v in arguments.items()
-                    if k not in ("abc", "audio_b64", "content")
+                    if k not in (
+                        "abc", "audio_b64", "content",
+                        # b64 字段：防止 base64 数据爆炸上下文
+                        "ref_audio_b64", "reference_audio_b64",
+                        "attachment_b64", "b64", "image_b64",
+                        "midi_b64", "audio_data", "file_b64",
+                    )
                 }
                 await publish("tool.call", {
                     "call_id":   tc["id"],
@@ -262,7 +307,7 @@ class ReactExecutor:
                                 extra["size_kb"]   = _h5_result.get("size_kb", 0)
                         except Exception:
                             pass
-                    elif tool_name in ("generate_h5_poster", "generate_h5_from_abc", "generate_h5_from_midi"):
+                    elif tool_name == "generate_h5_from_midi":  # 唯一存在的 H5 生成工具
                         try:
                             _gen_result = result if isinstance(result, dict) else json.loads(result_str)
                             if "title" in _gen_result:
@@ -320,21 +365,35 @@ class ReactExecutor:
                         "status":         "succeeded",
                         "result_preview": result_str[:80] + "..." if len(result_str) > 80 else result_str,
                     })
+                    # P2: tool message 注入 context 时截断（防大结果膨胀 context）
+                    # 落库用 4096 截断，注入 messages 用 8192 截断（保留更多信息供 LLM 推理）
+                    _result_for_ctx = (
+                        result_str[:8192] + "\n...[结果过长已截断，如需完整内容请调用工具重新获取]..."
+                        if len(result_str) > 8192 else result_str
+                    )
                     messages.append({
                         "role":         "tool",
                         "tool_call_id": tc["id"],
-                        "content":      result_str,
+                        "content":      _result_for_ctx,
                     })
                     tool_succeeded_count += 1
 
                     # ── 文件写入类工具：推送 workspace.files.changed 事件 ──────────
                     # 前端文件树监听此事件后自动刷新，无需手动点击刷新按钮
+                    # 工具名必须与 @tool 装饰器注册的函数名完全一致
                     _FILE_WRITE_TOOLS = {
-                        "write_file", "append_file", "delete_file",
-                        "copy_file", "rename_file", "move_file",
-                        "abc_to_midi", "generate_h5_from_midi",
-                        "generate_h5_from_abc", "sovits_save_audio",
-                        "save_h5_file", "save_score_to_workspace",
+                        # workspace_tools v2.0 实际注册名
+                        "write_workspace_file", "edit_workspace_file",
+                        "delete_workspace_file", "copy_workspace_file",
+                        "rename_workspace_file", "move_workspace_file",
+                        "run_write_tasks_in_parallel",
+                        # abc_tools
+                        "abc_to_midi",
+                        # h5_tools
+                        "generate_h5_from_midi",
+                        "save_h5_output",
+                        # audio_tools
+                        "sovits_save_audio",
                     }
                     if tool_name in _FILE_WRITE_TOOLS and session_id:
                         try:
@@ -395,6 +454,29 @@ class ReactExecutor:
                             )
                         except Exception:
                             pass
+
+            # P1: 连续全失败保护 — 所有工具均失败时计数，超限强制退出
+            if tool_succeeded_count == 0 and tool_calls:
+                _consecutive_all_fail += 1
+                if _consecutive_all_fail >= _MAX_CONSECUTIVE_FAIL:
+                    import logging as _log
+                    _log.getLogger("ep_agent.react").error(
+                        "[ReAct] 连续 %d 轮工具全部失败，强制退出 round=%d",
+                        _consecutive_all_fail, round_idx,
+                    )
+                    await publish("pipeline.step", {
+                        "step":   "react_force_exit",
+                        "status": "warning",
+                        "text":   f"⚠️ 工具连续失败 {_consecutive_all_fail} 轮，已中止重试",
+                    })
+                    # 标记未完成 TODO
+                    for rid in todo_manager.get_running_ids():
+                        await todo_manager.complete_one(rid, publish)
+                    for pid in todo_manager.get_pending_ids():
+                        await todo_manager.tick(pid, "skipped", publish)
+                    break
+            else:
+                _consecutive_all_fail = 0  # 有成功则重置计数器
 
             # 工具批次全部执行完后，complete 当前 running TODO（若有工具成功）
             if tool_succeeded_count > 0 and current_running_id:

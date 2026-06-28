@@ -1,53 +1,14 @@
 <!DOCTYPE html>
 <html lang="zh-CN">
-<!--
-  EP-Agent H5 模板：罗小黑（LuoXiaoHei）v7.0
-  ════════════════════════════════════════════════
-  【变量说明 — 大模型修改指南】
 
-  所有变量集中在页面底部 <script id="ep-config"> 的 JSON 对象中，
-  修改时只需编辑该 JSON，无需在 HTML 各处查找替换。
-
-  必填变量：
-    TITLE        曲名，如 "晚安喵"
-    COMPOSER     作曲者，如 "罗小黑主题曲"
-    BPM          速度数值，如 "120"
-    KEY          调号，如 "C 大调"
-    FORMAT_LABEL 格式标签，如 "Sky 谱 · MIDI"
-
-  媒体变量（留空则对应区域自动隐藏）：
-    MIDI_URL     MIDI 文件相对路径，如 "./晚安喵.mid"
-    ABC_CONTENT  ABC 乐谱文本（多行字符串用 \n 转义）
-
-  装饰变量（可保持默认）：
-    NIGHT_MOOD   封面情绪词，如 "深夜 · 月光 · 轻柔"
-    CAT_EMOJI    猫咪表情，如 "🐱"
-    THEME        主题色关键词（暂未使用，留作扩展）
-
-  视频嵌入（留空则隐藏视频区）：
-    VIDEO_URL      视频链接或 embed 地址
-                   · B站：https://player.bilibili.com/player.html?bvid=BVxxxxxx
-                   · 抖音：https://open.douyin.com/player/video?vid=xxxxxxx
-                   · YouTube：https://www.youtube.com/embed/xxxxxxx
-                   · 通用 iframe src：任意 https:// 地址
-    VIDEO_TITLE    视频标题，如 "罗小黑战记 OP — 演奏版"
-    VIDEO_PLATFORM 平台名，如 "哔哩哔哩" / "抖音" / "YouTube"（用于显示图标）
-
-  扩展变量：
-    EXTRA_HTML   任意额外 HTML 片段，注入到乐曲信息卡底部
-                 例：<p>这是一首...</p> 或 <div class="tag">原创</div>
-    NOTES_JSON   音符数组 JSON（振荡器降级播放用），格式：
-                 [{"midi":60,"time_ms":0,"duration_ms":400}, ...]
-════════════════════════════════════════════════
--->
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta name="theme-color" content="#0D0B1A">
-<meta name="description" content="{{TITLE}} — 由 EP-Agent 生成的乐谱海报">
+<meta name="description" content="如果的事 — 由 EP-Agent 生成的乐谱海报">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-<title>{{TITLE}} — 罗小黑 × EP-Agent</title>
+<title>如果的事 — 罗小黑 × EP-Agent</title>
 
 <!-- CDN 依赖 -->
 <script src="https://cdn.jsdelivr.net/npm/midi-player-js@2.0.16/browser/midiplayer.min.js"></script>
@@ -231,20 +192,20 @@
 ═══════════════════════════════════════════════ -->
 <script id="ep-config" type="application/json">
 {
-  "TITLE":         "{{TITLE}}",
-  "COMPOSER":      "{{COMPOSER}}",
-  "BPM":           "{{BPM}}",
-  "KEY":           "{{KEY}}",
-  "FORMAT_LABEL":  "{{FORMAT_LABEL}}",
-  "MIDI_URL":      "{{MIDI_URL}}",
-  "ABC_CONTENT":   "{{ABC_CONTENT}}",
-  "NIGHT_MOOD":    "{{NIGHT_MOOD}}",
-  "CAT_EMOJI":     "{{CAT_EMOJI}}",
-  "VIDEO_URL":     "{{VIDEO_URL}}",
-  "VIDEO_TITLE":   "{{VIDEO_TITLE}}",
-  "VIDEO_PLATFORM":"{{VIDEO_PLATFORM}}",
-  "EXTRA_HTML":    "{{EXTRA_HTML}}",
-  "NOTES_JSON":    {{NOTES_JSON}}
+  "TITLE":         "如果的事",
+  "COMPOSER":      "EP-Agent",
+  "BPM":           "120",
+  "KEY":           "C",
+  "FORMAT_LABEL":  "MIDI",
+  "MIDI_URL":      "./59655 - 如果的事.mid",
+  "ABC_CONTENT":   "",
+  "NIGHT_MOOD":    "",
+  "CAT_EMOJI":     "",
+  "VIDEO_URL":     "",
+  "VIDEO_TITLE":   "",
+  "VIDEO_PLATFORM":"",
+  "EXTRA_HTML":    "",
+  "NOTES_JSON":    []
 }
 </script>
 

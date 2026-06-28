@@ -25,15 +25,50 @@ _saver_var:  ContextVar[Callable] = ContextVar("session_saver",  default=None)  
 # 工具内部可通过 get_current_session_id() 获取，无需 LLM 传参
 _current_session_id_var: ContextVar[str] = ContextVar("current_session_id", default="")
 
+# ── 全链路 Trace ID（fix40 M3）────────────────────────────────────────────────
+# 每个请求在 universal_runner.run() 入口生成唯一 trace_id，通过 ContextVar 传递。
+# 所有 logging 调用可通过 get_current_trace_id() 自动带上 trace_id，无需手动透传。
+_current_trace_id_var: ContextVar[str] = ContextVar("current_trace_id", default="")
+
 
 def set_current_session_id(session_id: str) -> None:
     """由 ReactExecutor 在每轮工具调用前注入当前 session_id。"""
     _current_session_id_var.set(session_id)
 
 
+def set_current_trace_id(trace_id: str) -> None:
+    """在请求入口注入 trace_id，全链路日志追踪用。"""
+    _current_trace_id_var.set(trace_id)
+
+
+def get_current_trace_id() -> str:
+    """获取当前请求的 trace_id，供所有模块日志调用。"""
+    return _current_trace_id_var.get()
+
+
 def get_current_session_id() -> str:
     """工具内部调用，获取当前请求的 session_id（无需 LLM 传参）。"""
     return _current_session_id_var.get()
+
+
+def get_ep_logger(name: str = "ep_agent"):
+    """
+    返回自动携带 trace_id 的结构化 logger（fix40 M3）。
+
+    用法：
+      logger = get_ep_logger(__name__)
+      logger.info("[create_agent] 创作完成，abc_lines=%d", lines)
+      # 输出：[trace=abc12345] [create_agent] 创作完成，abc_lines=32
+    """
+    import logging
+
+    class _TraceAdapter(logging.LoggerAdapter):
+        def process(self, msg, kwargs):
+            tid = get_current_trace_id()
+            prefix = f"[trace={tid[:8]}] " if tid else ""
+            return f"{prefix}{msg}", kwargs
+
+    return _TraceAdapter(logging.getLogger(name), {})
 
 
 def get_current_workspace_id() -> str:

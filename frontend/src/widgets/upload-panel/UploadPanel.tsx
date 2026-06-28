@@ -3,7 +3,7 @@
 import { useCallback, useState } from 'react'
 import { useScoreStore } from '@/entities/session/store'
 import { useWorkspaceStore } from '@/features/workspace/store/workspace.store'
-import { createSession, convertJSON } from '@/shared/lib/api'
+import { convertJSON } from '@/shared/lib/api'
 
 /**
  * UploadPanel - JSON 谱子上传区域
@@ -17,7 +17,7 @@ export function UploadPanel({ compact = false }: { compact?: boolean }) {
 
   // SSE 订阅由 page.tsx 统一管理，UploadPanel 不再自建 EventSource
   const { setSessionId, setScore, setPipelineState, appendLog, reset, sessionId } = useScoreStore()
-  const { activeWorkspaceId, activeProjectId, activeProject } = useWorkspaceStore()
+  const { activeWorkspaceId, activeProjectId, activeProject, createSession } = useWorkspaceStore()
   // project_id 必须随 createSession 传递，确保 session 有文件系统隔离边界
   const resolvedProjectId = activeProjectId ?? activeProject()?.id ?? undefined
 
@@ -55,9 +55,9 @@ export function UploadPanel({ compact = false }: { compact?: boolean }) {
         reset()
 
         // 创建新 Session（每次上传都强制新建，避免旧 session 历史污染）
-        // 传入 activeWorkspaceId，确保 session 归属正确工作区，侧边栏可见
-        const { session_id } = await createSession(activeWorkspaceId ?? undefined, undefined, resolvedProjectId)
-        const sid = session_id
+        // 使用 store.createSession 确保 session 写入 workspaces 树，侧边栏可见
+        const newSess = await createSession(activeWorkspaceId ?? '', undefined, resolvedProjectId)
+        const sid = newSess.id
         setSessionId(sid)  // 这会触发 page.tsx 的 useEffect 重新建立 SSE
 
         // 触发转换（SSE 订阅已由 page.tsx 建立，事件会自动流入 store）
@@ -90,7 +90,7 @@ export function UploadPanel({ compact = false }: { compact?: boolean }) {
         setIsLoading(false)
       }
     },
-    [sessionId, activeWorkspaceId, setSessionId, setScore, setPipelineState, appendLog, reset]
+    [sessionId, activeWorkspaceId, resolvedProjectId, createSession, setSessionId, setScore, setPipelineState, appendLog, reset]
   )
 
   const onDrop = useCallback(

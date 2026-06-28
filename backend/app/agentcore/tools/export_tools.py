@@ -3,6 +3,7 @@
 
 工具清单：
   abc_to_sky_json  — ABC Notation → Sky/CUBY JSON（供小程序键盘使用）
+  finish_task      — 任务完成信号（所有 Agent 必须以此结束 ReAct Loop）
 
 注意：ABC → MIDI 转换请使用 abc_tools.abc_to_midi，
 该工具自动写入当前项目 .sky/ 目录，无需传 workspace_id / project_id。
@@ -18,6 +19,22 @@ from app.agentcore.tools import tool
 _SKY_TOOLS_DIR = str(Path(__file__).resolve().parent.parent.parent.parent / "sky-music-tools")
 if _SKY_TOOLS_DIR not in sys.path:
     sys.path.insert(0, _SKY_TOOLS_DIR)
+
+
+@tool
+def finish_task(summary: str = "") -> dict:
+    """
+    【任务完成信号】所有 Agent 在完成全部工作后必须调用此工具，表示 ReAct Loop 正常结束。
+
+    ⚠️ 铁律：
+    - 必须是最后一个调用的工具
+    - 调用前确认所有文件已保存、所有操作已完成
+    - summary 中包含本次任务的关键结果（文件路径、操作摘要等）
+
+    summary: 任务完成摘要（建议包含生成文件路径、操作结果等关键信息）
+    返回: {"status": "finished", "summary": str}
+    """
+    return {"status": "finished", "summary": summary or "任务已完成"}
 
 
 @tool
