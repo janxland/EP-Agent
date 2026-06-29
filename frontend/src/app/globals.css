@@ -95,3 +95,26 @@ html, body {
 ::-webkit-scrollbar-thumb:hover {
   background: rgb(0 0 0 / 0.2);
 }
+
+/* ── 胶囊复制引用：::before 注入隐藏路径文本，供 Ctrl+A 全选复制还原 ──────────── */
+/*
+ * .chip-with-ref 配合 CSS 变量 --copy-ref 使用：
+ *   <span class="chip-with-ref" style="--copy-ref: '[@shared/xxx.wav]'">...</span>
+ *
+ * ::before 内容视觉不可见（font-size:0px），但浏览器选区会包含它，
+ * 复制后粘贴到输入框，handlePaste 检测到 [@路径] 格式自动还原为胶囊。
+ *
+ * 注意：不能用 visibility:hidden / display:none（会被排除在复制内容外）
+ *       必须用 font-size:0 + color:transparent，保持在文档流中但视觉不可见。
+ */
+.chip-with-ref::before {
+  content: var(--copy-ref, '');
+  font-size: 0px;
+  color: transparent;
+  user-select: text;
+  -webkit-user-select: text;
+  letter-spacing: 0;
+  line-height: 0;
+  display: inline;
+  pointer-events: none;
+}

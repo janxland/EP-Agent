@@ -2,14 +2,14 @@
  * 工作区文件系统 API
  * 对接后端 /api/workspaces/{workspace_id}/files 路由
  *
- * 三层路径规则（与 session_context.get_current_project_root() 完全一致）：
- *   有 project_id → data/workspace/{ws_id}/projects/{proj_id}/
- *   无 project_id → data/workspace/{ws_id}/  （向后兼容）
+ * 设计原则（对标 Cursor / Claude Code）：
+ *   - 工作区就是一个普通文件夹，文件上传到哪就在哪
+ *   - 前端如实反映文件系统真实结构，不做任何目录路由
+ *   - 唯一特殊目录：.sky/（Sky 游戏谱子隔离区）
  *
- * 目录约定（相对于项目根）：
- *   .sky/          Sky 游戏谱子（JSON / ABC / MIDI）
- *   shared/        通用共享文件（图片、H5、音频等）
- *   shared/images/ 粘贴图片自动上传目标
+ * 路径层级：
+ *   有 project_id → data/workspace/{ws_id}/projects/{proj_id}/
+ *   无 project_id → data/workspace/{ws_id}/
  */
 
 const BASE_URL = process.env.NEXT_PUBLIC_API_URL ?? ''
@@ -127,6 +127,24 @@ export const writeWorkspaceFile = async (
   })
 }
 
+/**
+ * multipart/form-data 上传二进制文件（音频、图片等大文件专用）
+ * 支持最大 200MB，绕开 base64 JSON 请求体超限问题
+ */
+export const uploadBinaryFileToWorkspace = async (
+  workspaceId: string, file: File, destPath: string, projectId = ''
+): Promise<void> => {
+  const form = new FormData()
+  form.append('file', file, file.name)
+  form.append('path', destPath)
+  if (projectId) form.append('project_id', projectId)
+  await api(`${BASE_URL}/api/workspaces/${workspaceId}/files/upload`, {
+    method: 'POST',
+    body: form,
+    // 不设置 Content-Type，让浏览器自动添加 multipart boundary
+  })
+}
+
 export const deleteWorkspaceFile = async (
   workspaceId: string, filePath: string, projectId = ''
 ): Promise<void> => {
@@ -172,19 +190,20 @@ export const moveWorkspaceFile = async (
 }
 
 /**
- * 计算文件应上传到的项目内路径（自动路由目录）
- * - .sky/          : Sky 谱子（json/abc/mid/midi）+ Sky 谱 txt
- * - shared/images/ : 图片
- * - shared/        : 其他文件
+ * 计算文件应上传到的项目内路径。
+ * 设计原则（对标 Cursor/Claude Code）：文件直接放到项目根，真实反映文件系统结构。
+ * 唯一例外：Sky 谱子路由到 .sky/（产品功能隔离区）。
  */
 export const resolveUploadPath = (file: File, isSkyTxt = false): string => {
   const ext = file.name.split('.').pop()?.toLowerCase() ?? ''
   if (SKY_EXTS.has(ext) || isSkyTxt) return `.sky/${file.name}`
-  if (IMAGE_EXTS.has(ext) || file.type.startsWith('image/')) return `shared/images/${file.name}`
-  return `shared/${file.name}`
+  // 所有其他文件直接放项目根，不做任何目录路由
+  return file.name
 }
 
-/** 上传本地文件到项目（自动路由目录，project_id 决定存储层级） */
+/** 上传本地文件到项目（自动路由目录，project_id 决定存储层级）
+ *  所有文件统一走 multipart/form-data，支持最大 200MB，无 base64 膨胀问题。
+ */
 export const uploadFileToWorkspace = async (
   workspaceId: string, file: File, destPath?: string, projectId = ''
 ): Promise<void> => {
@@ -193,40 +212,16 @@ export const uploadFileToWorkspace = async (
     : false
 
   const path = destPath ?? resolveUploadPath(file, skyTxt)
-
-  const isBinary = /\.(mid|midi|mp3|wav|m4a|ogg|flac|png|jpg|jpeg|gif|webp|pdf|zip|rar|7z)$/i.test(file.name)
-    || file.type.startsWith('audio/')
-    || file.type.startsWith('image/')
-    || file.type === 'application/octet-stream'
-  const isText = !isBinary && (
-    file.type.startsWith('text/') ||
-    /\.(abc|txt|md|json|html|css|js|ts|xml|yaml|yml|csv|svg)$/i.test(file.name)
-  )
-
-  if (isText) {
-    const content = await file.text()
-    await writeWorkspaceFile(workspaceId, path, content, 'text', projectId)
-  } else {
-    await writeWorkspaceFile(workspaceId, path, await fileToBase64(file), 'base64', projectId)
-  }
+  await uploadBinaryFileToWorkspace(workspaceId, file, path, projectId)
 }
-
-export const fileToBase64 = (file: File): Promise<string> =>
-  new Promise((resolve, reject) => {
-    const reader = new FileReader()
-    reader.onload = () => {
-      const result = reader.result as string
-      resolve(result.includes(',') ? result.split(',')[1] : result)
-    }
-    reader.onerror = () => reject(reader.error)
-    reader.readAsDataURL(file)
-  })
 
 // ─── 保留兼容性导出（旧代码引用）────────────────────────────────────────────
 
 export const isSkyFile = (path: string): boolean => path.startsWith('.sky/')
 
-export const getDirLabel = (path: string): string =>
-  path.startsWith('.sky/') ? '谱子库'
-  : path.startsWith('shared/') ? '共享文件'
-  : path.split('/').slice(0, -1).join('/') || '根目录'
+/** 根据文件路径返回所在目录标签（如实反映目录结构） */
+export const getDirLabel = (path: string): string => {
+  if (path.startsWith('.sky/')) return '谱子库'
+  const dir = path.split('/').slice(0, -1).join('/')
+  return dir || '项目根目录'
+}

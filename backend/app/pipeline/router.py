@@ -8,7 +8,7 @@ import json
 from datetime import datetime, timezone
 from typing import AsyncIterator
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Request, UploadFile, File, Form
 from fastapi.responses import StreamingResponse, Response
 from pydantic import BaseModel
 
@@ -663,7 +663,7 @@ async def universal_chat(session_id: str, req: UniversalChatRequest):
             await service.universal_chat(
                 session_id=session_id,
                 message=req.message,
-                project_id=req.project_id,
+                project_id=_final_proj_id,   # 使用守门修复后的最终值，而非 req 原始值
                 attachment_content=req.attachment_content,
                 attachment_name=req.attachment_name,
                 attachment_workspace_path=req.attachment_workspace_path,
@@ -963,32 +963,38 @@ def _ws_safe_path(workspace_id: str, rel: str, project_id: str = "") -> _Path:
 
 @router.get("/workspaces/{workspace_id}/files")
 async def list_ws_files(workspace_id: str, project_id: str = "", subdir: str = ""):
-    """列出项目文件树（有 project_id 时限定在项目目录内）"""
+    """列出项目文件树（有 project_id 时限定在项目目录内，同时合并 ws 级 shared/ 目录）"""
+    def _file_entry(p: _Path, base: _Path):
+        rel = str(p.relative_to(base))
+        ext = p.suffix.lower().lstrip(".")
+        mime, _ = _mimetypes.guess_type(str(p))
+        return {
+            "path": rel,
+            "name": p.name,
+            "ext":  ext,
+            "size": p.stat().st_size,
+            "mime": mime or "application/octet-stream",
+            "is_text": p.suffix.lower() in {
+                ".abc", ".txt", ".md", ".json", ".html", ".htm",
+                ".css", ".js", ".ts", ".xml", ".yaml", ".yml",
+                ".csv", ".svg", ".log",
+            },
+        }
+
     if project_id:
         base = _WS_FILE_ROOT / workspace_id / "projects" / project_id
     else:
         base = _WS_FILE_ROOT / workspace_id
     scan = (base / subdir) if subdir else base
-    if not scan.exists():
-        return {"files": []}
+
     files = []
-    for p in sorted(scan.rglob("*")):
-        if p.is_file():
-            rel = str(p.relative_to(base))
-            ext = p.suffix.lower().lstrip(".")
-            mime, _ = _mimetypes.guess_type(str(p))
-            files.append({
-                "path": rel,
-                "name": p.name,
-                "ext":  ext,
-                "size": p.stat().st_size,
-                "mime": mime or "application/octet-stream",
-                "is_text": p.suffix.lower() in {
-                    ".abc", ".txt", ".md", ".json", ".html", ".htm",
-                    ".css", ".js", ".ts", ".xml", ".yaml", ".yml",
-                    ".csv", ".svg", ".log",
-                },
-            })
+
+    # 扫描项目目录，如实返回真实文件树结构，不做任何目录合并
+    if scan.exists():
+        for p in sorted(scan.rglob("*")):
+            if p.is_file():
+                files.append(_file_entry(p, base))
+
     return {"workspace_id": workspace_id, "project_id": project_id, "files": files}
 
 
@@ -1047,6 +1053,46 @@ async def put_ws_file(workspace_id: str, req: WsFileWriteRequest, project_id: st
     except Exception as e:
         _log.exception("[put_ws_file] 写入失败 workspace=%s path=%r", workspace_id, req.path)
         raise HTTPException(500, f"文件写入失败：{e}")
+
+
+@router.post("/workspaces/{workspace_id}/files/upload")
+async def upload_ws_file(
+    workspace_id: str,
+    file: UploadFile = File(...),
+    path: str = Form(...),
+    project_id: str = Form(""),
+):
+    """
+    multipart/form-data 上传二进制文件（音频、图片等大文件走此接口）。
+    支持最大 200MB，避免 base64 JSON 请求体超限问题。
+    """
+    import logging as _logging
+    _log = _logging.getLogger("ep_agent.ws_files")
+    try:
+        ext = _Path(path).suffix.lower()
+        if ext in _BLOCKED_EXTS:
+            raise HTTPException(400, f"禁止上传 {ext} 类型文件")
+        target = _ws_safe_path(workspace_id, path, project_id)
+        target.parent.mkdir(parents=True, exist_ok=True)
+
+        # 流式读取，避免大文件全量加载到内存
+        _MAX_MULTIPART_BYTES = 200 * 1024 * 1024  # 200 MB
+        written = 0
+        with target.open("wb") as f:
+            while chunk := await file.read(1024 * 1024):  # 1MB chunks
+                written += len(chunk)
+                if written > _MAX_MULTIPART_BYTES:
+                    target.unlink(missing_ok=True)
+                    raise HTTPException(400, "文件超过 200MB 限制")
+                f.write(chunk)
+
+        _log.info("[upload_ws_file] 上传成功 workspace=%s path=%r size=%d", workspace_id, path, written)
+        return {"ok": True, "path": path, "size": written}
+    except HTTPException:
+        raise
+    except Exception as e:
+        _log.exception("[upload_ws_file] 上传失败 workspace=%s path=%r", workspace_id, path)
+        raise HTTPException(500, f"文件上传失败：{e}")
 
 
 @router.delete("/workspaces/{workspace_id}/files")

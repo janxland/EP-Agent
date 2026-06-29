@@ -229,15 +229,23 @@ function InlineRenderer({
     if (!part) return
 
     if (part.startsWith('[@') && part.endsWith(']')) {
-      const fileName = part.slice(2, -1)
+      // 支持两种格式：
+      //   [@文件名]          → label=文件名, path=文件名（旧格式兼容）
+      //   [@路径/文件名.ext]  → label=文件名, path=路径/文件名.ext（完整路径）
+      const inner = part.slice(2, -1)
+      const isPath = inner.includes('/')
+      const label = isPath ? (inner.split('/').pop() ?? inner) : inner
+      const path  = inner
       nodes.push(
-        <FileChip key={key} label={fileName} path={fileName} size={0}
+        <FileChip key={key} label={label} path={path} size={0}
           workspaceId={workspaceId ?? undefined} inOrangeBubble={inOrangeBubble} />
       )
     } else if (part.startsWith('[附件:') && part.endsWith(']')) {
-      const fileName = part.slice(4, -1).trim()
+      const inner = part.slice(4, -1).trim()
+      const isPath = inner.includes('/')
+      const label = isPath ? (inner.split('/').pop() ?? inner) : inner
       nodes.push(
-        <FileChip key={key} label={fileName} path={fileName} size={0}
+        <FileChip key={key} label={label} path={inner} size={0}
           workspaceId={workspaceId ?? undefined} inOrangeBubble={inOrangeBubble} />
       )
     } else if (part.startsWith('**') && part.endsWith('**')) {
@@ -491,7 +499,7 @@ const AssistantBubble = memo(function AssistantBubble({
     m.content?.trim() ?? '',
     ...(m.tool_calls?.map((tc) => {
       const result = toolResults?.get(tc.id)
-      const preview = result?.content ? ` → ${result.content.slice(0, 80)}` : ''
+      const preview = result?.content ? ` → ${result.content.slice(0, 200)}` : ''
       return `[工具: ${tc.function.name}${preview}]`
     }) ?? []),
   ].filter(Boolean).join('\n')

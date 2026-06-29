@@ -85,10 +85,14 @@ DOMAIN_CONFIG: dict[str, DomainMeta] = {
 
     "voice": DomainMeta(
         name="voice",
-        label="音色克隆",
+        label="MiniMax音色",
         icon="🎤",
-        description="音色克隆/TTS（「克隆声音」/「用我的声音」/「查看音色」等）",
-        todo_template="分析音色需求 → 克隆/合成音频",
+        description=(
+            "MiniMax 云端音色克隆（无本地 GPT-SoVITS 时的降级路径）。\n"
+            "⚠️ 若用户明确提到「GPT-SoVITS」/「SoVITS」/「本地克隆」，优先路由到 sovits 域。\n"
+            "关键词：「MiniMax 克隆」/「云端音色」/「查看已克隆音色列表」"
+        ),
+        todo_template="分析音色需求 → MiniMax 克隆/合成音频",
         agent_class="AudioAgent",
         tool_groups=["audio"],
     ),
@@ -99,7 +103,7 @@ DOMAIN_CONFIG: dict[str, DomainMeta] = {
         label="音色克隆",
         icon="🎙️",
         description=(
-            "音色克隆 / 语音合成（GPT-SoVITS 本地 + MiniMax 降级）。\n"
+            "音色克隆 / 语音合成（GPT-SoVITS 本地优先，MiniMax 降级）。\n"
             "关键词：「克隆声音」/「用我的声音」/「音色克隆」/「语音合成」/\n"
             "        「TTS」/「文字转语音」/「合成语音」/「声音克隆」/\n"
             "        「GPT-SoVITS」/「SoVITS」/「查看音色模型」\n"
@@ -107,7 +111,7 @@ DOMAIN_CONFIG: dict[str, DomainMeta] = {
         ),
         todo_template="检查服务状态 → 克隆/合成音色 → 保存音频文件",
         agent_class="VoiceCloneAgent",
-        tool_groups=["sovits", "audio"],
+        tool_groups=["sovits"],
     ),
 
     "query": DomainMeta(

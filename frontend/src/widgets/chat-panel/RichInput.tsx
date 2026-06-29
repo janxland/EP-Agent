@@ -32,10 +32,9 @@ import { useWorkspaceStore } from '@/features/workspace/store/workspace.store'
 import {
   listWorkspaceFiles,
   uploadFileToWorkspace,
+  uploadBinaryFileToWorkspace,
   isSkyTxtFile,
   resolveUploadPath,
-  writeWorkspaceFile,
-  fileToBase64,
   getFileIcon,
   fmtFileSize,
   type WorkspaceFile,
@@ -155,6 +154,12 @@ interface FileChipProps {
   workspaceId?: string
   /** 是否在橙色气泡内，若是则用白色半透明胶囊样式 */
   inOrangeBubble?: boolean
+  /**
+   * 供 Ctrl+A 全选复制时还原路径用的引用文本（如 [@shared/xxx.wav]）
+   * 通过 CSS ::before 注入，视觉不可见但可被复制。
+   * 仅在编辑器内 MentionNodeView 中传入，消息气泡中的 FileChip 不需要。
+   */
+  copyRef?: string
 }
 
 // 全局事件：请求将文件引用插入到 RichInput
@@ -162,7 +167,7 @@ export const FILE_INSERT_EVENT = 'ep:file-insert'
 export const emitFileInsert = (path: string, label: string, size: number) =>
   window.dispatchEvent(new CustomEvent(FILE_INSERT_EVENT, { detail: { path, label, size } }))
 
-export function FileChip({ label, path, size = 0, workspaceId, inOrangeBubble = false }: FileChipProps) {
+export function FileChip({ label, path, size = 0, workspaceId, inOrangeBubble = false, copyRef }: FileChipProps) {
   const ext = getFileExt(label)
   const [hovered, setHovered] = useState(false)
   const [copied, setCopied] = useState(false)
@@ -202,10 +207,18 @@ export function FileChip({ label, path, size = 0, workspaceId, inOrangeBubble = 
         onMouseLeave={hideTooltip}
         onClick={handleClick}
         title={copied ? '已插入到对话框' : '点击插入到对话框'}
+        // copyRef 通过 CSS ::before 注入，视觉不可见（font-size:0）但可被 Ctrl+A 复制
+        // 这是绕开 Tiptap 叶子节点 content hole 限制的唯一可靠方案
+        {...(copyRef ? { 'data-copy-ref': copyRef } : {})}
+        style={copyRef ? {
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          ['--copy-ref' as any]: `"${copyRef}"`
+        } : undefined}
         className={[
           'inline-flex items-center gap-1 px-2 py-0.5 rounded-full',
           'text-[11px] font-semibold border select-none',
           'mx-0.5 align-middle transition-all duration-150 cursor-pointer',
+          copyRef ? 'chip-with-ref' : '',  // 配合全局 CSS ::before 注入复制文本
           copied
             ? 'bg-green-100 text-green-700 border-green-200 scale-95'
             : inOrangeBubble
@@ -247,6 +260,13 @@ function MentionNodeView({ node }: NodeViewProps) {
   const path  = node.attrs.id as string
   const size  = (node.attrs.size as number) ?? 0
 
+  // 完整路径引用格式，供 Ctrl+A 全选复制时还原
+  // ⚠️ Tiptap mention 是叶子节点，NodeViewWrapper 内不能有多个子节点（会报 content hole 错误）
+  // 正确做法：只渲染 FileChip 一个子节点，copyRef 通过 FileChip 的 data-copy-ref 属性传递
+  // FileChip 内部用 CSS ::before 伪元素注入隐藏文本，完全在 React 子节点树外
+  // 始终使用 path（真实文件系统路径），path 为空时降级用 label（文件名）
+  const copyRef = `[@${path || label}]`
+
   return (
     <NodeViewWrapper as="span" style={{ display: 'inline' }}>
       <FileChip
@@ -254,6 +274,7 @@ function MentionNodeView({ node }: NodeViewProps) {
         path={path}
         size={size}
         workspaceId={activeWorkspaceId ?? undefined}
+        copyRef={copyRef}
       />
     </NodeViewWrapper>
   )
@@ -425,7 +446,11 @@ export function getPlainText(editor: Editor): string {
     if (node.type.name === 'text') {
       text += node.text ?? ''
     } else if (node.type.name === 'mention') {
-      text += `[@${node.attrs.label as string}]`
+      // 始终用完整路径序列化，保证路径信息不丢失
+      const path  = node.attrs.id as string   // 真实文件系统路径（相对于 proj_root）
+      const label = node.attrs.label as string // 文件名（显示用）
+      // 始终使用 path，path 为空时降级用 label，不做任何前缀判断
+      text += `[@${path || label}]`
     } else if (node.type.name === 'paragraph' && text.length > 0) {
       text += '\n'
     }
@@ -468,6 +493,11 @@ export function RichInput({ disabled, placeholder, onSend, onPaste, insertTextRe
   useEffect(() => { onSendRef.current = onSend }, [onSend])
   const disabledRef = useRef(disabled)
   useEffect(() => { disabledRef.current = disabled }, [disabled])
+  // 用 ref 包裹 activeWorkspaceId / resolvedProjectId，避免 useEditor 闭包 stale 值问题
+  const activeWorkspaceIdRef = useRef(activeWorkspaceId)
+  useEffect(() => { activeWorkspaceIdRef.current = activeWorkspaceId }, [activeWorkspaceId])
+  const resolvedProjectIdRef = useRef(resolvedProjectId)
+  useEffect(() => { resolvedProjectIdRef.current = resolvedProjectId }, [resolvedProjectId])
 
   // ─── 拖拽文件上传 ────────────────────────────────────────────────────────────
 
@@ -510,7 +540,7 @@ export function RichInput({ disabled, placeholder, onSend, onPaste, insertTextRe
             : false
           const uploadedPath = resolveUploadPath(file, skyTxt)
 
-          await uploadFileToWorkspace(activeWorkspaceId, file, undefined, resolvedProjectId)
+          await uploadFileToWorkspace(activeWorkspaceId, file, uploadedPath, resolvedProjectId)
           // 刷新文件列表缓存
           const updatedFiles = await listWorkspaceFiles(activeWorkspaceId, resolvedProjectId)
           wsFilesRef.current = updatedFiles
@@ -552,9 +582,8 @@ export function RichInput({ disabled, placeholder, onSend, onPaste, insertTextRe
     setImgUploading(true)
     onImageUploadStatus?.('uploading', fileName)
     try {
-      // 使用 FileReader 方式上传（修复大文件 btoa spread 栈溢出）
-      const b64 = await fileToBase64(file)
-      await writeWorkspaceFile(activeWorkspaceId, destPath, b64, 'base64', resolvedProjectId)
+      // 使用 multipart 上传，支持大文件，无 base64 膨胀问题
+      await uploadBinaryFileToWorkspace(activeWorkspaceId, file, destPath, resolvedProjectId)
 
       // 刷新文件列表缓存
       const files = await listWorkspaceFiles(activeWorkspaceId, resolvedProjectId)
@@ -603,7 +632,7 @@ export function RichInput({ disabled, placeholder, onSend, onPaste, insertTextRe
       // ⚠️ handleKeyDown 里的 view.state 不是 Editor 实例，不能传给 doSend
       // Enter 发送已由下方独立 useEffect 的 DOM 事件监听处理，此处只处理 paste
       handlePaste: (_view, event) => {
-        // 优先检测图片粘贴
+        // 1. 优先检测图片粘贴
         const items = Array.from(event.clipboardData?.items ?? []) as DataTransferItem[]
         const imageItem = items.find(it => it.kind === 'file' && it.type.startsWith('image/'))
         if (imageItem) {
@@ -611,6 +640,78 @@ export function RichInput({ disabled, placeholder, onSend, onPaste, insertTextRe
           const file = imageItem.getAsFile()
           if (file) void handleImagePaste(file)
           return true
+        }
+        // 2. 检测文本中的工作区路径/文件名，自动转化为 mention 胶囊
+        // 支持四种格式：
+        //   [@shared/xxx.wav]        ← Ctrl+A 复制消息后粘贴（含方括号+路径）
+        //   [@xxx.wav]               ← 只有文件名的方括号格式（需主动查文件列表）
+        //   @shared/xxx.wav          ← @ 前缀路径文本
+        //   shared/xxx.wav           ← 纯路径（有目录分隔符）
+        const textItem = items.find(it => it.kind === 'string' && it.type === 'text/plain')
+        if (textItem) {
+          textItem.getAsString((text) => {
+            const trimmed = text.trim()
+            // 匹配 [@任意内容] 格式（含路径或纯文件名）
+            const bracketMatch = trimmed.match(/^\[@([\w\-. /\\]+\.\w+)\]$/)
+            // 匹配 @路径 或 有斜杠的纯路径（手动输入路径，必须含目录分隔符）
+            const pathMatch = !bracketMatch && trimmed.match(/^@?((?:[\w\-. ]+[/\\])+[\w\-. ]+\.\w+)$/)
+            // 匹配纯文件名（无路径，无 @ 前缀，如直接粘贴 "xxx.wav"）
+            const nameOnlyMatch = !bracketMatch && !pathMatch && trimmed.match(/^@?([\w\-. ]+\.\w{1,5})$/)
+
+            const rawRef = bracketMatch?.[1] ?? pathMatch?.[1] ?? null
+            const nameOnly = nameOnlyMatch?.[1] ?? null
+
+            if (rawRef) {
+              // 有路径信息：直接转胶囊，顺便在列表里找 size
+              // ⚠️ 必须阻止默认粘贴，否则原始文本也会被插入编辑器
+              event.preventDefault()
+              const fileName = rawRef.split(/[/\\]/).pop() ?? rawRef
+              const found = wsFilesRef.current.find(f => f.path === rawRef || f.name === fileName)
+              const filePath = found?.path ?? rawRef
+              if (editorRef.current) {
+                editorRef.current.chain().focus().insertContent({
+                  type: 'mention',
+                  attrs: { id: filePath, label: fileName, size: found?.size ?? 0 },
+                }).insertContent(' ').run()
+              }
+            } else if (nameOnly) {
+              // 只有文件名：主动去文件列表查找完整路径
+              // 先在缓存里找，找不到则主动请求 API 刷新列表
+              // ⚠️ 必须阻止默认粘贴，否则原始文本也会被插入编辑器
+              event.preventDefault()
+              // 正则捕获组已排除 @，nameOnly 直接就是文件名
+              const fileName = nameOnly
+              const tryInsert = (files: { path: string; name: string; size: number }[]) => {
+                const found = files.find(f => f.name === fileName)
+                if (found && editorRef.current) {
+                  editorRef.current.chain().focus().insertContent({
+                    type: 'mention',
+                    attrs: { id: found.path, label: found.name, size: found.size },
+                  }).insertContent(' ').run()
+                } else if (editorRef.current) {
+                  // 文件列表里找不到，降级：用文件名作为路径插入胶囊（用户可看到引用）
+                  editorRef.current.chain().focus().insertContent({
+                    type: 'mention',
+                    attrs: { id: fileName, label: fileName, size: 0 },
+                  }).insertContent(' ').run()
+                }
+              }
+              const cached = wsFilesRef.current.find(f => f.name === fileName)
+              if (cached) {
+                tryInsert(wsFilesRef.current)
+              } else if (activeWorkspaceIdRef.current) {
+                // 缓存未命中，主动刷新文件列表再插入（通过 ref 读取最新值，避免闭包 stale）
+                listWorkspaceFiles(activeWorkspaceIdRef.current, resolvedProjectIdRef.current)
+                  .then(files => {
+                    wsFilesRef.current = files
+                    tryInsert(files)
+                  })
+                  .catch(() => tryInsert([]))
+              } else {
+                tryInsert([])
+              }
+            }
+          })
         }
         if (onPaste) onPaste(event as unknown as ClipboardEvent)
         return false

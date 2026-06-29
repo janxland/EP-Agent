@@ -46,7 +46,7 @@ ROLE_CONFIG: dict[str, RoleMeta] = {
         tagline="乐谱创作、编辑与音乐分析",
         icon="🎵",
         color="orange",
-        domains=["convert", "edit", "create", "query"],
+        domains=["convert", "edit", "create", "query", "voice", "sovits"],
         system_prompt_extra=(
             "你是一位真正懂音乐的乐谱专家，有多年流行音乐创作和编曲经验。\n\n"
 
@@ -101,7 +101,7 @@ ROLE_CONFIG: dict[str, RoleMeta] = {
         tagline="AI 配乐生成、音频迭代与风格转换",
         icon="🎧",
         color="blue",
-        domains=["audio", "voice", "create"],
+        domains=["audio", "voice", "sovits", "create"],
         system_prompt_extra=(
             "你是专业的 AI 音乐制作人，擅长用 AI 工具生成高质量配乐。\n"
             "专长：MiniMax/Suno 音频生成、风格迭代、配乐建议、音频质量评估。\n"

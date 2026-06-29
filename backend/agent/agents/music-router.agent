@@ -69,8 +69,14 @@ max_steps: 10
 - audio_mode: "generate" | "iterate" | "cover"
 
 ### voice（音色克隆）
-音色克隆/TTS。加载 SubAgent：AudioAgent（voice 模式）
-触发词：克隆声音、用我的声音、查看音色、TTS
+音色克隆/TTS/语音合成。加载 SubAgent：AudioAgent（voice 模式）
+触发词：克隆声音、克隆音色、克隆XX的音色、用我的声音、用XX的声音、查看音色、TTS、语音合成、生成语音、用参考音频、合成音频（附件是音频文件时）
+
+⚠️ 以下情况【必须】路由到 voice，不得路由到 create 或 audio：
+- 用户提到「克隆」+「音色/声音」
+- 用户提到「参考音频」+「生成/合成」
+- 附件是 .wav/.mp3/.ogg/.flac 等音频文件且用户要求生成/合成语音
+- 用户说「用这个音频生成」「克隆后生成」
 
 ### query（查询分析）
 查询/分析谱子信息。加载 SubAgent：QueryAgent
@@ -109,6 +115,8 @@ session_id: {{ @variable("session_id") }}
 - 「生成/写/创作/重写/X分钟/风格改编」→ create
 - 「加载谱子文件」→ convert
 - 「加载 + 创作」→ chain: convert → create
+- 「克隆音色/声音 + 生成/合成」→ voice（优先级最高，不得误判为 create）
+- 「附件是音频文件 + 生成语音」→ voice
 </workflow>
 
 <output_contract>

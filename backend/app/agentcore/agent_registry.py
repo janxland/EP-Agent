@@ -27,8 +27,10 @@ _logger = logging.getLogger("ep_agent.registry")
 _REGISTRY: dict[str, type] = {}
 
 # domain 别名映射（多个 domain 名指向同一 Agent）
+# ⚠️ voice 别名已移除：voice 域现在直接注册到 AudioAgent（@register("audio","voice")），
+#    无需别名。别名会导致 get_agent("voice") 绕过直接注册，造成混淆。
 _ALIASES: dict[str, str] = {
-    "voice": "audio",       # voice 域 → AudioAgent
+    # "voice": "audio",   # 已移除，voice 已直接注册
 }
 
 

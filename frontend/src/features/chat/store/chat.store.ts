@@ -335,7 +335,8 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
     // 已恢复过就不重复 fetch
     if (get()._roleRestored) return
     try {
-      const res = await fetch(`/api/sessions/${sessionId}/role`)
+      const BASE_URL = process.env.NEXT_PUBLIC_API_URL ?? ''
+      const res = await fetch(`${BASE_URL}/api/sessions/${sessionId}/role`)
       if (!res.ok) return
       const data = await res.json()
       if (data.role_id) {
@@ -584,11 +585,18 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
               'rename_workspace_file', 'copy_workspace_file',
               'upload_workspace_file', 'save_abc_score',
               'save_h5_file', 'create_workspace_dir',
+              // workspace_tools v2.0 实际注册名（fix70: 补全 react_executor._FILE_WRITE_TOOLS 中的所有工具）
+              'edit_workspace_file', 'move_workspace_file',
+              'run_write_tasks_in_parallel',
               // 新工具名（去 ID 化后）
               'write_file', 'append_file', 'delete_file',
               'copy_file', 'rename_file', 'move_file',
               'abc_to_midi', 'generate_h5_from_midi',
-              'generate_h5_from_abc', 'sovits_save_audio',
+              'generate_h5_from_abc',
+              // h5 工具（fix70: 补全 save_h5_output）
+              'save_h5_output',
+              // sovits v2.0 音频合成工具（合成后自动落盘，需刷新文件树）
+              'sovits_tts_and_save', 'sovits_clone_and_save', 'sovits_save_audio',
               'save_score_to_workspace',
             ])
             if (FILE_OP_TOOLS.has(p.tool)) {

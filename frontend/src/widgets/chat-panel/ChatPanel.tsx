@@ -12,7 +12,7 @@ import { chatUniversal, listModels, setActiveModel, getContextUsage, type ModelI
 import { ChatMessageList, StreamingAssistantCard } from './ChatMessageList'
 import { TodoListCard } from './TodoListCard'
 import { RichInput, type FileRef } from './RichInput'
-import { readWorkspaceFile, uploadFileToWorkspace } from '@/shared/lib/workspace-files-api'
+import { readWorkspaceFile, uploadFileToWorkspace, resolveUploadPath, isSkyTxtFile } from '@/shared/lib/workspace-files-api'
 import { useBackendHealth, HEALTH_VISUAL } from '@/shared/hooks/useBackendHealth'
 import { RoleSwitcher, RoleBadge } from '@/widgets/role-switcher'
 import type { RoleMeta } from '@/widgets/role-switcher'
@@ -310,7 +310,10 @@ export function ChatPanel() {
   // RichInput 发送回调：文本文件读内容进 context，二进制文件只传工作区路径
   // 核心原则：图片/MIDI/音频的二进制内容永远不进 LLM context，防止上下文爆炸
   const handleRichSend = useCallback(async (text: string, fileRefs: FileRef[]) => {
-    if (!text.trim() || status === 'running' || !sessionId) return
+    // 双重保护：ref 锁（同步，防止并发）+ status 检查（防止 UI 状态异常）
+    if (!text.trim() || !sessionId) return
+    if (inflightRef.current || status === 'running') return
+    inflightRef.current = true
     let autoAtt: Attachment | null = attachment
 
     if (fileRefs.length > 0 && !autoAtt && activeWorkspaceId) {
@@ -326,7 +329,7 @@ export function ChatPanel() {
           // ✅ 二进制文件：只传工作区路径，不读取 base64
           // 后端 Runner 层负责处理（MIDI → H5，图片 → visual_understanding URL）
           const kind: AttachmentKind = isMidi ? 'midi' : isAudio ? 'audio' : 'image'
-          autoAtt = { kind, name: ref.label, content: '', workspace_path: ref.path, size: 0 }
+          autoAtt = { kind, name: ref.label, content: '', workspace_path: ref.path, size: ref.size }
         } else if (isText) {
           // ✅ 文本文件：读取内容（ABC/JSON/TXT 都是高效文本，可进 context）
           const content = await readWorkspaceFile(activeWorkspaceId, ref.path)
@@ -336,38 +339,37 @@ export function ChatPanel() {
       } catch { /* 静默失败，不阻塞发送 */ }
     }
 
-    const displayText = (autoAtt && !text.includes(`[@${autoAtt.name}]`))
-      ? `${text} [@${autoAtt.name}]`
+    // 胶囊引用：始终使用 workspace_path（真实文件系统路径，不做任何前缀处理）
+    // workspace_path 为空时降级用文件名，保证 Agent 收到的路径与文件系统完全一致
+    const attRef = autoAtt
+      ? `[@${autoAtt.workspace_path || autoAtt.name}]`
+      : ''
+    const displayText = (autoAtt && attRef && !text.includes(attRef))
+      ? `${text} ${attRef}`
       : text
     addOptimisticUserMessage(displayText)
     const att = autoAtt
     setAttachment(null)
     startRun()
-    const timeoutId = setTimeout(() => failRun('请求超时，请检查后端连接'), REQUEST_TIMEOUT_MS)
+    const timeoutId = setTimeout(() => {
+      inflightRef.current = false
+      failRun('请求超时，请检查后端连接')
+    }, REQUEST_TIMEOUT_MS)
     timeoutRef.current = timeoutId
-    // 判断附件类型决定传哪个字段
-    // - 有 workspace_path（已上传到工作区）：传路径，content/b64 留空
-    // - 无 workspace_path 但有 content（降级 base64 路径）：
-    //   - MIDI/音频 → 传 attachment_b64，让 Runner 层转存到工作区
-    //   - 文本（ABC/JSON）→ 传 attachment_content，可进 LLM context
-    const isBinary = att?.kind === 'midi' || att?.kind === 'audio'
-    const hasWsPath = !!(att?.workspace_path)
+    // 文件统一通过 workspace_path 传递，Agent 只感知路径，不接触二进制
+    // 文本类文件（ABC/JSON/TXT）额外传 content 供 LLM context
+    const isBinary = att?.kind === 'midi' || att?.kind === 'audio' || att?.kind === 'image'
     chatUniversal(sessionId, {
-      // 使用 displayText（含 [@文件名] chip）而非原始 text，
-      // 保证后端落库内容与前端乐观显示一致，刷新后 SSE replay 能正确还原 chip
       message: displayText,
-      // workspace_id + project_id 必带：工具层通过这两个 ID 定位文件系统路径
       workspace_id: resolvedWorkspaceId,
       project_id: resolvedProjectId,
       attachment_name: att?.name ?? '',
-      // 工作区路径（优先）：后端 Runner 层直接使用
       attachment_workspace_path: att?.workspace_path ?? '',
-      // 文本内容（ABC/JSON/TXT）：仅在非二进制且有内容时传
       attachment_content: (!isBinary && att?.content) ? att.content : '',
-      // base64（降级路径）：仅在二进制且无 workspace_path 时传，Runner 层会转存到工作区
-      attachment_b64: (isBinary && !hasWsPath && att?.content) ? att.content : '',
+      attachment_b64: '',
     }).catch((e: unknown) => {
       const msg = e instanceof Error ? e.message : '请求失败'
+      inflightRef.current = false
       failRun(msg)
     })
   }, [status, sessionId, attachment, activeWorkspaceId, addOptimisticUserMessage, startRun, failRun])
@@ -436,6 +438,10 @@ export function ChatPanel() {
   const scrollRef   = useRef<HTMLDivElement>(null)
   const stickRef    = useRef(true)
   const timeoutRef  = useRef<ReturnType<typeof setTimeout> | null>(null)
+  // ── 防重复发送锁（useRef，不触发 re-render，彻底杜绝并发重复请求）──────────
+  // 原因：status 是 React state，闭包捕获旧值，两次快速点击之间存在时序窗口
+  // 解决：用 ref 做同步锁，startRun 前检查，finishRun/failRun 后解锁
+  const inflightRef = useRef(false)
 
   // ── 自动滚底 ──────────────────────────────────────────────────────────────
   const onScroll = useCallback(() => {
@@ -451,9 +457,12 @@ export function ChatPanel() {
     if (el) el.scrollTop = el.scrollHeight
   }, [messages, streaming.content, streaming.tool_calls.length])
 
-  // ── 超时兜底清理 ──────────────────────────────────────────────────────────
+  // ── 超时兜底清理 + inflight 解锁 ─────────────────────────────────────────
+  // status 从 running → completed/failed/idle 时，自动释放发送锁
+  // 这是 inflight 锁的唯一解锁出口（超时/失败/正常完成都走这里）
   useEffect(() => {
     if (status !== 'running') {
+      inflightRef.current = false
       if (timeoutRef.current) {
         clearTimeout(timeoutRef.current)
         timeoutRef.current = null
@@ -484,61 +493,27 @@ export function ChatPanel() {
       const isAudio = file.type.includes('audio') || /\.(mp3|wav|m4a|ogg|flac)$/i.test(file.name)
       const isMidi  = file.type.includes('midi') || /\.(mid|midi)$/i.test(file.name)
 
-      if ((isAudio || isMidi) && activeWorkspaceId) {
-        // MIDI/音频先上传到项目目录，存 workspace_path，不存 base64
-        const kind: AttachmentKind = isAudio ? 'audio' : 'midi'
-        const subdir = isMidi ? '.sky' : 'shared'
-        const destPath = `${subdir}/${file.name}`
-        setImgUploadTip({ status: 'uploading', name: file.name })
-        try {
-          await uploadFileToWorkspace(activeWorkspaceId, file, destPath, resolvedProjectId)
-          setAttachment({ kind, name: file.name, content: '', workspace_path: destPath, size: file.size })
-          setImgUploadTip({ status: 'done', name: file.name })
-          insertMentionRef.current?.(destPath, file.name, file.size)
-          triggerFileTreeRefresh()
-        } catch {
-          const reader = new FileReader()
-          reader.onload = () => {
-            const b64 = (reader.result as string).split(',')[1] ?? ''
-            setAttachment({ kind, name: file.name, content: b64, workspace_path: '', size: file.size })
-          }
-          reader.readAsDataURL(file)
-          setImgUploadTip({ status: 'error', name: file.name })
-        }
-      } else if (isAudio || isMidi) {
-        // 无工作区时降级用 base64
-        const reader = new FileReader()
-        reader.onload = () => {
-          const b64 = (reader.result as string).split(',')[1] ?? ''
-          const kind: AttachmentKind = isAudio ? 'audio' : 'midi'
-          setAttachment({ kind, name: file.name, content: b64, workspace_path: '', size: file.size })
-        }
-        reader.readAsDataURL(file)
-      } else {
-        // txt / json 等文本文件：上传到项目目录 + 插入 mention 胶囊
-        const subdir = 'shared'
-        const destPath = `${subdir}/${file.name}`
-        if (activeWorkspaceId) {
-          setImgUploadTip({ status: 'uploading', name: file.name })
-          try {
-            await uploadFileToWorkspace(activeWorkspaceId, file, destPath, resolvedProjectId)
-            const text = await file.text()
-            const kind = detectKind(file.name, text)
-            setAttachment({ kind, name: file.name, content: text, workspace_path: destPath, size: file.size })
-            setImgUploadTip({ status: 'done', name: file.name })
-            insertMentionRef.current?.(destPath, file.name, file.size)
-            triggerFileTreeRefresh()
-          } catch {
-            const text = await file.text()
-            const kind = detectKind(file.name, text)
-            setAttachment({ kind, name: file.name, content: text, workspace_path: '', size: file.size })
-            setImgUploadTip({ status: 'error', name: file.name })
-          }
-        } else {
-          const text = await file.text()
-          const kind = detectKind(file.name, text)
-          setAttachment({ kind, name: file.name, content: text, workspace_path: '', size: file.size })
-        }
+      // 所有文件统一走工作区上传，无降级 b64 路径
+      if (!activeWorkspaceId) {
+        setImgUploadTip({ status: 'error', name: file.name })
+        return
+      }
+      const kind: AttachmentKind = isAudio ? 'audio' : isMidi ? 'midi' : 'text'
+      // 统一走 resolveUploadPath，与拖拽上传、@ 选择逻辑一致，不硬编码目录
+      const isSkyTxt = file.name.toLowerCase().endsWith('.txt') ? await isSkyTxtFile(file) : false
+      const destPath = resolveUploadPath(file, isSkyTxt)
+      setImgUploadTip({ status: 'uploading', name: file.name })
+      try {
+        await uploadFileToWorkspace(activeWorkspaceId, file, destPath, resolvedProjectId)
+        // 文本类文件额外读取内容供 LLM context（ABC/JSON/TXT）
+        const content = (!isAudio && !isMidi) ? await file.text() : ''
+        setAttachment({ kind, name: file.name, content, workspace_path: destPath, size: file.size })
+        setImgUploadTip({ status: 'done', name: file.name })
+        insertMentionRef.current?.(destPath, file.name, file.size)
+        triggerFileTreeRefresh()
+      } catch (err) {
+        console.error('[粘贴上传失败]', file.name, err)
+        setImgUploadTip({ status: 'error', name: file.name })
       }
       return
     }
@@ -572,6 +547,7 @@ export function ChatPanel() {
     create:         { icon: '🎵', label: '创作谱子' },
     audio:          { icon: '🎧', label: '生成音频' },
     voice:          { icon: '🎤', label: '音色克隆' },
+    sovits:         { icon: '🎤', label: '音色克隆' },  // fix70: 补充 sovits 域（后端路由到此域时前端显示图标）
     query:          { icon: '🔍', label: '查询分析' },
     'convert+edit': { icon: '🎮', label: '解析并编辑' },
     h5_create:      { icon: '🎨', label: 'H5 页面' },

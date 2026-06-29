@@ -47,11 +47,20 @@ const TOOL_ICON_MAP: Record<string, ToolIconConfig> = {
   abc_to_audio_prompt:     { bg: '#F0FDFA', fg: '#0D9488', emoji: '🔊' },
   evolve_audio_prompt:     { bg: '#FAF5FF', fg: '#7C3AED', emoji: '🔄' },
   diff_audio_params:       { bg: '#F9FAFB', fg: '#374151', emoji: '📊' },
-  // ── 音色克隆工具 ──────────────────────────────────────────────────────────
+  // ── 音色克隆工具（MiniMax）─────────────────────────────────────────────────
   upload_voice_sample:       { bg: '#FAF5FF', fg: '#9333EA', emoji: '🎙️' },
   clone_voice_minimax:       { bg: '#EDE9FE', fg: '#6D28D9', emoji: '🧬' },
   list_cloned_voices:        { bg: '#EDE9FE', fg: '#5B21B6', emoji: '📋' },
   synthesize_speech_minimax: { bg: '#EDE9FE', fg: '#4C1D95', emoji: '🔈' },
+  // ── GPT-SoVITS 工具 ───────────────────────────────────────────────────────
+  voice_clone_router:        { bg: '#EDE9FE', fg: '#6D28D9', emoji: '🎙️' },
+  sovits_health_check:       { bg: '#F0FDF4', fg: '#16A34A', emoji: '💚' },
+  sovits_tts_and_save:       { bg: '#EDE9FE', fg: '#7C3AED', emoji: '🔊' },
+  sovits_clone_and_save:     { bg: '#EDE9FE', fg: '#6D28D9', emoji: '🧬' },
+  sovits_list_models:        { bg: '#EFF6FF', fg: '#2563EB', emoji: '📋' },
+  sovits_set_model:          { bg: '#FFFBEB', fg: '#D97706', emoji: '🔄' },
+  sovits_list_audio_files:   { bg: '#F0FDF4', fg: '#15803D', emoji: '🎵' },
+  upload_prompt_audio:       { bg: '#FAF5FF', fg: '#9333EA', emoji: '🎤' },
 }
 
 const TOOL_LABELS: Record<string, string> = {
@@ -94,11 +103,20 @@ const TOOL_LABELS: Record<string, string> = {
   abc_to_audio_prompt:     '提取音频 Prompt',
   evolve_audio_prompt:     '进化音频 Prompt',
   diff_audio_params:       '对比生成参数',
-  // 音色
+  // 音色（MiniMax）
   upload_voice_sample:       '上传音色样本',
   clone_voice_minimax:       '克隆音色',
   list_cloned_voices:        '查询已克隆音色',
   synthesize_speech_minimax: '合成语音',
+  // GPT-SoVITS
+  voice_clone_router:        '音色克隆路由',
+  sovits_health_check:       '检查 SoVITS 服务',
+  sovits_tts_and_save:       'SoVITS 语音合成',
+  sovits_clone_and_save:     'SoVITS 音色克隆',
+  sovits_list_models:        '查看可用模型',
+  sovits_set_model:          '切换音色模型',
+  sovits_list_audio_files:   '查看已保存音频',
+  upload_prompt_audio:       '上传提示音频',
 }
 
 function getToolIcon(name: string): ToolIconConfig {
@@ -185,7 +203,7 @@ export const ToolCard = memo(function ToolCard({
   status,
   error,
 }: ToolCardProps) {
-  const [open, setOpen] = useState(status === 'running')
+  const [open, setOpen] = useState(status === 'running' || status === 'failed')
   const bodyRef = useRef<HTMLDivElement>(null)
   const icon = getToolIcon(toolName)
   const label = getToolLabel(toolName)
@@ -265,14 +283,9 @@ export const ToolCard = memo(function ToolCard({
         </span>
       </button>
 
-      {/* 展开体：max-h 动画，内容固定宽度不引起布局抖动 */}
-      <div
-        className={[
-          'overflow-hidden transition-[max-height,opacity] duration-200',
-          open ? 'max-h-[400px] opacity-100' : 'max-h-0 opacity-0',
-        ].join(' ')}
-      >
-        <div ref={bodyRef} className="px-2.5 pb-2.5 space-y-2 bg-gray-50/60 max-h-[380px] overflow-y-auto">
+      {/* 展开体 */}
+      {open && (
+        <div ref={bodyRef} className="px-2.5 pb-2.5 space-y-2 bg-gray-50/60">
 
           {/* 参数 */}
           {argumentsJson && argumentsJson !== '{}' && (
@@ -280,7 +293,7 @@ export const ToolCard = memo(function ToolCard({
               <span className="text-gray-400 text-[10px] uppercase tracking-wider font-medium">
                 输入参数
               </span>
-              <pre className="bg-zinc-900 rounded-lg p-2.5 text-[11px] leading-relaxed overflow-x-hidden whitespace-pre-wrap break-words max-h-40 overflow-y-auto font-mono">
+              <pre className="bg-zinc-900 rounded-lg p-2.5 text-[11px] leading-relaxed overflow-x-hidden whitespace-pre-wrap break-words font-mono max-h-36 overflow-y-auto">
                 <JsonHighlight raw={argumentsJson} />
                 {isRunning && (
                   <span className="inline-block w-px h-3 bg-zinc-300 ml-0.5 animate-pulse align-text-bottom" />
@@ -299,18 +312,15 @@ export const ToolCard = memo(function ToolCard({
                 {isFailed ? '错误详情' : '执行结果'}
               </span>
               <pre className={[
-                'rounded-lg p-2.5 text-[11px] leading-relaxed overflow-x-hidden whitespace-pre-wrap break-words max-h-40 overflow-y-auto font-mono',
+                'rounded-lg p-2.5 text-[11px] leading-relaxed overflow-x-hidden whitespace-pre-wrap break-words font-mono max-h-96 overflow-y-auto',
                 isFailed ? 'bg-red-950 text-red-200' : 'bg-zinc-900 text-zinc-200',
               ].join(' ')}>
-                {displayResult.length > 800
-                  ? displayResult.slice(0, 800) + '\n…（已截断）'
-                  : displayResult
-                }
+                {displayResult}
               </pre>
             </div>
           )}
         </div>
-      </div>
+      )}
     </div>
   )
 })

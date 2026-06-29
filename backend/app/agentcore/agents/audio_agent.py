@@ -24,12 +24,6 @@ from app.agentcore.react_executor import stream_text, ReactExecutor
 
 Publisher = Callable[[str, dict], Awaitable[None]]
 
-# 意图域 → 工具组映射（与 universal_runner 保持同步）
-_DOMAIN_TOOL_GROUPS: dict[str, list[str]] = {
-    "audio":   ["audio"],
-    "voice":   ["audio"],
-    "sovits":  ["sovits"],
-}
 
 
 @register("audio", "voice")
@@ -50,12 +44,9 @@ class AudioAgent:
         if ids:
             await todo_mgr.tick(ids[0], "running", publish)
 
-        # voice 域：优先走 sovits（若已配置）
-        use_sovits = self._should_use_sovits(domain)
-        tool_name  = (
-            "voice_clone_sovits" if use_sovits
-            else ("audio_generator" if domain == "audio" else "voice_clone")
-        )
+        # audio/voice 域：均走 audio_chat_fn（MiniMax/Suno）
+        # 音色克隆（sovits 域）由 VoiceCloneAgent 专门处理，不在此分支
+        tool_name = "audio_generator" if domain == "audio" else "voice_clone"
 
         audio_call_id = f"call_audio_{session_id[:8]}"
         await publish("tool.call", {
@@ -66,10 +57,7 @@ class AudioAgent:
         })
 
         try:
-            if use_sovits:
-                result = await self._run_sovits(message, publish, todo_mgr, session_id=session_id)
-            else:
-                result = await audio_chat_fn(
+            result = await audio_chat_fn(
                     session_id=session_id,
                     message=message,
                     provider="auto",
@@ -106,49 +94,6 @@ class AudioAgent:
         await stream_text(summary, publish)
         await publish("message.completed", {"message": summary})
         return {"domain": domain, "message": summary, "abc_updated": False, **r}
-
-    def _should_use_sovits(self, domain: str) -> bool:
-        if domain != "voice":
-            return False
-        try:
-            from app.config import config as _cfg
-            return bool(getattr(_cfg, "SOVITS_BASE_URL", ""))
-        except Exception:
-            return False
-
-    async def _run_sovits(
-        self,
-        message: str,
-        publish: Publisher,
-        todo_mgr: TodoManager,
-        session_id: str = "",
-    ) -> dict:
-        """使用 ReactExecutor + sovits 工具组执行语音合成。"""
-        from app.agentcore.tools import get_tool_schemas
-        sovits_tools = get_tool_schemas("sovits")
-        executor     = ReactExecutor()
-        exec_result  = await executor.run(
-            messages=[
-                {"role": "system", "content": (
-                    "你是 EP-Agent 的语音助手，负责音色克隆和语音合成。"
-                    "根据用户需求选择合适的工具："
-                    "sovits_tts（文字转语音）、"
-                    "sovits_clone_voice（克隆音色）、"
-                    "sovits_list_models（查看可用模型）。"
-                )},
-                {"role": "user", "content": message},
-            ],
-            tools=sovits_tools,
-            publish=publish,
-            todo_manager=todo_mgr,
-            max_rounds=3,
-            session_id=session_id,  # 落库 tool message
-        )
-        return {
-            "summary":  exec_result.get("content") or "语音合成完成",
-            "provider": "sovits",
-            **exec_result.get("extra", {}),
-        }
 
     async def run_with_ctx(self, ctx: "RunContext") -> dict:
         """v4.0 解耦接口：从 RunContext 解包参数，调用原 run()。"""

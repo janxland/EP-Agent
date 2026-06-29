@@ -392,8 +392,10 @@ class ReactExecutor:
                         # h5_tools
                         "generate_h5_from_midi",
                         "save_h5_output",
-                        # audio_tools
-                        "sovits_save_audio",
+                        # audio_tools（sovits v2.0 新工具，合成后自动落盘）
+                        "sovits_tts_and_save",
+                        "sovits_clone_and_save",
+                        "sovits_save_audio",  # 废弃但保留兼容
                     }
                     if tool_name in _FILE_WRITE_TOOLS and session_id:
                         try:
