@@ -282,22 +282,42 @@ def list_template_files() -> list[dict]:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# 辅助函数
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _auto_night_mood(title: str) -> str:
+    """根据曲名自动生成夜晚情绪词（luoxiaohei 模板封面装饰）。"""
+    import random
+    moods = [
+        "深夜 · 月光 · 轻柔", "夜风 · 星空 · 温柔", "月下 · 静谧 · 梦境",
+        "夜色 · 流云 · 悠远", "深夜 · 心事 · 轻吟", "月光 · 猫咪 · 安眠",
+    ]
+    # 用曲名做随机种子，保证同一曲名始终输出相同情绪词
+    seed = sum(ord(c) for c in (title or ""))
+    return moods[seed % len(moods)]
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # 变量构建器 — 轻量注入，只替换展示变量，不注入大数据
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def build_template_vars(
-    title:         str,
-    notes:         list[dict],   # 音符数据，注入 NOTES_JSON 供可视化使用
-    theme:         str  = "apple",
-    abc_content:   str  = "",
-    bpm:           int  = 120,
-    key:           str  = "C",
-    composer:      str  = "",
-    extra_info:    str  = "",
-    midi_url:      str  = "",
-    video_url:     str  = "",
-    source_format: str  = "abc",
-    extra_vars:    dict | None = None,  # 模板专属变量（从 meta.json extra_vars 声明）
+    title:          str,
+    notes:          list[dict],   # 音符数据，注入 NOTES_JSON 供可视化使用
+    theme:          str  = "apple",
+    abc_content:    str  = "",
+    bpm:            int  = 120,
+    key:            str  = "C",
+    composer:       str  = "",
+    extra_info:     str  = "",
+    midi_url:       str  = "",
+    video_url:      str  = "",
+    video_title:    str  = "",
+    video_platform: str  = "",
+    night_mood:     str  = "",
+    cat_emoji:      str  = "🐱",
+    source_format:  str  = "abc",
+    extra_vars:     dict | None = None,  # 模板专属变量（从 meta.json extra_vars 声明）
 ) -> dict[str, str]:
     """
     构建模板变量字典——只注入轻量展示变量。
@@ -324,7 +344,7 @@ def build_template_vars(
     # ABC 内容（JS 字符串安全转义）
     abc_escaped = json.dumps(abc_content)[1:-1] if abc_content else ""
 
-    # ABC 区块（有内容才渲染）
+    # ABC 区块（v6 兼容：v7 模板由 player.js 动态控制，v6 模板仍用此注入）
     abc_section = (
         f'<div class="abc-section card" data-card>'
         f'<div class="sec-label">🎼 乐谱</div>'
@@ -333,7 +353,7 @@ def build_template_vars(
         if abc_content and abc_content.strip() else ""
     )
 
-    # 视频区块
+    # 视频区块（v6 兼容：v7 模板由 player.js 动态生成 iframe）
     video_section = (
         f'<div class="card" data-card>'
         f'<div class="sec-label">🎬 视频</div>'
@@ -343,13 +363,14 @@ def build_template_vars(
         if video_url and video_url.strip() else ""
     )
 
-    # 额外信息区块
+    # 额外信息区块（v6 兼容；v7 模板通过 EXTRA_HTML 直接注入）
     extra_html = (
-        f'<div class="card" data-card>'
         f'<p style="opacity:0.75;font-size:0.9em;line-height:1.6;">{extra_info}</p>'
-        f'</div>'
         if extra_info and extra_info.strip() else ""
     )
+
+    # 夜晚情绪词（luoxiaohei 模板专属，未传时自动生成）
+    _night_mood = night_mood or _auto_night_mood(title)
 
     # ── 模板专属变量：从注册表读取该模板声明的 extra_vars 键名，
     # 按调用方传入的 extra_vars dict 填充，未传则用空字符串（模板自行处理缺省）
@@ -382,13 +403,22 @@ def build_template_vars(
         "GRADIENT":       preset["GRADIENT"],
         "ABC_SVG_FILTER": preset["ABC_SVG_FILTER"],
 
+        # 视频（v7 结构化变量；v6 兼容的 VIDEO_SECTION 也保留）
+        "VIDEO_URL":      video_url      or "",
+        "VIDEO_TITLE":    video_title    or "",
+        "VIDEO_PLATFORM": video_platform or "",
+        "VIDEO_SECTION":  video_section,
+
+        # 装饰变量
+        "NIGHT_MOOD":  _night_mood,
+        "CAT_EMOJI":   cat_emoji or "🐱",
+
         # 扩展
-        "VIDEO_URL":     video_url    or "",
-        "VIDEO_SECTION": video_section,
-        "EXTRA_INFO":    extra_info   or "",
+        "EXTRA_INFO":    extra_info or "",
         "EXTRA_HTML":    extra_html,
 
         # 音符数据（最多 800 条，供前端可视化使用）
+        # v7 模板：注入到 ep-config JSON 中，不加引号（原始 JSON 数组）
         "NOTES_JSON": json.dumps(notes[:800], ensure_ascii=False) if notes else "[]",
 
         # 文档占位（渲染时清空）
@@ -409,18 +439,22 @@ def build_template_vars(
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def render_score_to_h5(
-    title:         str,
-    notes:         list[dict],
-    theme:         str        = "apple",
-    abc_content:   str        = "",
-    bpm:           int        = 120,
-    key:           str        = "C",
-    composer:      str        = "",
-    extra_info:    str        = "",
-    midi_url:      str        = "",
-    video_url:     str        = "",
-    source_format: str        = "abc",
-    extra_vars:    dict | None = None,  # 模板专属变量，如 {"LYRIC_LINE": "..."}
+    title:          str,
+    notes:          list[dict],
+    theme:          str        = "apple",
+    abc_content:    str        = "",
+    bpm:            int        = 120,
+    key:            str        = "C",
+    composer:       str        = "",
+    extra_info:     str        = "",
+    midi_url:       str        = "",
+    video_url:      str        = "",
+    video_title:    str        = "",
+    video_platform: str        = "",
+    night_mood:     str        = "",
+    cat_emoji:      str        = "🐱",
+    source_format:  str        = "abc",
+    extra_vars:     dict | None = None,
 ) -> str:
     """
     一步完成：读取模板 → 构建变量 → 渲染 → 返回完整 HTML。
@@ -434,6 +468,8 @@ def render_score_to_h5(
         abc_content=abc_content, bpm=bpm, key=key,
         composer=composer, extra_info=extra_info,
         midi_url=midi_url, video_url=video_url,
+        video_title=video_title, video_platform=video_platform,
+        night_mood=night_mood, cat_emoji=cat_emoji,
         source_format=source_format,
         extra_vars=extra_vars,
     )

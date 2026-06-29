@@ -1,0 +1,15 @@
+{
+  "name": "gptsovits-installer",
+  "version": "1.0.0",
+  "description": "GPT-SoVITS 音色克隆一键安装器 · EP-Agent Voice Clone Module",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js"
+  },
+  "engines": {
+    "node": ">=16.0.0"
+  },
+  "keywords": ["gpt-sovits", "voice-clone", "installer", "ep-agent"],
+  "license": "MIT"
+}

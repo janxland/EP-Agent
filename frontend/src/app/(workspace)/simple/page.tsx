@@ -9,20 +9,22 @@ import { ExportPanel } from '@/widgets/export-panel/ExportPanel'
 import { AudioPanel } from '@/widgets/audio-panel/AudioPanel'
 import { useScoreStore } from '@/entities/session/store'
 import { useWorkspaceStore } from '@/features/workspace/store/workspace.store'
-import { createSession, subscribeToSession } from '@/shared/lib/api'
+import { subscribeToSession } from '@/shared/lib/api'
 import Link from 'next/link'
 
 export default function SimplePage() {
   const { sessionId, setSessionId, abcNotation, score, handleSSEEvent } = useScoreStore()
-  const { activeWorkspaceId } = useWorkspaceStore()
+  const { activeWorkspaceId, activeProjectId, activeProject, createSession } = useWorkspaceStore()
+  const resolvedProjectId = activeProjectId ?? activeProject()?.id ?? undefined
   const [rightTab, setRightTab] = useState<'export' | 'audio'>('export')
   const unsubRef = useRef<(() => void) | null>(null)
 
   useEffect(() => {
     if (!sessionId) {
-      // 传入 activeWorkspaceId，确保 session 归属正确工作区，侧边栏可见
-      createSession(activeWorkspaceId ?? undefined)
-        .then(({ session_id }) => setSessionId(session_id))
+      // 使用 store.createSession 确保 session 写入 workspaces 树，侧边栏可见
+      // project_id 必须传递，工具层通过它定位文件系统隔离路径
+      createSession(activeWorkspaceId ?? '', undefined, resolvedProjectId)
+        .then((sess) => setSessionId(sess.id))
         .catch(console.error)
       return
     }

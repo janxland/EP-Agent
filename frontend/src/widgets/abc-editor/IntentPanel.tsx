@@ -14,6 +14,7 @@
 
 import { useCallback, useRef, useState } from 'react'
 import { useScoreStore } from '@/entities/session/store'
+import { useWorkspaceStore } from '@/features/workspace/store/workspace.store'
 import { chatUniversal } from '@/shared/lib/api'
 
 const INTENT_PRESETS = [
@@ -46,6 +47,11 @@ export function IntentPanel() {
     clearLogs,
   } = useScoreStore()
 
+  // workspace_id / project_id 必须随每次请求传递，工具层通过 ContextVar 定位文件系统路径
+  const { activeWorkspaceId, activeProjectId, activeProject } = useWorkspaceStore()
+  const resolvedWorkspaceId = activeWorkspaceId ?? ''
+  const resolvedProjectId   = activeProjectId ?? activeProject()?.id ?? ''
+
   const canSubmit =
     !!sessionId &&
     intent.trim().length > 0 &&
@@ -63,8 +69,13 @@ export function IntentPanel() {
 
     try {
       // 统一走 /chat 接口，LLM 自动路由意图
+      // workspace_id + project_id 必带，工具层通过这两个 ID 定位文件系统路径
       // 无谱子时 LLM 会友好提示，不会 500
-      await chatUniversal(sessionId, { message: trimmedIntent })
+      await chatUniversal(sessionId, {
+        message: trimmedIntent,
+        workspace_id: resolvedWorkspaceId,
+        project_id:   resolvedProjectId,
+      })
       setIntent('')
       // pipelineState 由 SSE pipeline.step 事件驱动更新
     } catch (e) {

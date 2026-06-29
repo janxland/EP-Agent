@@ -13,8 +13,9 @@
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react'
+import type { DragEvent } from 'react'
 import { createPortal } from 'react-dom'
-import type { ReactNode, CSSProperties, RefObject, MutableRefObject } from 'react'
+import type { ReactNode, CSSProperties, RefObject, MutableRefObject, MouseEvent as ReactMouseEvent } from 'react'
 import {
   useEditor, EditorContent,
   NodeViewWrapper, ReactNodeViewRenderer,
@@ -31,6 +32,8 @@ import { useWorkspaceStore } from '@/features/workspace/store/workspace.store'
 import {
   listWorkspaceFiles,
   uploadFileToWorkspace,
+  isSkyTxtFile,
+  resolveUploadPath,
   writeWorkspaceFile,
   fileToBase64,
   getFileIcon,
@@ -154,9 +157,15 @@ interface FileChipProps {
   inOrangeBubble?: boolean
 }
 
+// 全局事件：请求将文件引用插入到 RichInput
+export const FILE_INSERT_EVENT = 'ep:file-insert'
+export const emitFileInsert = (path: string, label: string, size: number) =>
+  window.dispatchEvent(new CustomEvent(FILE_INSERT_EVENT, { detail: { path, label, size } }))
+
 export function FileChip({ label, path, size = 0, workspaceId, inOrangeBubble = false }: FileChipProps) {
   const ext = getFileExt(label)
   const [hovered, setHovered] = useState(false)
+  const [copied, setCopied] = useState(false)
   const chipRef = useRef<HTMLSpanElement>(null)
   const hideTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
 
@@ -174,26 +183,47 @@ export function FileChip({ label, path, size = 0, workspaceId, inOrangeBubble = 
     hideTimer.current = setTimeout(() => setHovered(false), 150)
   }, [])
 
+  // 点击胶囊：将文件引用插入对话框（通过全局事件总线）
+  const handleClick = useCallback((e: ReactMouseEvent) => {
+    e.preventDefault()
+    e.stopPropagation()
+    // 发送插入事件，RichInput 监听后插入 mention 节点
+    emitFileInsert(path, label, size)
+    // 短暂视觉反馈
+    setCopied(true)
+    setTimeout(() => setCopied(false), 1000)
+  }, [path, label, size])
+
   return (
     <>
       <span
         ref={chipRef}
         onMouseEnter={showTooltip}
         onMouseLeave={hideTooltip}
+        onClick={handleClick}
+        title={copied ? '已插入到对话框' : '点击插入到对话框'}
         className={[
           'inline-flex items-center gap-1 px-2 py-0.5 rounded-full',
-          'text-[11px] font-semibold border cursor-default select-none',
-          'mx-0.5 align-middle transition-colors duration-150',
-          inOrangeBubble
-            ? 'bg-white/20 text-white border-white/30 hover:bg-white/30'
-            : getChipColorClass(ext),
+          'text-[11px] font-semibold border select-none',
+          'mx-0.5 align-middle transition-all duration-150 cursor-pointer',
+          copied
+            ? 'bg-green-100 text-green-700 border-green-200 scale-95'
+            : inOrangeBubble
+              ? 'bg-white/20 text-white border-white/30 hover:bg-white/30 hover:scale-105'
+              : getChipColorClass(ext) + ' hover:scale-105',
         ].join(' ')}
       >
-        <span className="text-[10px] leading-none">{getFileIcon(ext)}</span>
+        {copied ? (
+          <svg className="w-2.5 h-2.5 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M5 13l4 4L19 7" />
+          </svg>
+        ) : (
+          <span className="text-[10px] leading-none">{getFileIcon(ext)}</span>
+        )}
         <span className="max-w-[130px] truncate">{label}</span>
       </span>
 
-      {hovered && typeof document !== 'undefined' && (
+      {hovered && !copied && typeof document !== 'undefined' && (
         <FileTooltip
           name={label}
           ext={ext}
@@ -422,9 +452,13 @@ export interface RichInputProps {
 }
 
 export function RichInput({ disabled, placeholder, onSend, onPaste, insertTextRef, sendRef, insertMentionRef, onImageUploadStatus }: RichInputProps) {
-  const { activeWorkspaceId } = useWorkspaceStore()
+  const { activeWorkspaceId, activeProjectId, activeProject } = useWorkspaceStore()
+  // 兜底推断：activeProjectId 为 null 时从 activeProject() 获取，防止文件落到 ws 根目录
+  const resolvedProjectId = activeProjectId ?? activeProject()?.id ?? ''
   const wsFilesRef = useRef<WorkspaceFile[]>([])
   const [imgUploading, setImgUploading] = useState(false)
+  const [isDragOver, setIsDragOver] = useState(false)
+  const [dragUploadingCount, setDragUploadingCount] = useState(0)
 
   // ⚠️ editorRef 必须在 useEditor 之前声明，handleImagePaste / handleKeyDown 都依赖它
   const editorRef = useRef<Editor | null>(null)
@@ -434,6 +468,71 @@ export function RichInput({ disabled, placeholder, onSend, onPaste, insertTextRe
   useEffect(() => { onSendRef.current = onSend }, [onSend])
   const disabledRef = useRef(disabled)
   useEffect(() => { disabledRef.current = disabled }, [disabled])
+
+  // ─── 拖拽文件上传 ────────────────────────────────────────────────────────────
+
+  const handleDragOver = useCallback((e: DragEvent<HTMLDivElement>) => {
+    e.preventDefault()
+    e.stopPropagation()
+    // 只响应文件拖拽，忽略文本/链接拖拽
+    if (Array.from(e.dataTransfer.types).includes('Files')) {
+      setIsDragOver(true)
+    }
+  }, [])
+
+  const handleDragLeave = useCallback((e: DragEvent<HTMLDivElement>) => {
+    e.preventDefault()
+    e.stopPropagation()
+    // 只有离开最外层容器时才取消高亮（避免子元素触发 leave）
+    if (!e.currentTarget.contains(e.relatedTarget as Node)) {
+      setIsDragOver(false)
+    }
+  }, [])
+
+  const handleDrop = useCallback(async (e: DragEvent<HTMLDivElement>) => {
+    e.preventDefault()
+    e.stopPropagation()
+    setIsDragOver(false)
+
+    const files = Array.from(e.dataTransfer.files)
+    if (!files.length || !activeWorkspaceId) return
+
+    setDragUploadingCount(files.length)
+
+    // 并发上传所有文件
+    await Promise.allSettled(
+      files.map(async (file: File) => {
+        try {
+          // 预检测 .txt 是否为 Sky 谱（JSON 数组格式），决定路由目录
+          // 必须在 uploadFileToWorkspace 之前检测，保证路径一致
+          const skyTxt = file.name.toLowerCase().endsWith('.txt')
+            ? await isSkyTxtFile(file)
+            : false
+          const uploadedPath = resolveUploadPath(file, skyTxt)
+
+          await uploadFileToWorkspace(activeWorkspaceId, file, undefined, resolvedProjectId)
+          // 刷新文件列表缓存
+          const updatedFiles = await listWorkspaceFiles(activeWorkspaceId, resolvedProjectId)
+          wsFilesRef.current = updatedFiles
+          // 找到刚上传的文件获取真实 size
+          const uploaded = updatedFiles.find(f => f.path === uploadedPath)
+          // 插入 mention 胶囊
+          if (editorRef.current) {
+            editorRef.current.chain().focus().insertContent({
+              type: 'mention',
+              attrs: { id: uploadedPath, label: file.name, size: uploaded?.size ?? file.size },
+            }).insertContent(' ').run()
+          }
+          // 触发侧边栏文件树刷新
+          window.dispatchEvent(new CustomEvent('ep:workspace-refresh'))
+        } catch (err) {
+          console.error('[拖拽上传失败]', file.name, err)
+        }
+      })
+    )
+
+    setDragUploadingCount(0)
+  }, [activeWorkspaceId, resolvedProjectId])
 
   // ─── 图片粘贴上传 ────────────────────────────────────────────────────────────
   // 将图片 File 上传到工作区 shared/images/ 目录，成功后自动插入 @文件名 mention
@@ -455,10 +554,10 @@ export function RichInput({ disabled, placeholder, onSend, onPaste, insertTextRe
     try {
       // 使用 FileReader 方式上传（修复大文件 btoa spread 栈溢出）
       const b64 = await fileToBase64(file)
-      await writeWorkspaceFile(activeWorkspaceId, destPath, b64, 'base64')
+      await writeWorkspaceFile(activeWorkspaceId, destPath, b64, 'base64', resolvedProjectId)
 
       // 刷新文件列表缓存
-      const files = await listWorkspaceFiles(activeWorkspaceId)
+      const files = await listWorkspaceFiles(activeWorkspaceId, resolvedProjectId)
       wsFilesRef.current = files
       const uploaded = files.find(f => f.path === destPath)
 
@@ -467,6 +566,8 @@ export function RichInput({ disabled, placeholder, onSend, onPaste, insertTextRe
         type: 'mention',
         attrs: { id: destPath, label: fileName, size: uploaded?.size ?? file.size },
       }).insertContent(' ').run()
+      // 触发侧边栏文件树刷新
+      window.dispatchEvent(new CustomEvent('ep:workspace-refresh'))
       onImageUploadStatus?.('done', fileName)
     } catch (err) {
       console.error('[图片上传失败]', err)
@@ -474,7 +575,7 @@ export function RichInput({ disabled, placeholder, onSend, onPaste, insertTextRe
     } finally {
       setImgUploading(false)
     }
-  }, [activeWorkspaceId, onImageUploadStatus])
+  }, [activeWorkspaceId, resolvedProjectId, onImageUploadStatus])
 
   const doSend = useCallback((editorInstance: Editor) => {
     if (disabledRef.current) return
@@ -488,6 +589,9 @@ export function RichInput({ disabled, placeholder, onSend, onPaste, insertTextRe
   }, [])
 
   const editor = useEditor({
+    // Next.js SSR 环境下必须设为 false，避免 hydration mismatch 警告
+    // Tiptap 编辑器只在客户端渲染，服务端无需立即渲染
+    immediatelyRender: false,
     extensions: [
       StarterKit.configure({ heading: false, blockquote: false, code: false, codeBlock: false }),
       buildMentionExtension(() => wsFilesRef.current),
@@ -540,13 +644,13 @@ export function RichInput({ disabled, placeholder, onSend, onPaste, insertTextRe
   useEffect(() => {
     if (!activeWorkspaceId) return
     let cancelled = false
-    listWorkspaceFiles(activeWorkspaceId)
+    listWorkspaceFiles(activeWorkspaceId, resolvedProjectId)
       .then(files => { if (!cancelled) wsFilesRef.current = files })
       .catch(() => {})
     return () => { cancelled = true }
-  }, [activeWorkspaceId])
+  }, [activeWorkspaceId, resolvedProjectId])
 
-  // 监听全局文件引用事件
+  // 监听全局文件引用事件（文件树侧边栏 @ 引用按钮）
   useEffect(() => {
     const handler = (e: Event) => {
       const file = (e as CustomEvent).detail as WorkspaceFile & { workspaceId: string }
@@ -558,6 +662,20 @@ export function RichInput({ disabled, placeholder, onSend, onPaste, insertTextRe
     }
     window.addEventListener(FILE_REF_EVENT, handler)
     return () => window.removeEventListener(FILE_REF_EVENT, handler)
+  }, [])
+
+  // 监听消息气泡中 FileChip 点击事件（将文件引用插入编辑器）
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const { path, label, size } = (e as CustomEvent).detail as { path: string; label: string; size: number }
+      if (!editorRef.current) return
+      editorRef.current.chain().focus().insertContent({
+        type: 'mention',
+        attrs: { id: path, label, size },
+      }).insertContent(' ').run()
+    }
+    window.addEventListener(FILE_INSERT_EVENT, handler)
+    return () => window.removeEventListener(FILE_INSERT_EVENT, handler)
   }, [])
 
   // 暴露 insertText 给外部（快捷回复按钮）
@@ -589,31 +707,63 @@ export function RichInput({ disabled, placeholder, onSend, onPaste, insertTextRe
     }
   }, [insertMentionRef])
 
-  // 用 tiptap 原生 isEmpty 判断（比自解析文本更准确，mention 节点也算有内容）
-  const isEmpty = !editor || editor.isEmpty
+  // 用 React state 跟踪 isEmpty，监听 editor transaction 保证响应式更新
+  const [isEmpty, setIsEmpty] = useState(true)
+  useEffect(() => {
+    if (!editor) return
+    // 初始化时同步一次
+    setIsEmpty(editor.isEmpty)
+    // 监听每次内容变化
+    const update = () => setIsEmpty(editor.isEmpty)
+    editor.on('update', update)
+    editor.on('transaction', update)
+    return () => {
+      editor.off('update', update)
+      editor.off('transaction', update)
+    }
+  }, [editor])
 
   return (
-    <div className="flex items-end gap-2">
-      <button
-        type="button"
-        className="shrink-0 w-6 h-6 flex items-center justify-center text-gray-300 hover:text-orange-400 transition-colors"
-        title="粘贴文件或输入 @ 引用工作区文件"
-        onClick={() => editorRef.current?.chain().focus().run()}
-      >
-        <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5}
-            d="M15.172 7l-6.586 6.586a2 2 0 102.828 2.828l6.414-6.586a4 4 0 00-5.656-5.656l-6.415 6.585a6 6 0 108.486 8.486L20.5 13" />
-        </svg>
-      </button>
+    <div
+      className={[
+        'flex-1 relative transition-all duration-150',
+        isDragOver ? 'rounded-xl ring-2 ring-orange-400 ring-offset-1' : '',
+      ].join(' ')}
+      onDragOver={handleDragOver}
+      onDragLeave={handleDragLeave}
+      onDrop={handleDrop}
+    >
+      {/* 拖拽高亮遮罩 */}
+      {isDragOver && (
+        <div className="absolute inset-0 z-20 rounded-xl bg-orange-50/90 border-2 border-dashed border-orange-400 flex flex-col items-center justify-center pointer-events-none select-none">
+          <svg className="w-7 h-7 text-orange-400 mb-1.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.8}
+              d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12" />
+          </svg>
+          <span className="text-sm font-semibold text-orange-500">释放以上传文件</span>
+          <span className="text-xs text-orange-400 mt-0.5">支持图片、音频、MIDI、文本等格式</span>
+        </div>
+      )}
 
-      <div className="flex-1 relative">
-        {isEmpty && (
-          <p className="absolute top-0 left-0 text-sm text-gray-300 pointer-events-none select-none leading-relaxed">
-            {placeholder ?? '发消息，@ 引用工作区文件...'}
-          </p>
-        )}
-        <EditorContent editor={editor} />
-      </div>
+      {/* 上传中提示 */}
+      {dragUploadingCount > 0 && !isDragOver && (
+        <div className="absolute inset-0 z-20 rounded-xl bg-white/80 flex items-center justify-center pointer-events-none select-none">
+          <div className="flex items-center gap-2 text-sm text-orange-500 font-medium">
+            <svg className="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24">
+              <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+              <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+            </svg>
+            正在上传 {dragUploadingCount} 个文件...
+          </div>
+        </div>
+      )}
+
+      {isEmpty && !isDragOver && (
+        <p className="absolute top-0 left-0 text-sm text-gray-300 pointer-events-none select-none leading-relaxed z-10">
+          {placeholder ?? '发消息，@ 引用工作区文件...'}
+        </p>
+      )}
+      <EditorContent editor={editor} />
     </div>
   )
 }

@@ -16,7 +16,7 @@ import {
 } from 'react'
 import { useRouter } from 'next/navigation'
 import { useWorkspaceStore } from '@/features/workspace/store/workspace.store'
-import type { WorkspaceDto, SessionInfoDto } from '@/features/workspace/store/workspace.store'
+import type { WorkspaceDto, ProjectDto, SessionInfoDto } from '@/features/workspace/store/workspace.store'
 import { ConfirmDialog } from '@/shared/components/ConfirmDialog'
 
 // ─── 图标 ──────────────────────────────────────────────────────────────────────
@@ -159,14 +159,156 @@ function SessionItem({
   )
 }
 
+// ─── 项目区块（折叠/展开，含 sessions 列表）────────────────────────────────────
+function ProjectSection({
+  project, activeSessionId, activeProjectId,
+  onSelectSession, onDeleteSession, onRenameSession,
+  onSelectProject, onRenameProject, onDeleteProject,
+}: {
+  project: ProjectDto
+  activeSessionId?: string | null
+  activeProjectId?: string | null
+  onSelectSession: (sessionId: string) => void
+  onDeleteSession: (sessionId: string) => void
+  onRenameSession: (sessionId: string, title: string) => void
+  onSelectProject: (projId: string) => void
+  onRenameProject: (projId: string, name: string) => void
+  onDeleteProject: (projId: string) => void
+}) {
+  const isActive = activeProjectId === project.id
+  const [expanded, setExpanded] = useState(isActive)
+  const [editing, setEditing] = useState(false)
+  const [editName, setEditName] = useState(project.name)
+  const [showConfirm, setShowConfirm] = useState(false)
+  const inputRef = useRef<HTMLInputElement>(null)
+
+  useEffect(() => { if (editing) inputRef.current?.focus() }, [editing])
+
+  const submitRename = useCallback(() => {
+    const n = editName.trim()
+    if (n && n !== project.name) onRenameProject(project.id, n)
+    setEditing(false)
+  }, [editName, project.id, project.name, onRenameProject])
+
+  const sessions = project.sessions ?? []
+
+  return (
+    <div className="mb-1">
+      {/* 项目标题行 */}
+      <div
+        className={[
+          'group flex items-center gap-1.5 px-2 py-1.5 rounded-lg cursor-pointer transition-all',
+          isActive ? 'bg-orange-50' : 'hover:bg-gray-50',
+        ].join(' ')}
+        onClick={() => { setExpanded((v) => !v); onSelectProject(project.id) }}
+      >
+        {/* 折叠箭头 */}
+        <svg
+          className={['w-3 h-3 shrink-0 text-gray-300 transition-transform', expanded ? 'rotate-90' : ''].join(' ')}
+          fill="none" viewBox="0 0 24 24" stroke="currentColor"
+        >
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+        </svg>
+        {/* 文件夹图标 */}
+        <svg className="w-3.5 h-3.5 shrink-0 text-orange-300" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.8}
+            d="M3 7a2 2 0 012-2h4l2 2h8a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2V7z" />
+        </svg>
+        {/* 项目名称 */}
+        {editing ? (
+          <input
+            ref={inputRef}
+            value={editName}
+            onChange={(e) => setEditName(e.target.value)}
+            onBlur={submitRename}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') submitRename()
+              if (e.key === 'Escape') { setEditName(project.name); setEditing(false) }
+              e.stopPropagation()
+            }}
+            onClick={(e) => e.stopPropagation()}
+            className="flex-1 text-[11px] bg-white border border-orange-300 rounded px-1 py-0.5 outline-none text-gray-700 min-w-0"
+          />
+        ) : (
+          <span
+            onDoubleClick={(e) => { e.stopPropagation(); setEditing(true); setEditName(project.name) }}
+            className={['flex-1 text-[11px] font-medium truncate min-w-0', isActive ? 'text-orange-700' : 'text-gray-600'].join(' ')}
+          >
+            {project.name}
+          </span>
+        )}
+        {/* 操作按钮（hover 显示）*/}
+        {!editing && (
+          <div className="flex items-center gap-0.5 shrink-0 opacity-0 group-hover:opacity-100 transition-opacity">
+            <button
+              onClick={(e) => { e.stopPropagation(); setEditing(true); setEditName(project.name) }}
+              className="w-4 h-4 flex items-center justify-center rounded hover:bg-orange-100 text-gray-300 hover:text-orange-400"
+              title="重命名项目"
+            >
+              <Icon path={ICONS.pencil} className="w-2.5 h-2.5" />
+            </button>
+            <button
+              onClick={(e) => { e.stopPropagation(); setShowConfirm(true) }}
+              className="w-4 h-4 flex items-center justify-center rounded hover:bg-red-50 text-gray-300 hover:text-red-400"
+              title="删除项目"
+            >
+              <Icon path={ICONS.trash} className="w-2.5 h-2.5" />
+            </button>
+          </div>
+        )}
+      </div>
+
+      {/* sessions 列表（折叠时隐藏）*/}
+      {expanded && (
+        <div className="ml-4 border-l border-gray-100 pl-1 mt-0.5">
+          {sessions.length === 0 ? (
+            <p className="text-[10px] text-gray-300 px-2 py-1">暂无对话</p>
+          ) : (
+            sessions.map((sess) => (
+              <SessionItem
+                key={sess.id}
+                session={sess}
+                isActive={activeSessionId === sess.id}
+                onSelect={onSelectSession}
+                onDelete={onDeleteSession}
+                onRename={onRenameSession}
+              />
+            ))
+          )}
+        </div>
+      )}
+
+      {/* 删除项目确认 */}
+      {showConfirm && (
+        <ConfirmDialog
+          title="删除项目"
+          description={
+            <>
+              确定删除项目
+              <span className="font-medium text-gray-700">「{project.name}」</span>
+              吗？其下所有对话将一并删除且不可恢复。
+            </>
+          }
+          confirmText="删除"
+          variant="danger"
+          onConfirm={() => { setShowConfirm(false); onDeleteProject(project.id) }}
+          onCancel={() => setShowConfirm(false)}
+        />
+      )}
+    </div>
+  )
+}
+
 // ─── 悬浮面板（工作区详情）────────────────────────────────────────────────────
 function WorkspacePanel({
-  workspace, activeSessionId,
+  workspace, activeSessionId, activeProjectId,
   onSelectSession, onDeleteSession, onCreateSession,
   onRename, onDelete, onClose, onRenameSession,
+  onCreateProject, onSelectProject, onRenameProject, onDeleteProject,
 }: {
   workspace: WorkspaceDto
   activeSessionId?: string | null
+  activeProjectId?: string | null
   onSelectSession: (sessionId: string, wsId: string) => void
   onDeleteSession: (sessionId: string) => void
   onCreateSession: (wsId: string) => void
@@ -174,6 +316,10 @@ function WorkspacePanel({
   onDelete: (wsId: string) => void
   onClose: () => void
   onRenameSession: (sessionId: string, title: string) => void
+  onCreateProject: (wsId: string) => void
+  onSelectProject: (projId: string) => void
+  onRenameProject: (projId: string, name: string) => void
+  onDeleteProject: (projId: string) => void
 }) {
   const [editing, setEditing]         = useState(false)
   const [editName, setEditName]       = useState(workspace.name)
@@ -281,34 +427,64 @@ function WorkspacePanel({
         </div>
       </div>
 
-      {/* 对话列表 */}
+      {/* 内容区：优先显示项目层级，无项目时显示扁平 sessions */}
       <div className="flex-1 overflow-y-auto p-1.5">
-        {sessions.length === 0 ? (
-          <div className="py-6 text-center">
-            <p className="text-[10px] text-gray-300">暂无对话</p>
-          </div>
+        {(workspace.projects ?? []).length > 0 ? (
+          // 三层结构：显示项目列表（含嵌套 sessions）
+          <>
+            {(workspace.projects ?? []).map((proj) => (
+              <ProjectSection
+                key={proj.id}
+                project={proj}
+                activeSessionId={activeSessionId}
+                activeProjectId={activeProjectId}
+                onSelectSession={(id) => { onSelectSession(id, workspace.id); onClose() }}
+                onDeleteSession={onDeleteSession}
+                onRenameSession={onRenameSession}
+                onSelectProject={onSelectProject}
+                onRenameProject={onRenameProject}
+                onDeleteProject={onDeleteProject}
+              />
+            ))}
+          </>
         ) : (
-          sessions.map((sess) => (
-            <SessionItem
-              key={sess.id}
-              session={sess}
-              isActive={activeSessionId === sess.id}
-              onSelect={(id) => { onSelectSession(id, workspace.id); onClose() }}
-              onDelete={onDeleteSession}
-              onRename={onRenameSession}
-            />
-          ))
+          // 向后兼容：无项目时显示扁平 sessions
+          (workspace.sessions ?? []).length === 0 ? (
+            <div className="py-6 text-center">
+              <p className="text-[10px] text-gray-300">暂无对话</p>
+            </div>
+          ) : (
+            (workspace.sessions ?? []).map((sess) => (
+              <SessionItem
+                key={sess.id}
+                session={sess}
+                isActive={activeSessionId === sess.id}
+                onSelect={(id) => { onSelectSession(id, workspace.id); onClose() }}
+                onDelete={onDeleteSession}
+                onRename={onRenameSession}
+              />
+            ))
+          )
         )}
       </div>
 
-      {/* 新建对话 */}
-      <div className="border-t border-gray-100 p-1.5 shrink-0">
+      {/* 底部操作栏 */}
+      <div className="border-t border-gray-100 p-1.5 shrink-0 flex flex-col gap-0.5">
+        {/* 新建对话 */}
         <button
           onClick={() => { onCreateSession(workspace.id); onClose() }}
-          className="w-full flex items-center gap-2 px-3 py-2 rounded-lg hover:bg-orange-50 text-orange-400 hover:text-orange-500 transition-colors"
+          className="w-full flex items-center gap-2 px-3 py-1.5 rounded-lg hover:bg-orange-50 text-orange-400 hover:text-orange-500 transition-colors"
+        >
+          <Icon path={ICONS.chat} className="w-3.5 h-3.5 shrink-0" />
+          <span className="text-[11px] font-medium">新建对话</span>
+        </button>
+        {/* 新建项目 */}
+        <button
+          onClick={() => { onCreateProject(workspace.id) }}
+          className="w-full flex items-center gap-2 px-3 py-1.5 rounded-lg hover:bg-gray-50 text-gray-400 hover:text-gray-600 transition-colors"
         >
           <Icon path={ICONS.plus} className="w-3.5 h-3.5 shrink-0" />
-          <span className="text-[11px] font-medium">新建对话</span>
+          <span className="text-[11px] font-medium">新建项目</span>
         </button>
       </div>
       {/* 删除工作区确认弹窗 */}
@@ -385,6 +561,7 @@ export function WorkspaceSidebar() {
   const {
     workspaces,
     activeWorkspaceId,
+    activeProjectId,
     activeSessionId,
     loading,
     error,
@@ -392,15 +569,19 @@ export function WorkspaceSidebar() {
     createWorkspace,
     renameWorkspace,
     deleteWorkspace,
+    createProject,
+    renameProject,
+    deleteProject,
     createSession,
     renameSession,
     deleteSession,
     setActiveWorkspaceId,
+    setActiveProjectId,
     setActiveSessionId,
     clearError,
   } = useWorkspaceStore()
 
-  // 注意：_pendingNavigateSessionId 的跳转监听由 /pro/[sessionId]/page.tsx 统一处理，
+  // 注意：_pendingNavigateSessionId 的跳转监听由 /pro/[projId]/[sessionId]/page.tsx 统一处理，
   // 此处不重复监听，避免 clearPendingNavigate() 被调用两次导致跳转丢失。
 
   const [openWsId, setOpenWsId]   = useState<string | null>(null)
@@ -426,15 +607,44 @@ export function WorkspaceSidebar() {
   const handleSelectSession = useCallback((sessionId: string, wsId: string) => {
     setActiveWorkspaceId(wsId)
     setActiveSessionId(sessionId)
-    router.push(`/pro/${sessionId}`)
+    // 找到 session 所属的 projId
+    const ws = useWorkspaceStore.getState().workspaces.find((w) => w.id === wsId)
+    const selProjId = ws?.projects?.find((p) => p.sessions?.some((s) => s.id === sessionId))?.id ?? ''
+    router.push(`/pro/${selProjId}/${sessionId}`)
   }, [router, setActiveWorkspaceId, setActiveSessionId])
 
-  // 新建对话（同时激活对应工作区）
+  // 新建项目
+  const handleCreateProject = useCallback(async (wsId: string) => {
+    try {
+      const proj = await createProject(wsId, '新项目')
+      setActiveProjectId(proj.id)
+    } catch { /* error 已在 store 中设置 */ }
+  }, [createProject, setActiveProjectId])
+
+  // 重命名项目
+  const handleRenameProject = useCallback(async (projId: string, name: string) => {
+    try { await renameProject(projId, name) } catch { /* error 已在 store 中设置 */ }
+  }, [renameProject])
+
+  // 删除项目
+  const handleDeleteProject = useCallback(async (projId: string) => {
+    try { await deleteProject(projId) } catch { /* error 已在 store 中设置 */ }
+  }, [deleteProject])
+
+  // 选择项目（激活 + 展开）
+  const handleSelectProject = useCallback((projId: string) => {
+    setActiveProjectId(projId)
+  }, [setActiveProjectId])
+
+  // 新建对话（同时激活对应工作区，传入当前项目 ID 避免文件区域错位）
   const handleCreateSession = useCallback(async (wsId: string) => {
     try {
       setActiveWorkspaceId(wsId)   // 先激活工作区，避免跳转后 restoreFromSessionId 找不到
-      const sess = await createSession(wsId, '新对话')
-      router.push(`/pro/${sess.id}`)
+      // 取新工作区的第一个项目（setActiveWorkspaceId 已同步 activeProjectId）
+      const projId = useWorkspaceStore.getState().activeProject()?.id
+      const sess = await createSession(wsId, '新对话', projId)
+      const targetProjId = projId || useWorkspaceStore.getState().activeProject()?.id || sess.project_id || ''
+      router.push(`/pro/${targetProjId}/${sess.id}`)
     } catch { /* error 已在 store 中设置 */ }
   }, [createSession, router, setActiveWorkspaceId])
 
@@ -557,6 +767,7 @@ export function WorkspaceSidebar() {
         <WorkspacePanel
           workspace={openWorkspace}
           activeSessionId={activeSessionId}
+          activeProjectId={activeProjectId}
           onSelectSession={handleSelectSession}
           onDeleteSession={handleDeleteSession}
           onCreateSession={handleCreateSession}
@@ -564,6 +775,10 @@ export function WorkspaceSidebar() {
           onDelete={(wsId) => { void handleDeleteWorkspace(wsId) }}
           onClose={() => setOpenWsId(null)}
           onRenameSession={handleRenameSession}
+          onCreateProject={handleCreateProject}
+          onSelectProject={handleSelectProject}
+          onRenameProject={handleRenameProject}
+          onDeleteProject={(projId) => { void handleDeleteProject(projId) }}
         />
       )}
     </div>

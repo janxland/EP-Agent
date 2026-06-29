@@ -7,12 +7,15 @@ H5Agent — H5 乐谱海报 SubAgent
   - 统一管理 h5_create / h5_edit 域 TODO 状态
   - 异常路径 finish_all(failed) + assert_finish_gate
 
-工作流：
+工作流（新架构 v2.0 — 大模型直接读写 HTML）：
   1. 判断附件格式（MIDI / ABC / Sky JSON / 无附件）
-  2. 调用对应解析工具（parse_abc_to_json / parse_sky_json_to_json；MIDI 直接走 generate_h5_from_midi）
-  3. 调用 generate_h5_poster 或 generate_h5_from_abc 生成 HTML
-  4. 调用 save_h5_file 持久化，返回访问路径
-  5. 推送 h5.ready 事件，前端可直接预览/下载
+  2. MIDI → generate_h5_from_midi（二进制专属）
+  3. ABC / Sky JSON / 纯描述 →
+       list_h5_templates() 选模板
+       → get_h5_template(name) 读取 HTML 源码
+       → 直接修改 HTML 字符串（替换占位符 / 嵌视频 / 改样式）
+       → save_h5_output(html=..., filename=..., template=...) 保存
+  4. 推送 h5.ready 事件，前端可直接预览/下载
 """
 from __future__ import annotations
 
@@ -20,80 +23,116 @@ import json
 from typing import Callable, Awaitable
 
 from app.agentcore.todo_manager import TodoManager, assert_finish_gate
+from app.agentcore.agent_registry import register
+
+if False:  # TYPE_CHECKING
+    from app.agentcore.run_context import RunContext
 from app.agentcore.react_executor import stream_text, ReactExecutor
 from app.agentcore.tools import get_tool_schemas
 
 Publisher = Callable[[str, dict], Awaitable[None]]
 
-# H5 Agent 使用的工具组
-_H5_TOOL_GROUPS = ["h5", "workspace"]
+# H5 Agent 使用的工具组（只用 h5 组，workspace 组仅保留 list_workspace_files）
+_H5_TOOL_GROUPS = ["h5"]
 
-# ReactExecutor 系统提示（v4.0 — 文件路径驱动，CDN 库处理 MIDI，LLM 不碰二进制）
+# ReactExecutor 系统提示（v5.0 — 大模型直接读写 HTML，像 Claude Code 一样操作文件）
 _H5_SYSTEM_PROMPT = """你是 EP-Agent 的 H5 乐谱海报设计专家，将乐谱转化为精美的移动端 H5 分享页面。
 
-## ⚡ 核心原则：文件路径驱动，CDN 库处理音频
+## ⚡ 核心原则：大模型直接读写 HTML
+
+你像 Claude Code 一样操作文件：
+- **读模板 HTML** → **在内存里精准替换** → **写回保存**
+- 不依赖任何"注入工具"，你就是那个改代码的人
+- 可以修改任意内容：占位符替换、嵌视频 iframe、改 CSS、加歌词段落
 
 **你永远不需要处理 base64 或二进制数据。**
-MIDI 文件由工具直接从工作区读取，H5 模板内置 CDN 播放库（MidiPlayerJS + Soundfont），
-浏览器端自动加载播放，你只需传文件路径。
+MIDI 文件由 generate_h5_from_midi 工具处理，其余全部通过 get_h5_template 读取 HTML 后直接修改。
 
 ---
 
 ## 工作流程（按文件类型）
 
-### MIDI 文件（.mid/.midi）→ 3 步完成
+### MIDI 文件（.mid/.midi）→ 最多 3 步
 ```
-list_h5_templates()
-↓ 选模板
-generate_h5_from_midi(midi_workspace_path=<工作区路径>, workspace_id=<id>, title=<标题>, template=<模板名>)
-↓ 得到 html + midi_url
-save_h5_file(html=<html>, filename=<安全文件名>)
-↓
-finish_task(summary="H5 海报已生成：{title}，模板：{template}，访问路径：{url_path}")
-```
-
-### ABC / 文本文件 → 3 步完成
-```
-list_h5_templates()
-↓
-generate_h5_from_abc(abc=<内容>, template=<模板名>, ...)
-↓
-save_h5_file(...) → finish_task(...)
+list_h5_templates()          → 选模板 name
+generate_h5_from_midi(
+  midi_workspace_path=<路径>,
+  title=<标题>,
+  template=<模板名>,
+  video_url=<视频链接（可选）>,
+)                            → 返回 html（已渲染）+ workspace_path
+# 若无需追加修改 → 直接 finish_task（工具已自动保存）
+# 若需追加修改（嵌视频/加歌词）→ 直接编辑 html 字符串 → save_h5_output
 ```
 
-### Sky JSON 文件 → 4 步
+### ABC / Sky JSON / 纯描述 → 最多 4 步
 ```
-list_h5_templates()
-↓
-parse_sky_json_to_json(sky_json_str=<json文本>)
-↓
-generate_h5_poster(title=<标题>, notes_json=<JSON字符串>, template=<模板名>)
-↓
-save_h5_file(...) → finish_task(...)
+list_h5_templates()          → 根据 intent_keys 选模板 name
+get_h5_template(name)        → 取 html 字段（完整 HTML 源码）
+# 直接在 html 字符串中替换（精准按行修改）：
+#   luoxiaohei v7：只改底部 ep-config JSON 块（约 15 行）
+#   其他模板：逐一替换 {{VAR}} 散点占位符
+save_h5_output(
+  html=<修改后完整HTML>,
+  filename=<曲名>,
+  template=<模板名>,          ← 必填，自动复制 style.css/player.js/assets/
+)
+finish_task(summary=<含 url_path 的摘要>)
 ```
 
 ### 需要查找工作区文件时
 ```
-list_workspace_files(workspace_id=<id>)
-↓ 找到文件路径后按对应流程
+list_workspace_files()       → 找到 MIDI / ABC / JSON 文件路径
 ```
 
 ---
 
-## 模板选择（调用 list_h5_templates 后决定）
-- 用户明确指定 → 直接使用
-- 用户说"苹果风格"/"简洁"/"白色" → apple
-- 用户未指定 → 默认 apple
+## luoxiaohei v7 模板：ep-config JSON 结构
 
----
+模板底部有唯一配置块，**只替换这一个 JSON 块**，player.js 自动读取并填充整个页面：
+```json
+{
+  "TITLE":         "曲名",
+  "COMPOSER":      "作曲者",
+  "BPM":           "120",
+  "KEY":           "C 大调",
+  "FORMAT_LABEL":  "ABC Notation",
+  "MIDI_URL":      "./曲名.mid",
+  "ABC_CONTENT":   "X:1\\nT:...",
+  "NIGHT_MOOD":    "深夜 · 月光 · 轻柔",
+  "CAT_EMOJI":     "🐱",
+  "VIDEO_URL":     "https://b23.tv/xxx",
+  "VIDEO_TITLE":   "视频标题",
+  "VIDEO_PLATFORM":"哔哩哔哩",
+  "EXTRA_HTML":    "<p>歌词</p>",
+  "NOTES_JSON":    []
+}
+```
 
-## 关键约束
-- **禁止**读取或传递任何 base64 / 二进制内容给 LLM，只传文件路径
-- finish_task 的 summary 必须包含访问路径（从 save_h5_file 返回的 url_path）
-- notes_json 参数必须是 JSON 字符串
+## 视频嵌入（两种方式任选）
+
+**方式 A（推荐）**：填 VIDEO_URL，player.js 自动转 embed：
+- `https://www.bilibili.com/video/BVxxxxxx` → 自动转 bilibili embed
+- `https://youtu.be/xxxxxx` → 自动转 YouTube embed
+
+**方式 B（完全自由）**：直接在 HTML 中找 `<div id="videoWrap">` 插入 iframe：
+```html
+<iframe src="https://player.bilibili.com/player.html?bvid=BVxxxxxx&danmaku=0"
+  width="100%" height="240" frameborder="0" allowfullscreen
+  style="border-radius:12px;display:block"></iframe>
+```
+
+## 修改原则（节省 token）
+
+- **只改需要改的行**，不重写整个文件
+- luoxiaohei v7：只替换 ep-config JSON 块内的值，其余 HTML 原样保留
+- 空值留空字符串 `""`，player.js 会自动隐藏对应区块
+- ABC 内容换行用 `\\n` 转义（JSON 字符串内）
+- finish_task 的 summary 必须包含访问路径（从 save_h5_output 返回的 url_path）
 """
 
 
+@register("h5_create", "h5_edit")
 class H5Agent:
     """H5 乐谱海报 SubAgent，通过 ReactExecutor 执行工具链。"""
 
@@ -118,17 +157,14 @@ class H5Agent:
             "tool":      "h5_generator",
             "status":    "running",
             "arguments": {
-                "message":      message[:80],
+                "message":        message[:80],
                 "has_attachment": bool(attachment_workspace_path),
-                "attachment":   attachment_name or "",
+                "attachment":     attachment_name or "",
             },
         })
 
-        # ── 重要记忆感知：若前端未传附件路径，从 Session 记忆中主动发现最新文件 ──
-        # 这是 Agent 智能的核心：同一话题里刚上传/生成的文件路径已记录在 Session.extra，
-        # 无需用户再次指定，Agent 直接从记忆中枢读取。
-        # 查找优先级：midi → abc → json（MIDI 可直接生成 H5；ABC/JSON 需额外解析步骤）
-        if not attachment_workspace_path and workspace_id:
+        # ── 记忆感知：若前端未传附件路径，从 Session 记忆中主动发现最新文件 ──
+        if not attachment_workspace_path:
             try:
                 from app.agentcore.session_context import recall_latest_file
                 import os
@@ -145,11 +181,10 @@ class H5Agent:
 
         # 构建用户消息（附件信息注入）
         user_content = self._build_user_message(
-            message, attachment_workspace_path, attachment_name, workspace_id
+            message, attachment_workspace_path, attachment_name,
         )
 
-        # ── 记忆前缀注入：将 Session 携带体追加到 system prompt ──────────────
-        # 让 Agent 在新对话开始时就携带上轮的重要上下文（文件路径、用户意图等）
+        # ── 记忆前缀注入 ──────────────────────────────────────────────────────
         system_prompt = _H5_SYSTEM_PROMPT
         try:
             from app.agentcore.memory_manager import build_memory_prefix
@@ -159,37 +194,34 @@ class H5Agent:
         except Exception:
             pass
 
-        # 获取 H5 工具 schema（含 list_h5_templates / generate_h5_poster 等）
+        # ── 工具组装：h5 组（6个专属工具）+ workspace 文件操作工具 ───────────
         h5_tools = get_tool_schemas("h5")
-        # 工作区工具：list_workspace_files / read_workspace_file
-        workspace_tools = get_tool_schemas("workspace")
 
-        # 获取 finish_task 工具：遍历所有已注册工具组，健壮获取，不依赖特定组
-        finish_tools: list[dict] = []
-        for _grp in ("abc_edit", "abc_create", "query", "audio"):
-            _candidates = [t for t in get_tool_schemas(_grp) if t["function"]["name"] == "finish_task"]
-            if _candidates:
-                finish_tools = _candidates[:1]
-                break
-        # 兜底：若所有组都没有，从全量工具中查找
-        if not finish_tools:
-            finish_tools = [t for t in get_tool_schemas() if t["function"]["name"] == "finish_task"][:1]
+        # 从 workspace 组取文件操作工具（list + read，H5 Agent 需要读 ABC 文件内容）
+        _ws_needed = {"list_workspace_files", "read_workspace_files"}
+        ws_tools_all = get_tool_schemas("workspace")
+        ws_tools = [t for t in ws_tools_all
+                    if t["function"]["name"] in _ws_needed]
 
-        all_tools = h5_tools + workspace_tools + finish_tools
+        # finish_task 兜底查找
+        finish_tools = [t for t in get_tool_schemas()
+                        if t["function"]["name"] == "finish_task"][:1]
+
+        all_tools = h5_tools + ws_tools + finish_tools
 
         executor = ReactExecutor()
 
         try:
             exec_result = await executor.run(
                 messages=[
-                    {"role": "system", "content": system_prompt},  # 含记忆前缀的版本
+                    {"role": "system", "content": system_prompt},
                     {"role": "user",   "content": user_content},
                 ],
                 tools=all_tools,
                 publish=publish,
                 todo_manager=todo_mgr,
-                max_rounds=12,  # H5 工作流：list_templates→解析→生成→保存→finish，需要更多轮次
-                session_id=session_id,  # 传入 session_id，让 ReactExecutor 落库 tool message
+                max_rounds=8,   # list→get→修改→save→finish 最多 5 步，留 3 步余量
+                session_id=session_id,
             )
         except Exception as e:
             await publish("tool.call", {
@@ -228,10 +260,9 @@ class H5Agent:
             # H5 文件已写入工作区 h5/ 目录，触发文件树刷新
             if extra.get("workspace_path"):
                 await publish("workspace.file_saved", {
-                    "workspace_id": workspace_id,
-                    "path":         extra["workspace_path"],
-                    "type":         "h5",
-                    "title":        extra.get("title", ""),
+                    "path":  extra["workspace_path"],
+                    "type":  "h5",
+                    "title": extra.get("title", ""),
                 })
 
         if ids:
@@ -239,14 +270,11 @@ class H5Agent:
         await todo_mgr.finish_all(publish, "done")
         await assert_finish_gate(todo_mgr, domain, publish)
 
-        # ReactExecutor 流式 Tool Calling 已将 LLM 最终回复实时推送为 message.delta
-        # 此处只推送 completed 事件，不再重复 stream_text，避免消息重复显示
         await publish("message.completed", {"message": summary})
         return {
             "domain":      domain,
             "message":     summary,
             "abc_updated": False,
-            # ReactExecutor 已落库所有 assistant/tool 消息，service.py 无需重复写入
             "_persisted":  True,
             **extra,
         }
@@ -256,67 +284,111 @@ class H5Agent:
         message: str,
         attachment_workspace_path: str,
         attachment_name: str,
-        workspace_id: str = "",
     ) -> str:
         """
         构建用户消息，注入文件路径信息。
-        永远不传 base64，只传工作区路径，LLM 通过路径调用工具。
+        永远不传 base64，只传工作区路径，LLM 通过工具调用处理。
         """
         parts = [message]
 
-        if workspace_id:
-            parts.append(f"\n\n[工作区]\nworkspace_id: {workspace_id}")
-
         if attachment_workspace_path and attachment_name:
             name_lower = attachment_name.lower()
+
             if name_lower.endswith(".mid") or name_lower.endswith(".midi"):
+                # MIDI：直接告知路径，调用 generate_h5_from_midi
                 parts.append(
-                    f"\n\n[MIDI 文件已上传到工作区]\n"
+                    f"\n\n[MIDI 文件]\n"
                     f"workspace_path: {attachment_workspace_path}\n"
-                    f"filename: {attachment_name}\n"
-                    f"请调用：generate_h5_from_midi("
+                    f"⚡ 先调用 list_h5_templates() 选模板，再调用：\n"
+                    f"generate_h5_from_midi("
                     f"midi_workspace_path=\"{attachment_workspace_path}\", "
-                    f"workspace_id=\"{workspace_id}\")"
+                    f"title=<标题>, template=<模板名>)"
                 )
+
             elif name_lower.endswith(".abc") or name_lower.endswith(".txt"):
-                # ABC 文本可以直接读取内容（小文件，安全）
+                # ABC：读取文本内容，注入到消息中
                 try:
-                    from app.agentcore.tools.workspace_tools import _WS_ROOT
-                    ws_path = _WS_ROOT / workspace_id / attachment_workspace_path
-                    abc_text = ws_path.read_text(encoding="utf-8", errors="replace")
-                    parts.append(
-                        f"\n\n[ABC 文件内容]\n```abc\n{abc_text[:3000]}\n```\n"
-                        f"调用：generate_h5_from_abc(abc=<上方内容>)"
+                    from app.agentcore.session_context import get_current_project_root
+                    _root = get_current_project_root()
+                    abc_text = (
+                        (_root / attachment_workspace_path)
+                        .read_text(encoding="utf-8", errors="replace")
+                        if _root else ""
                     )
+                    if abc_text:
+                        parts.append(
+                            f"\n\n[ABC 文件内容]\n```abc\n{abc_text[:4000]}\n```\n"
+                            f"⚡ 先调用 list_h5_templates() 选模板，再调用 get_h5_template(name) 读取 HTML，\n"
+                            f"然后将上方 ABC 内容填入 ep-config JSON 的 ABC_CONTENT 字段，"
+                            f"最后调用 save_h5_output 保存。"
+                        )
+                    else:
+                        raise ValueError("无法读取")
                 except Exception:
                     parts.append(
                         f"\n\n[ABC 文件]\nworkspace_path: {attachment_workspace_path}\n"
-                        f"请调用 read_workspace_file 读取后用 generate_h5_from_abc 生成"
+                        f"⚡ 调用 list_workspace_files() 确认路径，"
+                        f"再调用 list_h5_templates() 选模板，"
+                        f"get_h5_template(name) 读取 HTML，修改后 save_h5_output 保存。"
                     )
+
             elif name_lower.endswith(".json"):
+                # Sky JSON：读取内容，注入到消息中
                 try:
-                    from app.agentcore.tools.workspace_tools import _WS_ROOT
-                    ws_path = _WS_ROOT / workspace_id / attachment_workspace_path
-                    json_text = ws_path.read_text(encoding="utf-8", errors="replace")
-                    parts.append(
-                        f"\n\n[Sky JSON 文件内容]\n```json\n{json_text[:3000]}\n```\n"
-                        f"调用：parse_sky_json_to_json(sky_json_str=<上方内容>)"
+                    from app.agentcore.session_context import get_current_project_root
+                    _root = get_current_project_root()
+                    json_text = (
+                        (_root / attachment_workspace_path)
+                        .read_text(encoding="utf-8", errors="replace")
+                        if _root else ""
                     )
+                    if json_text:
+                        parts.append(
+                            f"\n\n[Sky JSON 文件内容]\n```json\n{json_text[:4000]}\n```\n"
+                            f"⚡ 先调用 parse_sky_json_to_json(sky_json_str=<上方JSON内容>) 提取元数据，\n"
+                            f"再调用 list_h5_templates() 选模板，get_h5_template(name) 读取 HTML，\n"
+                            f"修改后 save_h5_output 保存。"
+                        )
+                    else:
+                        raise ValueError("无法读取")
                 except Exception:
                     parts.append(
                         f"\n\n[JSON 文件]\nworkspace_path: {attachment_workspace_path}\n"
-                        f"请调用 read_workspace_file 读取"
+                        f"⚡ 调用 list_workspace_files() 确认路径后按 Sky JSON 流程处理。"
                     )
             else:
                 parts.append(
                     f"\n\n[文件]\nworkspace_path: {attachment_workspace_path}\n"
                     f"filename: {attachment_name}"
                 )
-        elif workspace_id:
-            # 无指定文件，提示 Agent 主动查找
+
+        else:
+            # 无附件 → 提示从项目目录查找
             parts.append(
-                f"\n提示：请先调用 list_workspace_files(workspace_id=\"{workspace_id}\") "
-                f"查找可用的 MIDI / ABC / JSON 文件，不要直接生成空海报。"
+                "\n\n⚡ 请先调用 list_workspace_files() "
+                "查找项目中的 MIDI（.sky/*.mid）/ ABC（.sky/*.abc）/ JSON 文件，"
+                "找到后按对应格式的工作流处理。\n"
+                "MIDI 文件直接调用 generate_h5_from_midi；"
+                "ABC/JSON 文件调用 list_h5_templates → get_h5_template → 修改 → save_h5_output。"
             )
 
         return "".join(parts)
+
+    async def run_with_ctx(self, ctx: "RunContext") -> dict:
+        """v4.0 解耦接口：从 RunContext 解包参数，调用原 run()。"""
+        todo_mgr = ctx.extra.get("todo_mgr")
+        if todo_mgr is None:
+            from app.agentcore.todo_manager import TodoManager as _TM
+            todo_mgr = _TM()
+            todo_mgr.session_id = ctx.session_id
+        return await self.run(
+            session_id=ctx.session_id,
+            message=ctx.message,
+            attachment_workspace_path=ctx.attachment_workspace_path,
+            attachment_name=ctx.attachment_name,
+            publish=ctx.publish,
+            todo_mgr=todo_mgr,
+            domain=ctx.domain or "h5_create",
+            workspace_id=ctx.workspace_id,
+        )
+

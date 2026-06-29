@@ -11,7 +11,7 @@
  * 5. 流式光标精细化（只在最后一个字符后显示）
  */
 
-import React, { Fragment, memo, useMemo, useState, useEffect, useRef } from 'react'
+import React, { Fragment, memo, useMemo, useState, useEffect, useRef, useCallback } from 'react'
 import type { ReactNode } from 'react'
 
 import type {
@@ -389,12 +389,72 @@ const ReasoningBlock = memo(function ReasoningBlock({
   )
 })
 
+// ─── 复制按钮 ────────────────────────────────────────────────────────────────
+
+function CopyButton({ text, inOrangeBubble = false }: { text: string; inOrangeBubble?: boolean }) {
+  const [copied, setCopied] = useState(false)
+
+  const handleCopy = useCallback(async () => {
+    try {
+      await navigator.clipboard.writeText(text)
+      setCopied(true)
+      setTimeout(() => setCopied(false), 1500)
+    } catch {
+      // 降级：创建临时 textarea
+      const ta = document.createElement('textarea')
+      ta.value = text
+      ta.style.position = 'fixed'
+      ta.style.opacity = '0'
+      document.body.appendChild(ta)
+      ta.select()
+      document.execCommand('copy')
+      document.body.removeChild(ta)
+      setCopied(true)
+      setTimeout(() => setCopied(false), 1500)
+    }
+  }, [text])
+
+  return (
+    <button
+      onClick={handleCopy}
+      title={copied ? '已复制' : '复制消息'}
+      className={[
+        'shrink-0 w-6 h-6 flex items-center justify-center rounded-lg transition-all duration-150',
+        inOrangeBubble
+          ? 'text-orange-200 hover:text-white hover:bg-white/20'
+          : 'text-gray-300 hover:text-gray-500 hover:bg-gray-100',
+        copied ? (inOrangeBubble ? 'text-white bg-white/20' : 'text-green-500 bg-green-50') : '',
+      ].join(' ')}
+    >
+      {copied ? (
+        <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M5 13l4 4L19 7" />
+        </svg>
+      ) : (
+        <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.8}
+            d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
+        </svg>
+      )}
+    </button>
+  )
+}
+
 // ─── 用户气泡 ─────────────────────────────────────────────────────────────────
 
 const UserBubble = memo(function UserBubble({ content }: { content: string }) {
   const hasRef = content.includes('[@') || content.includes('[附件:')
+  const [hovered, setHovered] = useState(false)
   return (
-    <div className="flex justify-end">
+    <div
+      className="flex justify-end items-end gap-1.5 group"
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
+    >
+      {/* 复制按钮（hover 时显示，在气泡左侧） */}
+      <div className={['transition-opacity duration-150', hovered ? 'opacity-100' : 'opacity-0'].join(' ')}>
+        <CopyButton text={content} inOrangeBubble={false} />
+      </div>
       <div className={[
         'max-w-[85%] rounded-2xl rounded-tr-sm px-3.5 py-2.5 text-sm leading-relaxed',
         'shadow-sm bg-gradient-to-br from-orange-500 to-orange-600 text-white shadow-orange-200/60',
@@ -424,9 +484,24 @@ const AssistantBubble = memo(function AssistantBubble({
   const hasContent   = !!m.content?.trim()
   const hasTools     = !!m.tool_calls?.length
   const hasReasoning = !!m.reasoning_content?.trim()
+  const [hovered, setHovered] = useState(false)
+
+  // 构建可复制的纯文本：正文 + 工具调用摘要
+  const copyText = [
+    m.content?.trim() ?? '',
+    ...(m.tool_calls?.map((tc) => {
+      const result = toolResults?.get(tc.id)
+      const preview = result?.content ? ` → ${result.content.slice(0, 80)}` : ''
+      return `[工具: ${tc.function.name}${preview}]`
+    }) ?? []),
+  ].filter(Boolean).join('\n')
 
   return (
-    <div className="flex justify-start gap-2">
+    <div
+      className="flex justify-start gap-2 group"
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
+    >
       {/* 头像 */}
       <div className="shrink-0 w-6 h-6 rounded-full bg-gradient-to-br from-orange-400 to-amber-500 flex items-center justify-center text-white text-xs mt-0.5 shadow-sm shadow-orange-200">
         ✦
@@ -466,6 +541,13 @@ const AssistantBubble = memo(function AssistantBubble({
             />
           )
         })}
+
+        {/* 复制按钮（hover 时显示，在内容下方） */}
+        {!streaming && copyText && (
+          <div className={['flex transition-opacity duration-150', hovered ? 'opacity-100' : 'opacity-0'].join(' ')}>
+            <CopyButton text={copyText} />
+          </div>
+        )}
       </div>
     </div>
   )

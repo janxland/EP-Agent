@@ -561,6 +561,7 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
           // 工具完成：
           //   1. 先 commit streaming（把包含该工具的 assistant 消息落库）
           //   2. 再追加 tool message（通过 tool_call_id O(1) 匹配）
+          //   3. 若是文件操作工具（写/删/重命名/上传），触发文件树刷新
           commitStreamMessage()
 
           const toolMsg: ChatToolMessage = {
@@ -574,6 +575,44 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
             createdAt: new Date().toISOString(),
           }
           addMessage(toolMsg)
+
+          // 文件操作工具成功完成时刷新文件树
+          if (p.status === 'succeeded' && typeof window !== 'undefined') {
+            const FILE_OP_TOOLS = new Set([
+              // 旧工具名（兼容）
+              'write_workspace_file', 'delete_workspace_file',
+              'rename_workspace_file', 'copy_workspace_file',
+              'upload_workspace_file', 'save_abc_score',
+              'save_h5_file', 'create_workspace_dir',
+              // 新工具名（去 ID 化后）
+              'write_file', 'append_file', 'delete_file',
+              'copy_file', 'rename_file', 'move_file',
+              'abc_to_midi', 'generate_h5_from_midi',
+              'generate_h5_from_abc', 'sovits_save_audio',
+              'save_score_to_workspace',
+            ])
+            if (FILE_OP_TOOLS.has(p.tool)) {
+              window.dispatchEvent(new CustomEvent('ep:workspace-refresh'))
+            }
+          }
+        }
+        break
+      }
+
+      // ── pipeline.state（后端 session 运行状态同步）────────────────────────
+      // SSE 连接建立时 replay 推送，或任务完成/失败时推送。
+      // 主要用途：刷新后解除前端 loading（running → idle），防止永久 loading。
+      // chat.store 只处理 idle/completed 的收尾，running 状态由 startRun 管理。
+      case 'pipeline.state': {
+        const p = event.payload as { state?: string; _replay?: boolean }
+        // 仅处理 replay 场景：后端推送 idle/completed 解除 loading
+        // 实时场景（非 replay）由 message.completed / error 驱动，不重复处理
+        if (p._replay) {
+          const s = p.state ?? 'idle'
+          if (s === 'idle' || s === 'completed') {
+            // 若前端仍处于 running（刷新前任务未完成），强制重置为 idle
+            set((cur) => cur.status === 'running' ? { status: 'idle', currentStep: null } : {})
+          }
         }
         break
       }
@@ -642,7 +681,10 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
 
       // ── 工作区文件已保存（谱子写入 .sky/ 后通知前端刷新文件树）────────────
       case 'workspace.file_saved':
-      case 'workspace.scores': {
+      case 'workspace.scores':
+      // ── 工具写入文件后的 SSE 事件（react_executor 推送）─────────────────────
+      // display=false，不显示在聊天气泡中，仅用于触发文件树刷新
+      case 'workspace.files.changed': {
         // 触发文件树刷新（fileTreeRefreshToken 递增，WorkspaceFileTree 监听此值）
         // 使用 window 事件总线避免循环依赖（workspace.store → chat.store 已有依赖链）
         if (typeof window !== 'undefined') {

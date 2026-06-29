@@ -148,55 +148,13 @@ class AudioChatRunner:
             "text": f"意图识别：{domain}（{route_params.get('summary', '')}）",
         })
 
-        # ── Step 2: voice_clone 域预上传（Runner 层消费 audio_b64，不经 LLM）──
+        # ── Step 2: 工具准备（voice_clone 域已迁移到 VoiceCloneAgent/sovits 域）──
+        # v2.0 架构：音色克隆统一由 VoiceCloneAgent 处理（sovits 域），
+        # audio_runner 只负责音乐生成（generate/iterate/cover）。
+        # voice_clone 域在此作为兜底，提示用户走正确入口。
         tools = get_tool_schemas("audio")
         tool_call_records: list[dict] = []
         pre_uploaded_file_id = ""
-
-        if domain == "voice_clone" and audio_b64:
-            intent = route_params.get("voice_clone_intent", "upload_and_clone")
-            if intent == "upload_and_clone":
-                await publish("pipeline.step", {
-                    "step": "voice_upload",
-                    "status": "running",
-                    "text": "正在上传音色样本...",
-                })
-                try:
-                    upload_result = await call_tool("upload_voice_sample", {
-                        "audio_b64": audio_b64,
-                        "filename": "voice_sample.mp3",
-                    })
-                    pre_uploaded_file_id = (
-                        upload_result.get("file_id", "")
-                        if isinstance(upload_result, dict) else ""
-                    )
-                    await publish("pipeline.step", {
-                        "step": "voice_upload",
-                        "status": "succeeded",
-                        "text": f"音色样本上传成功，file_id={pre_uploaded_file_id}",
-                    })
-                    # 记录预上传工具调用
-                    tool_call_records.append({
-                        "id": "pre_upload",
-                        "tool": "upload_voice_sample",
-                        "arguments": {"filename": "voice_sample.mp3"},
-                        "result_preview": f"file_id={pre_uploaded_file_id}",
-                        "status": "succeeded",
-                    })
-                except Exception as e:
-                    await publish("pipeline.step", {
-                        "step": "voice_upload",
-                        "status": "failed",
-                        "text": f"音色样本上传失败：{e}",
-                    })
-                    # 上传失败则提前返回，避免 Agent 用空 file_id 继续
-                    return {
-                        "turn": turn, "user_message": user_message,
-                        "domain": domain, "audio_url": "", "voice_id": "",
-                        "summary": f"音色样本上传失败：{e}",
-                        "suggestions": ["请检查音频格式（mp3/wav）和文件大小（10s-5min）"],
-                        "diff_summary": "", "tool_calls": tool_call_records,
-                    }
 
         # ── Step 3: 构造 Audio Agent 上下文 ────────────────────────────────
         # 注意：pre_uploaded_file_id 替代 audio_b64 注入 context，LLM 不接触原始 base64
@@ -438,32 +396,13 @@ class AudioChatRunner:
             else:
                 parts.append("请直接根据用户描述构造 prompt 并生成音频。")
         elif domain == "voice_clone":
-            intent = route_params.get("voice_clone_intent", "upload_and_clone")
-            if intent == "list_voices":
-                parts.append("请调用 list_cloned_voices 查询已克隆的音色列表。")
-            elif intent == "synthesize":
-                parts.append(
-                    "请调用 synthesize_speech_minimax 用指定 voice_id 合成语音。"
-                    "若用户未提供 voice_id，先调用 list_cloned_voices 让用户选择。"
-                )
-            else:  # upload_and_clone
-                if pre_uploaded_file_id:
-                    # Runner 层已完成上传，Agent 直接从 clone 步骤开始
-                    parts.append(
-                        f"音频样本已由系统预上传，file_id={pre_uploaded_file_id}。\n"
-                        f"请按以下顺序调用工具完成音色克隆：\n"
-                        f"1. clone_voice_minimax(file_id='{pre_uploaded_file_id}', "
-                        f"voice_id='user_clone_<随机4位英文字母数字>', "
-                        f"preview_text='你好，这是我的克隆音色')\n"
-                        f"2. synthesize_speech_minimax(text='你好，这是我的克隆音色', "
-                        f"voice_id=<上一步返回的voice_id>)\n"
-                        f"完成后在 JSON 结果中填写 voice_id 和 audio_url 字段。"
-                    )
-                else:
-                    parts.append(
-                        "用户未上传音频，请回复提示：需要提供 10s-5min 的 mp3/wav 音频文件。\n"
-                        "若用户已说明 voice_id，可跳过上传直接调用 synthesize_speech_minimax。"
-                    )
+            # v2.0：音色克隆已迁移到 VoiceCloneAgent（sovits 域），
+            # 此处仅作提示，引导用户走正确路径。
+            parts.append(
+                "音色克隆请求应通过 sovits 域处理。"
+                "请告知用户：音色克隆功能由专属的音色克隆专家负责，"
+                "请直接描述您的克隆需求（如：'帮我克隆这段声音'），系统会自动路由到正确的处理流程。"
+            )
 
         if route_params.get("cover_url"):
             parts.append(f"翻唱源音频：{route_params['cover_url']}")

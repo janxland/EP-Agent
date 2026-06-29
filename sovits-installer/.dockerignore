@@ -1,0 +1,7 @@
+.DS_Store
+GPT-SoVITS
+data
+node_modules
+state.json
+*.tar.gz
+*.zip

@@ -200,41 +200,4 @@ async def evolve_audio_prompt(
         }
 
 
-@tool(group="audio")
-def diff_audio_params(params_before: dict, params_after: dict) -> dict:
-    """对比两次音频生成参数，生成可读的 diff 报告。
-    params_before: 上一次生成参数 dict
-    params_after: 本次生成参数 dict
-    返回: {"diffs": [...], "summary": str}
-    """
-    diffs: list[str] = []
-    fields = ["prompt", "style", "lyrics", "instrumental", "model", "provider"]
 
-    for field in fields:
-        before = params_before.get(field, "")
-        after = params_after.get(field, "")
-        if before != after:
-            if field == "instrumental":
-                diffs.append(
-                    f"人声：{'纯音乐' if after else '有人声'}"
-                    f"（原：{'纯音乐' if before else '有人声'}）"
-                )
-            elif field == "prompt":
-                # 找出新增和删除的词
-                words_before = set(w.strip().lower() for w in str(before).split(","))
-                words_after  = set(w.strip().lower() for w in str(after).split(","))
-                added   = words_after - words_before
-                removed = words_before - words_after
-                if added:
-                    diffs.append(f"Prompt 新增：{', '.join(added)}")
-                if removed:
-                    diffs.append(f"Prompt 移除：{', '.join(removed)}")
-            elif field == "style":
-                diffs.append(f"风格：{after}（原：{before}）")
-            elif field == "model":
-                diffs.append(f"模型：{after}（原：{before}）")
-            elif field == "provider":
-                diffs.append(f"服务商：{after}（原：{before}）")
-
-    summary = "；".join(diffs) if diffs else "参数未发生变化"
-    return {"diffs": diffs, "summary": summary}

@@ -16,9 +16,20 @@ class Config:
         self.LLM_BASE_URL: str = (
             os.getenv("LLM_BASE_URL")
             or os.getenv("SILICONFLOW_BASE_URL")
-            or "https://api.openai.com/v1"
+            or "https://api.siliconflow.cn/v1"
         )
-        self.LLM_MODEL: str = os.getenv("LLM_MODEL") or os.getenv("SILICONFLOW_MODEL", "gpt-4o-mini")
+        # strong 模型：复杂推理 / ReAct 多轮 / 创作编辑（默认 DeepSeek-V3.2）
+        self.LLM_MODEL: str = (
+            os.getenv("LLM_MODEL")
+            or os.getenv("SILICONFLOW_MODEL")
+            or "deepseek-ai/DeepSeek-V3.2"
+        )
+        # lite 模型：意图路由 / TODO 规划等轻量调用，成本更低（默认 DeepSeek-V4-Flash）
+        # 未配置时自动回退到 LLM_MODEL（strong），保持向后兼容
+        self.LLM_MODEL_LITE: str = (
+            os.getenv("LLM_MODEL_LITE")
+            or "deepseek-ai/DeepSeek-V4-Flash"
+        )
         self.WORKSPACE_DIR: str = os.getenv("ABC_WORKSPACE_DIR", str(_BACKEND_DIR / "workspace"))
 
         # H5 海报输出目录（与 h5_tools.py / main.py 共享同一配置源）

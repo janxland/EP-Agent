@@ -73,9 +73,14 @@ _REACT_SUPPLEMENT = """
 
 
 def _build_system_prompt() -> str:
-    """从 score-editor.agent 热加载 system prompt（支持热更新）。"""
+    """从 score-editor.agent 热加载 system prompt（支持热更新）。
+    加载 role + static_context + workflow，让 LLM 感知完整工作流（含 MIDI 导出指引）。
+    """
     try:
-        base = load_agent_prompt("score-editor", sections=["role", "static_context"])
+        base = load_agent_prompt(
+            "score-editor",
+            sections=["role", "static_context", "workflow", "output_contract"],
+        )
         return base + _REACT_SUPPLEMENT
     except FileNotFoundError:
         return (
@@ -113,6 +118,7 @@ async def run_edit(
     todo_mgr: TodoManager,
     scene: Scene = "editor",
     session_id: str = "",   # 传入后 ReactExecutor 自动落库 tool message
+    workspace_id: str = "", # 保留参数兼容旧调用，内部不再使用（工具通过 ContextVar 推断路径）
 ) -> dict:
     """
     执行 ABC 编辑（v3.1：使用 ReactExecutor，不再内嵌 ReAct Loop）。
@@ -143,16 +149,27 @@ async def run_edit(
     })
 
     # ── 构造 messages ─────────────────────────────────────────────────────────
-    tools = get_tool_schemas("abc_edit") + get_tool_schemas("output")
-    # 同时注册 analyze_abc 工具（复杂编辑时 LLM 可选择先分析）
-    try:
-        analyze_tools = get_tool_schemas("analyze")
-        tools = analyze_tools + tools
-    except Exception:
-        pass  # analyze 工具组不存在时不影响主流程
+    # default 组：analyze_abc / validate_abc / transpose_abc / abc_to_sky_json 等
+    # abc_edit 组：abc_to_midi / load_abc_score
+    # workspace 组：list_workspace_files / read_workspace_file 等（编辑时可能需要读文件）
+    tools = get_tool_schemas("default") + get_tool_schemas("abc_edit") + get_tool_schemas("workspace")
+    # ── 注入重要记忆前缀（跨轮次上下文携带体）─────────────────────────────────
+    _memory_prefix = ""
+    if session_id:
+        try:
+            from app.agentcore.memory_manager import build_memory_prefix
+            _memory_prefix = build_memory_prefix(session_id)
+        except Exception:
+            pass
+    _system = _build_system_prompt()
+    if _memory_prefix:
+        _system = _system + _memory_prefix
+
     messages = [
-        {"role": "system", "content": _build_system_prompt()},
-        {"role": "user",   "content": _build_user_prompt(intent, meta, current_abc, context_summary)},
+        {"role": "system", "content": _system},
+        {"role": "user",   "content": _build_user_prompt(
+            intent, meta, current_abc, context_summary
+        )},
     ]
 
     await publish("pipeline.step", {

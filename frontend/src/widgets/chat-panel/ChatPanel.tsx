@@ -8,7 +8,7 @@ import { useRouter } from 'next/navigation'
 import { useChatStore } from '@/features/chat/store/chat.store'
 import { useScoreStore } from '@/entities/session/store'
 import { useWorkspaceStore } from '@/features/workspace/store/workspace.store'
-import { chatUniversal } from '@/shared/lib/api'
+import { chatUniversal, listModels, setActiveModel, getContextUsage, type ModelItem } from '@/shared/lib/api'
 import { ChatMessageList, StreamingAssistantCard } from './ChatMessageList'
 import { TodoListCard } from './TodoListCard'
 import { RichInput, type FileRef } from './RichInput'
@@ -209,11 +209,16 @@ export function ChatPanel() {
     createSession,
     deleteSession,
     activeWorkspaceId,
+    activeProjectId,
     setActiveSessionId,
     setActiveWorkspaceId,
     workspaces,
     triggerFileTreeRefresh,
+    activeProject,
   } = useWorkspaceStore()
+  // 确保 activeProjectId / activeWorkspaceId 始终有效：若为空则从 activeProject() 推断
+  const resolvedProjectId  = activeProjectId  ?? activeProject()?.id ?? ''
+  const resolvedWorkspaceId = activeWorkspaceId ?? ''
   const {
     messages,
     streaming,
@@ -240,6 +245,64 @@ export function ChatPanel() {
   const insertMentionRef = useRef<((path: string, label: string, size: number) => void) | null>(null)
   const [showRolePanel, setShowRolePanel] = useState(false)
   const [showSessionMenu, setShowSessionMenu] = useState(false)
+
+  // ── 模型列表 ──────────────────────────────────────────────────────────────
+  const [models, setModels] = useState<ModelItem[]>([])
+  const [activeModelId, setActiveModelId] = useState<string>('')
+  const [showModelMenu, setShowModelMenu] = useState(false)
+  const modelMenuRef = useRef<HTMLDivElement>(null)
+
+  // 加载模型列表（仅一次）
+  useEffect(() => {
+    listModels()
+      .then(({ models: list, active }) => {
+        setModels(list)
+        setActiveModelId(active)
+      })
+      .catch(() => { /* 静默失败：后端未启动时不影响 UI */ })
+  }, [])
+
+  // 点击外部关闭模型菜单
+  useEffect(() => {
+    if (!showModelMenu) return
+    const handler = (e: MouseEvent) => {
+      if (modelMenuRef.current && !modelMenuRef.current.contains(e.target as Node)) {
+        setShowModelMenu(false)
+      }
+    }
+    const id = requestAnimationFrame(() => document.addEventListener('mousedown', handler))
+    return () => { cancelAnimationFrame(id); document.removeEventListener('mousedown', handler) }
+  }, [showModelMenu])
+
+  const handleSelectModel = useCallback(async (modelId: string) => {
+    setShowModelMenu(false)
+    setActiveModelId(modelId)
+    try {
+      await setActiveModel(modelId)
+    } catch { /* 静默失败 */ }
+  }, [])
+
+  // ── 上下文用量（真实 API，每 3 秒轮询）────────────────────────────────────
+  const [ctxPct, setCtxPct] = useState<number>(0)
+
+  useEffect(() => {
+    if (!sessionId) return
+    let cancelled = false
+    const fetchCtx = () => {
+      getContextUsage(sessionId)
+        .then(({ pct }) => { if (!cancelled) setCtxPct(pct) })
+        .catch(() => {
+          // 降级：用本地消息字符数估算
+          if (!cancelled) {
+            const chars = messages.reduce((acc, m) => acc + (m.content?.length ?? 0), 0)
+            setCtxPct(Math.min(99, Math.round(chars / 5120)))
+          }
+        })
+    }
+    fetchCtx()
+    const timer = setInterval(fetchCtx, 3000)
+    return () => { cancelled = true; clearInterval(timer) }
+  }, [sessionId, messages.length])
   // RichInput 的 insertText ref，用于快捷回复按钮向编辑器插入文本
   const insertTextRef = useRef<((text: string) => void) | null>(null)
   // RichInput 的 send ref，用于发送按钮直接触发（避免 DOM 事件不可靠问题）
@@ -293,6 +356,9 @@ export function ChatPanel() {
       // 使用 displayText（含 [@文件名] chip）而非原始 text，
       // 保证后端落库内容与前端乐观显示一致，刷新后 SSE replay 能正确还原 chip
       message: displayText,
+      // workspace_id + project_id 必带：工具层通过这两个 ID 定位文件系统路径
+      workspace_id: resolvedWorkspaceId,
+      project_id: resolvedProjectId,
       attachment_name: att?.name ?? '',
       // 工作区路径（优先）：后端 Runner 层直接使用
       attachment_workspace_path: att?.workspace_path ?? '',
@@ -323,10 +389,12 @@ export function ChatPanel() {
     // page.tsx 的 [sessionId] effect 也会清空，这里是双保险，确保视觉上立即生效
     useChatStore.setState({ messages: [], todos: [], todoSummary: '', todoDomain: '' })
     try {
-      const sess = await createSession(activeWorkspaceId, '新对话')
-      router.push(`/pro/${sess.id}`)
+      // resolvedProjectId 确保新对话挂在正确的项目下，防止文件区域错位
+      const sess = await createSession(activeWorkspaceId, '新对话', resolvedProjectId || undefined)
+      const targetProjId = resolvedProjectId || useWorkspaceStore.getState().activeProject()?.id || ''
+      router.push(`/pro/${targetProjId}/${sess.id}`)
     } catch { /* error 已在 store 中设置 */ }
-  }, [activeWorkspaceId, createSession, router])
+  }, [activeWorkspaceId, resolvedProjectId, createSession, router])
 
   // 切换对话
   const handleSelectSession = useCallback((id: string) => {
@@ -339,7 +407,11 @@ export function ChatPanel() {
       }
     }
     setActiveSessionId(id)
-    router.push(`/pro/${id}`)
+    // 找到该 session 所属的 projId
+    const selProjId = useWorkspaceStore.getState().workspaces
+      .flatMap((w) => w.projects ?? [])
+      .find((p) => p.sessions?.some((s) => s.id === id))?.id ?? resolvedProjectId ?? ''
+    router.push(`/pro/${selProjId}/${id}`)
   }, [activeSessionId, workspaces, setActiveWorkspaceId, setActiveSessionId, router])
 
   // 删除对话（自制弹窗确认）
@@ -357,7 +429,7 @@ export function ChatPanel() {
     } catch { /* error 已在 store 中设置 */ }
   }, [deleteConfirmSessionId, deleteSession])
 
-  // ── 角色恢复已统一由 /pro/[sessionId]/page.tsx 初始化 effect 调用 ─────────────
+  // ── 角色恢复已统一由 /pro/[projId]/[sessionId]/page.tsx 初始化 effect 调用 ──────
   // ChatPanel 不再重复调用 restoreRoleFromSession，避免 session 切换时双重 fetch。
   // 角色状态通过 useChatStore 订阅，page.tsx 调用后会自动触发 re-render。
 
@@ -413,21 +485,18 @@ export function ChatPanel() {
       const isMidi  = file.type.includes('midi') || /\.(mid|midi)$/i.test(file.name)
 
       if ((isAudio || isMidi) && activeWorkspaceId) {
-        // ✅ 新架构：MIDI/音频先上传到工作区，存 workspace_path，不存 base64
-        // 这样 LLM context 中永远不会出现二进制内容，彻底避免超时
+        // MIDI/音频先上传到项目目录，存 workspace_path，不存 base64
         const kind: AttachmentKind = isAudio ? 'audio' : 'midi'
         const subdir = isMidi ? '.sky' : 'shared'
         const destPath = `${subdir}/${file.name}`
         setImgUploadTip({ status: 'uploading', name: file.name })
         try {
-          await uploadFileToWorkspace(activeWorkspaceId, file, destPath)
+          await uploadFileToWorkspace(activeWorkspaceId, file, destPath, resolvedProjectId)
           setAttachment({ kind, name: file.name, content: '', workspace_path: destPath, size: file.size })
           setImgUploadTip({ status: 'done', name: file.name })
-          // 上传成功：自动插入 @mention，不显示顶部胶囊
           insertMentionRef.current?.(destPath, file.name, file.size)
           triggerFileTreeRefresh()
         } catch {
-          // 上传失败降级：仍然设置附件，但用 base64 路径（旧兼容路径）
           const reader = new FileReader()
           reader.onload = () => {
             const b64 = (reader.result as string).split(',')[1] ?? ''
@@ -437,7 +506,7 @@ export function ChatPanel() {
           setImgUploadTip({ status: 'error', name: file.name })
         }
       } else if (isAudio || isMidi) {
-        // 无工作区时降级用 base64（兼容旧路径）
+        // 无工作区时降级用 base64
         const reader = new FileReader()
         reader.onload = () => {
           const b64 = (reader.result as string).split(',')[1] ?? ''
@@ -446,14 +515,13 @@ export function ChatPanel() {
         }
         reader.readAsDataURL(file)
       } else {
-        // txt / json 等文本文件：上传到工作区 + 插入 mention 胶囊
-        const ext = file.name.split('.').pop()?.toLowerCase() ?? ''
-        const subdir = ext === 'json' ? 'shared' : 'shared'
+        // txt / json 等文本文件：上传到项目目录 + 插入 mention 胶囊
+        const subdir = 'shared'
         const destPath = `${subdir}/${file.name}`
         if (activeWorkspaceId) {
           setImgUploadTip({ status: 'uploading', name: file.name })
           try {
-            await uploadFileToWorkspace(activeWorkspaceId, file, destPath)
+            await uploadFileToWorkspace(activeWorkspaceId, file, destPath, resolvedProjectId)
             const text = await file.text()
             const kind = detectKind(file.name, text)
             setAttachment({ kind, name: file.name, content: text, workspace_path: destPath, size: file.size })
@@ -461,7 +529,6 @@ export function ChatPanel() {
             insertMentionRef.current?.(destPath, file.name, file.size)
             triggerFileTreeRefresh()
           } catch {
-            // 上传失败降级：读内容但无胶囊
             const text = await file.text()
             const kind = detectKind(file.name, text)
             setAttachment({ kind, name: file.name, content: text, workspace_path: '', size: file.size })
@@ -492,7 +559,7 @@ export function ChatPanel() {
         }
       })
     }
-  }, [activeWorkspaceId, triggerFileTreeRefresh])
+  }, [activeWorkspaceId, resolvedProjectId, triggerFileTreeRefresh])
 
   const isRunning        = status === 'running'
   const hasStreamContent = streaming.content || streaming.tool_calls.length > 0 || streaming.reasoning_content
@@ -770,23 +837,20 @@ export function ChatPanel() {
               </svg>
             </button>
 
-            {/* 右：上下文用量圆形指示器 */}
+            {/* 右：上下文用量圆形指示器（接入真实 API） */}
             {(() => {
-              // 用消息数估算上下文占用（每条消息约 500 token，上限 128k）
-              const estTokens = messages.reduce((acc, m) => acc + (m.content?.length ?? 0), 0)
-              const pct = Math.min(99, Math.round(estTokens / 1280))
-              const color = pct >= 80 ? 'text-red-500 bg-red-50 border-red-100'
-                          : pct >= 50 ? 'text-orange-500 bg-orange-50 border-orange-100'
-                          : 'text-gray-500 bg-gray-50 border-gray-100'
+              const color = ctxPct >= 80 ? 'text-red-500 bg-red-50 border-red-100'
+                          : ctxPct >= 50 ? 'text-orange-500 bg-orange-50 border-orange-100'
+                          : 'text-gray-400 bg-gray-50 border-gray-100'
               return (
                 <button
                   onClick={() => {
                     useChatStore.setState({ messages: [], todos: [], todoSummary: '', todoDomain: '' })
                   }}
-                  title={`上下文已用约 ${pct}%，点击清空对话`}
+                  title={`上下文已用约 ${ctxPct}%，点击清空对话`}
                   className={`flex items-center gap-1 px-2 py-0.5 rounded-full border text-[10px] font-bold transition-all hover:scale-105 ${color}`}
                 >
-                  <span className="tabular-nums">{pct}%</span>
+                  <span className="tabular-nums">{ctxPct}%</span>
                   <svg className="w-2.5 h-2.5 opacity-60" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
                   </svg>
@@ -816,19 +880,65 @@ export function ChatPanel() {
 
             {/* 左侧：模型选择 + 上传状态提示 */}
             <div className="flex items-center gap-1.5">
-              {/* 模型选择按钮（占位，后续接真实模型列表） */}
-              <button
-                className="flex items-center gap-1 px-2 py-1 rounded-lg hover:bg-gray-50 transition-colors group"
-                title="选择模型"
-              >
-                <span className="w-4 h-4 rounded-md bg-gray-800 flex items-center justify-center shrink-0">
-                  <span className="text-[7px] font-black text-white leading-none">EP</span>
-                </span>
-                <span className="text-[10px] text-gray-500 font-medium group-hover:text-gray-700 transition-colors hidden sm:inline">默认模型</span>
-                <svg className="w-2.5 h-2.5 text-gray-300 group-hover:text-gray-500 transition-colors" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
-                </svg>
-              </button>
+              {/* 模型选择按钮（接入真实模型列表） */}
+              <div className="relative" ref={modelMenuRef}>
+                <button
+                  onClick={() => setShowModelMenu((v) => !v)}
+                  className="flex items-center gap-1 px-2 py-1 rounded-lg hover:bg-gray-50 transition-colors group"
+                  title="选择模型"
+                >
+                  <span className="w-4 h-4 rounded-md bg-gray-800 flex items-center justify-center shrink-0">
+                    <span className="text-[7px] font-black text-white leading-none">EP</span>
+                  </span>
+                  <span className="text-[10px] text-gray-500 font-medium group-hover:text-gray-700 transition-colors hidden sm:inline max-w-[90px] truncate">
+                    {models.find((m) => m.id === activeModelId)?.name ?? '默认模型'}
+                  </span>
+                  <svg className="w-2.5 h-2.5 text-gray-300 group-hover:text-gray-500 transition-colors shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+                  </svg>
+                </button>
+
+                {/* 模型选择下拉菜单 */}
+                {showModelMenu && models.length > 0 && (
+                  <div className="absolute left-0 bottom-[calc(100%+4px)] z-[250] w-[220px] bg-white rounded-xl shadow-xl border border-gray-100 overflow-hidden">
+                    <div className="px-3 py-2 border-b border-gray-100">
+                      <span className="text-[10px] font-semibold text-gray-400 uppercase tracking-widest">选择模型</span>
+                    </div>
+                    <div className="max-h-64 overflow-y-auto py-1">
+                      {(() => {
+                        const groups = Array.from(new Set(models.map((m) => m.group)))
+                        return groups.map((group) => (
+                          <div key={group}>
+                            <div className="px-3 py-1 text-[9px] font-semibold text-gray-300 uppercase tracking-widest">{group}</div>
+                            {models.filter((m) => m.group === group).map((m) => (
+                              <button
+                                key={m.id}
+                                onClick={() => void handleSelectModel(m.id)}
+                                className={[
+                                  'w-full text-left px-3 py-1.5 flex items-start gap-2 transition-colors',
+                                  m.id === activeModelId
+                                    ? 'bg-orange-50 text-orange-700'
+                                    : 'hover:bg-gray-50 text-gray-700',
+                                ].join(' ')}
+                              >
+                                <div className="flex-1 min-w-0">
+                                  <div className="flex items-center gap-1.5">
+                                    <span className="text-[11px] font-medium truncate">{m.name}</span>
+                                    {m.id === activeModelId && (
+                                      <span className="shrink-0 w-1.5 h-1.5 rounded-full bg-orange-400" />
+                                    )}
+                                  </div>
+                                  <div className="text-[9px] text-gray-400 truncate mt-0.5">{m.desc}</div>
+                                </div>
+                              </button>
+                            ))}
+                          </div>
+                        ))
+                      })()}
+                    </div>
+                  </div>
+                )}
+              </div>
 
               {/* 上传状态提示 */}
               {imgUploadTip && (

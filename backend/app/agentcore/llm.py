@@ -8,12 +8,23 @@ LLM 客户端 - 基于 OpenAI SDK
 - 所有调用均有超时保护，防止网络抖动永久阻塞
 - complete_with_tools_stream：流式 Tool Calling，实时推送 reasoning/content，
   工具调用参数在 stream 结束后汇总返回，解决大 context 下超时问题
+
+fix40 新增：
+- M1 模型分层路由：model_tier 参数（'lite' / 'strong'）
+  lite  → config.LLM_MODEL_LITE  （意图路由、TODO 规划等轻量调用，降低成本）
+  strong→ config.LLM_MODEL        （ReAct 多轮、创作/编辑等复杂推理，保证质量）
+  未配置 LLM_MODEL_LITE 时自动回退到 strong 模型，保持向后兼容
+- M7 熔断增强：_call_with_retry() 封装重试逻辑（最多 2 次），
+  TimeoutError / RateLimitError 自动重试，其余异常立即抛出
 """
 from __future__ import annotations
 import asyncio
-from typing import AsyncIterator
+import logging
+from typing import AsyncIterator, Literal
 from openai import AsyncOpenAI
 from app.config import config
+
+_logger = logging.getLogger("ep_agent.llm")
 
 # ── 全局单例客户端（连接池复用） ───────────────────────────────────
 _client: AsyncOpenAI | None = None
@@ -22,6 +33,27 @@ _client: AsyncOpenAI | None = None
 _TIMEOUT_FAST   = 30   # 意图路由、TODO 规划等轻量调用
 _TIMEOUT_NORMAL = 180  # 普通创作、工具调用（H5 生成含大 context 需要更长时间）
 _TIMEOUT_STREAM = 240  # 流式输出（需更长时间）
+
+# M7 熔断：最大重试次数（TimeoutError / RateLimitError 时自动重试）
+_MAX_RETRIES = 2
+
+# ── M1 模型分层路由 ────────────────────────────────────────────────
+# model_tier 取值：
+#   'lite'   → 轻量模型（意图路由、TODO 规划、简单查询），降低成本
+#              硅基流动默认：deepseek-ai/DeepSeek-V4-Flash（¥1/¥2 per M tokens）
+#   'strong' → 强力模型（ReAct 多轮、创作/编辑/H5 生成），保证质量
+#              硅基流动默认：deepseek-ai/DeepSeek-V3.2（¥2/¥3 per M tokens）
+# 未配置 LLM_MODEL_LITE 时自动回退到 LLM_MODEL（向后兼容）
+# 切换模型只需在 .env 中设置 LLM_MODEL / LLM_MODEL_LITE，无需改代码
+ModelTier = Literal["lite", "strong"]
+
+
+def _resolve_model(tier: ModelTier = "strong") -> str:
+    """根据 tier 返回实际模型名称。lite 回退逻辑：无配置则用 strong。"""
+    if tier == "lite":
+        lite = getattr(config, "LLM_MODEL_LITE", "") or ""
+        return lite if lite else config.LLM_MODEL
+    return config.LLM_MODEL
 
 
 def get_llm_client() -> AsyncOpenAI:
@@ -42,39 +74,91 @@ def reset_client() -> None:
     _client = None
 
 
-async def complete(messages: list[dict], temperature: float = 0.1) -> str:
-    """普通完成，返回文本，带超时保护"""
+async def _call_with_retry(coro_factory, timeout: float, label: str = ""):
+    """
+    M7 熔断增强：带重试的 LLM 调用封装。
+    TimeoutError / RateLimitError 自动重试最多 _MAX_RETRIES 次，
+    其余异常（AuthenticationError / InvalidRequestError 等）立即抛出。
+
+    coro_factory: 无参可调用，每次调用返回一个新 coroutine
+    timeout: asyncio.wait_for 超时秒数
+    label: 调用标签，用于日志
+    """
+    from app.agentcore.session_context import get_current_trace_id
     try:
-        resp = await asyncio.wait_for(
-            get_llm_client().chat.completions.create(
-                model=config.LLM_MODEL,
-                messages=messages,
-                temperature=temperature,
-            ),
-            timeout=_TIMEOUT_NORMAL,
-        )
-    except asyncio.TimeoutError:
-        raise TimeoutError(f"LLM 请求超时（>{_TIMEOUT_NORMAL}s），请检查网络或 API 服务状态")
+        from openai import RateLimitError as _RateLimitError
+    except ImportError:
+        _RateLimitError = Exception  # type: ignore
+
+    last_err = None
+    for attempt in range(1, _MAX_RETRIES + 2):  # 1 次正常 + 最多 _MAX_RETRIES 次重试
+        try:
+            return await asyncio.wait_for(coro_factory(), timeout=timeout)
+        except asyncio.TimeoutError as e:
+            last_err = e
+            tid = get_current_trace_id()
+            _logger.warning(
+                "[trace=%s] %s 超时（第 %d/%d 次，timeout=%ds）",
+                tid[:8] if tid else "?", label, attempt, _MAX_RETRIES + 1, timeout,
+            )
+            if attempt > _MAX_RETRIES:
+                raise TimeoutError(
+                    f"{label} 请求超时（>{timeout}s），已重试 {_MAX_RETRIES} 次，请检查网络或 API 服务状态"
+                ) from e
+            await asyncio.sleep(2 ** attempt)  # 指数退避：2s, 4s
+        except _RateLimitError as e:
+            last_err = e
+            tid = get_current_trace_id()
+            _logger.warning(
+                "[trace=%s] %s 触发限流（第 %d/%d 次）: %s",
+                tid[:8] if tid else "?", label, attempt, _MAX_RETRIES + 1, e,
+            )
+            if attempt > _MAX_RETRIES:
+                raise
+            await asyncio.sleep(5 * attempt)  # 限流退避：5s, 10s
+        except Exception:
+            raise  # 其余异常（鉴权失败、参数错误等）立即抛出，不重试
+    raise last_err  # 理论上不会到这里
+
+
+async def complete(
+    messages: list[dict],
+    temperature: float = 0.1,
+    tier: ModelTier = "strong",
+) -> str:
+    """普通完成，返回文本，带超时保护 + M7 重试熔断。
+    tier='lite' 使用轻量模型（意图路由、TODO 规划等），tier='strong'（默认）使用强力模型。
+    """
+    model = _resolve_model(tier)
+    resp = await _call_with_retry(
+        lambda: get_llm_client().chat.completions.create(
+            model=model,
+            messages=messages,
+            temperature=temperature,
+        ),
+        timeout=_TIMEOUT_NORMAL,
+        label=f"complete[{tier}]",
+    )
     return resp.choices[0].message.content or ""
 
 
 async def complete_stream(
     messages: list[dict],
     temperature: float = 0.2,
+    tier: ModelTier = "strong",
 ) -> AsyncIterator[str]:
-    """流式完成，逐 token yield，带超时保护"""
-    try:
-        stream = await asyncio.wait_for(
-            get_llm_client().chat.completions.create(
-                model=config.LLM_MODEL,
-                messages=messages,
-                temperature=temperature,
-                stream=True,
-            ),
-            timeout=_TIMEOUT_STREAM,
-        )
-    except asyncio.TimeoutError:
-        raise TimeoutError(f"LLM 流式请求超时（>{_TIMEOUT_STREAM}s）")
+    """流式完成，逐 token yield，带超时保护 + M7 重试熔断。"""
+    model = _resolve_model(tier)
+    stream = await _call_with_retry(
+        lambda: get_llm_client().chat.completions.create(
+            model=model,
+            messages=messages,
+            temperature=temperature,
+            stream=True,
+        ),
+        timeout=_TIMEOUT_STREAM,
+        label=f"complete_stream[{tier}]",
+    )
     async for chunk in stream:
         delta = chunk.choices[0].delta.content
         if delta:
@@ -96,20 +180,19 @@ async def complete_with_tools_stream(
     """
     import json as _json
 
-    try:
-        stream = await asyncio.wait_for(
-            get_llm_client().chat.completions.create(
-                model=config.LLM_MODEL,
-                messages=messages,
-                tools=tools,
-                tool_choice="auto",
-                temperature=temperature,
-                stream=True,
-            ),
-            timeout=_TIMEOUT_STREAM,
-        )
-    except asyncio.TimeoutError:
-        raise TimeoutError(f"LLM 流式 Tool Calling 请求超时（>{_TIMEOUT_STREAM}s）")
+    model = _resolve_model("strong")  # Tool Calling 始终用 strong 模型
+    stream = await _call_with_retry(
+        lambda: get_llm_client().chat.completions.create(
+            model=model,
+            messages=messages,
+            tools=tools,
+            tool_choice="auto",
+            temperature=temperature,
+            stream=True,
+        ),
+        timeout=_TIMEOUT_STREAM,
+        label="complete_with_tools_stream",
+    )
 
     content_parts: list[str] = []
     # tool_calls 累积：{index: {id, name, arguments_parts}}
@@ -223,19 +306,18 @@ async def complete_with_tools(
       - tool_calls: list[dict]  每项包含 id / function.name / function.arguments
       - finish_reason: "tool_calls" | "stop" | ...
     """
-    try:
-        resp = await asyncio.wait_for(
-            get_llm_client().chat.completions.create(
-                model=config.LLM_MODEL,
-                messages=messages,
-                tools=tools,
-                tool_choice="auto",
-                temperature=temperature,
-            ),
-            timeout=_TIMEOUT_NORMAL,
-        )
-    except asyncio.TimeoutError:
-        raise TimeoutError(f"LLM Tool Calling 请求超时（>{_TIMEOUT_NORMAL}s）")
+    model = _resolve_model("strong")  # Tool Calling 始终用 strong 模型
+    resp = await _call_with_retry(
+        lambda: get_llm_client().chat.completions.create(
+            model=model,
+            messages=messages,
+            tools=tools,
+            tool_choice="auto",
+            temperature=temperature,
+        ),
+        timeout=_TIMEOUT_NORMAL,
+        label="complete_with_tools",
+    )
     msg = resp.choices[0].message
     return {
         "role": "assistant",

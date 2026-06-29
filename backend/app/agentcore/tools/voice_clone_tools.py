@@ -83,20 +83,34 @@ def _validate_voice_id(voice_id: str) -> str | None:
 # ─── 工具 1：上传音频样本（获取 file_id）────────────────────────────────────
 
 @tool(group="audio")
-async def upload_voice_sample(audio_b64: str, filename: str = "sample.mp3") -> dict:
-    """上传音色克隆源音频（base64 编码），获取 file_id 供 clone_voice_minimax 使用。
-    audio_b64: 音频文件的 base64 编码字符串（mp3/m4a/wav，时长 10s-5min，≤20MB）
-    filename: 文件名，需带扩展名，如 sample.mp3 / voice.wav
+async def upload_voice_sample(audio_workspace_path: str, filename: str = "") -> dict:
+    """上传音色克隆源音频到 MiniMax，获取 file_id 供 clone_voice_minimax 使用。
+    ⚠️ 通过工作区路径传递音频，禁止传入 base64，防止上下文爆炸。
+    audio_workspace_path: 音频文件的工作区路径（如 audio/ref.wav），mp3/m4a/wav，时长 10s-5min，≤20MB
+    filename: 上传时使用的文件名（留空则自动从路径推断）
     返回: {"file_id": str, "bytes": int, "filename": str}
     """
     err = _check_key()
     if err:
         return {"error": err}
 
+    # 通过工作区路径读取文件（b64 仅在此处内部处理，不暴露给 LLM）
     try:
-        audio_bytes = base64.b64decode(_strip_dataurl(audio_b64))
+        from app.agentcore.session_context import get_current_project_root
+        from pathlib import Path
+        root = get_current_project_root()
+        if not root:
+            return {"error": "project_root 未绑定，无法读取音频文件"}
+        fpath = Path(root) / audio_workspace_path
+        if not fpath.exists():
+            return {"error": f"音频文件不存在: {audio_workspace_path}"}
+        audio_bytes = fpath.read_bytes()
+        filename = filename or fpath.name
     except Exception as e:
-        return {"error": f"base64 解码失败: {e}（请确认上传的是 mp3/wav/m4a 音频文件）"}
+        return {"error": f"读取音频文件失败: {e}"}
+
+    if len(audio_bytes) > 20 * 1024 * 1024:
+        return {"error": "文件大小超过 20MB 限制"}
 
     if len(audio_bytes) > 20 * 1024 * 1024:
         return {"error": "文件大小超过 20MB 限制"}
@@ -133,10 +147,11 @@ async def upload_voice_sample(audio_b64: str, filename: str = "sample.mp3") -> d
 # ─── 工具 2：上传增强样本（可选，提升克隆质量）──────────────────────────────
 
 @tool(group="audio")
-async def upload_prompt_audio(audio_b64: str, filename: str = "prompt.mp3") -> dict:
+async def upload_prompt_audio(audio_workspace_path: str, filename: str = "") -> dict:
     """上传音色克隆增强样本（可选），获取 prompt_file_id 传给 clone_voice_minimax 提升相似度。
-    audio_b64: 短音频的 base64 编码（mp3/m4a/wav，时长 <8s，≤20MB）
-    filename: 文件名，需带扩展名
+    ⚠️ 通过工作区路径传递音频，禁止传入 base64，防止上下文爆炸。
+    audio_workspace_path: 短音频的工作区路径（mp3/m4a/wav，时长 <8s，≤20MB）
+    filename: 上传时使用的文件名（留空则自动从路径推断）
     返回: {"file_id": str, "bytes": int, "filename": str}
     """
     err = _check_key()
@@ -144,9 +159,18 @@ async def upload_prompt_audio(audio_b64: str, filename: str = "prompt.mp3") -> d
         return {"error": err}
 
     try:
-        audio_bytes = base64.b64decode(_strip_dataurl(audio_b64))
+        from app.agentcore.session_context import get_current_project_root
+        from pathlib import Path
+        root = get_current_project_root()
+        if not root:
+            return {"error": "project_root 未绑定，无法读取音频文件"}
+        fpath = Path(root) / audio_workspace_path
+        if not fpath.exists():
+            return {"error": f"音频文件不存在: {audio_workspace_path}"}
+        audio_bytes = fpath.read_bytes()
+        filename = filename or fpath.name
     except Exception as e:
-        return {"error": f"base64 解码失败: {e}"}
+        return {"error": f"读取音频文件失败: {e}"}
 
     ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else "mp3"
     mime_map = {"mp3": "audio/mpeg", "m4a": "audio/mp4", "wav": "audio/wav"}
@@ -313,16 +337,18 @@ async def synthesize_speech_minimax(
     pitch: int = 0,
     output_format: str = "url",
 ) -> dict:
-    """使用克隆音色（或系统音色）将文本合成为语音。
+    """使用克隆音色（或系统音色）将文本合成为语音，返回音频 URL。
+    ⚠️ output_format 默认 url，禁止使用 hex 模式（会返回 base64 污染上下文）。
     text: 要合成的文本（≤10000字符）
     voice_id: 克隆音色 ID（来自 clone_voice_minimax）或系统音色 ID
     model: 语音模型，speech-2.6-hd（高质量）| speech-2.6-turbo（低延迟）| speech-2.8-hd（最新）
     speed: 语速，范围 [0.5, 2.0]，默认 1.0
     vol: 音量，范围 [0.1, 10.0]，默认 1.0
     pitch: 音调，范围 [-12, 12]，默认 0（半音）
-    output_format: url（返回链接，有效24h）| hex（返回 base64 编码）
-    返回: {"audio_url": str, "audio_b64": str, "duration_ms": int, "usage_characters": int}
+    output_format: 固定使用 url（返回链接，有效24h），hex 模式已禁用
+    返回: {"audio_url": str, "duration_ms": int, "usage_characters": int}
     """
+    output_format = "url"  # 强制 url，禁止 hex/b64 模式污染上下文
     err = _check_key()
     if err:
         return {"error": err}

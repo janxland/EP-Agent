@@ -1,17 +1,12 @@
 """
-SessionContext — 消除 session_getter/session_saver 透传（Phase 3 预备）
-
-当前状态（Phase 1）：
-  提供 set_session_context / get_session / save_session 接口，
-  但各 SubAgent 暂时保留 session_getter/saver 参数（向后兼容）。
-  Phase 3 时统一迁移，彻底消除 26 处透传。
+SessionContext — session_getter/session_saver 上下文封装
 
 使用方式：
-  # pipeline/router.py 请求入口（每次请求调用一次）
+  # 请求入口注入（pipeline/router.py）
   from app.agentcore.session_context import set_session_context
   set_session_context(get_session_fn, save_session_fn)
 
-  # SubAgent 内部（Phase 3 后直接调用，无需透传）
+  # SubAgent 内部直接调用
   from app.agentcore.session_context import ctx_get_session, ctx_save_session
   sess = ctx_get_session(session_id)
   ctx_save_session(sess)
@@ -25,6 +20,119 @@ from typing import Callable, Any
 
 _getter_var: ContextVar[Callable] = ContextVar("session_getter", default=None)  # type: ignore
 _saver_var:  ContextVar[Callable] = ContextVar("session_saver",  default=None)  # type: ignore
+
+# ── 当前请求的 session_id（由 ReactExecutor 在工具调用前注入）────────────────
+# 工具内部可通过 get_current_session_id() 获取，无需 LLM 传参
+_current_session_id_var: ContextVar[str] = ContextVar("current_session_id", default="")
+
+# ── 全链路 Trace ID（fix40 M3）────────────────────────────────────────────────
+# 每个请求在 universal_runner.run() 入口生成唯一 trace_id，通过 ContextVar 传递。
+# 所有 logging 调用可通过 get_current_trace_id() 自动带上 trace_id，无需手动透传。
+_current_trace_id_var: ContextVar[str] = ContextVar("current_trace_id", default="")
+
+
+def set_current_session_id(session_id: str) -> None:
+    """由 ReactExecutor 在每轮工具调用前注入当前 session_id。"""
+    _current_session_id_var.set(session_id)
+
+
+def set_current_trace_id(trace_id: str) -> None:
+    """在请求入口注入 trace_id，全链路日志追踪用。"""
+    _current_trace_id_var.set(trace_id)
+
+
+def get_current_trace_id() -> str:
+    """获取当前请求的 trace_id，供所有模块日志调用。"""
+    return _current_trace_id_var.get()
+
+
+def get_current_session_id() -> str:
+    """工具内部调用，获取当前请求的 session_id（无需 LLM 传参）。"""
+    return _current_session_id_var.get()
+
+
+def get_ep_logger(name: str = "ep_agent"):
+    """
+    返回自动携带 trace_id 的结构化 logger（fix40 M3）。
+
+    用法：
+      logger = get_ep_logger(__name__)
+      logger.info("[create_agent] 创作完成，abc_lines=%d", lines)
+      # 输出：[trace=abc12345] [create_agent] 创作完成，abc_lines=32
+    """
+    import logging
+
+    class _TraceAdapter(logging.LoggerAdapter):
+        def process(self, msg, kwargs):
+            tid = get_current_trace_id()
+            prefix = f"[trace={tid[:8]}] " if tid else ""
+            return f"{prefix}{msg}", kwargs
+
+    return _TraceAdapter(logging.getLogger(name), {})
+
+
+def get_current_workspace_id() -> str:
+    """
+    工具内部调用，自动推断当前请求的 workspace_id。
+    优先级：session DB 查询 → 空字符串（工具自行兜底）
+    """
+    sid = get_current_session_id()
+    if not sid:
+        return ""
+    try:
+        from app.pipeline import db as _db
+        info = _db.get_session_info(sid)
+        return (info or {}).get("workspace_id") or ""
+    except Exception:
+        return ""
+
+
+def get_current_project_id() -> str:
+    """
+    工具内部调用，自动推断当前请求的 project_id。
+    project_id 是文件系统隔离边界：工具只能操作所属 project 的文件。
+    优先级：session DB 查询 → 空字符串
+    """
+    sid = get_current_session_id()
+    if not sid:
+        return ""
+    try:
+        from app.pipeline import db as _db
+        info = _db.get_session_info(sid)
+        return (info or {}).get("project_id") or ""
+    except Exception:
+        return ""
+
+
+def get_current_project_root() -> str:
+    """
+    返回当前 session 对应的项目文件根目录（绝对路径字符串）。
+    路径：data/workspace/{ws_id}/projects/{proj_id}/
+    """
+    from pathlib import Path as _Path
+
+    sid = get_current_session_id()
+    print(f"[EP-Agent] get_current_project_root: session_id={sid!r}", flush=True)
+    if not sid:
+        print("[EP-Agent] get_current_project_root: ❌ session_id 为空，ContextVar 未注入", flush=True)
+        return ""
+    try:
+        from app.pipeline import db as _db
+        info = _db.get_session_info(sid)
+        ws_id   = (info or {}).get("workspace_id") or ""
+        proj_id = (info or {}).get("project_id")   or ""
+        print(f"[EP-Agent] get_current_project_root: ws_id={ws_id!r} proj_id={proj_id!r}", flush=True)
+        if not ws_id or not proj_id:
+            print(f"[EP-Agent] get_current_project_root: ❌ ws_id 或 proj_id 为空，无法定位项目目录", flush=True)
+            return ""
+        _WS_ROOT = _Path(__file__).resolve().parent.parent.parent / "data" / "workspace"
+        root = _WS_ROOT / ws_id / "projects" / proj_id
+        root.mkdir(parents=True, exist_ok=True)
+        print(f"[EP-Agent] get_current_project_root: ✅ root={root}", flush=True)
+        return str(root)
+    except Exception as _e:
+        print(f"[EP-Agent] get_current_project_root: ❌ 异常: {_e}", flush=True)
+        return ""
 
 
 def set_session_context(getter: Callable, saver: Callable) -> None:

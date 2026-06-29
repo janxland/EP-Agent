@@ -25,6 +25,7 @@ import type { SSEEventType } from '@/shared/types'
 export const SSE_HANDLED_EVENTS = new Set<string>([
   'connected',
   'pipeline.step',
+  'pipeline.state',           // 后端 session 运行状态同步（replay 时解除 loading）
   'abc.updated',
   'activity.update',
   'message.delta',

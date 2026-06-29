@@ -1,0 +1,16 @@
+services:
+  sovits-installer:
+    image: ep-agent/sovits-installer:installed
+    container_name: ep-sovits-installer
+    ports:
+      - "3333:3333"
+      - "9872:9872"
+      - "9874:9874"
+      - "9880:9880"
+    environment:
+      PORT: "3333"
+      SOVITS_SKIP_BROWSER_OPEN: "1"
+      TERM: "xterm"
+    volumes:
+      - ./data:/workspace
+    restart: unless-stopped

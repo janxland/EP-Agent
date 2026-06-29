@@ -1,12 +1,16 @@
 """
 导出工具集 - Agent 可调用的格式转换工具
-这些工具既可以被 Agent 主动调用，也可以被 OutputAdapter 按场景自动追加
+
+工具清单：
+  abc_to_sky_json  — ABC Notation → Sky/CUBY JSON（供小程序键盘使用）
+  finish_task      — 任务完成信号（所有 Agent 必须以此结束 ReAct Loop）
+
+注意：ABC → MIDI 转换请使用 abc_tools.abc_to_midi，
+该工具自动写入当前项目 .sky/ 目录，无需传 workspace_id / project_id。
 """
 from __future__ import annotations
 import sys
 import json
-import tempfile
-import os
 import asyncio
 from pathlib import Path
 from app.agentcore.tools import tool
@@ -18,81 +22,29 @@ if _SKY_TOOLS_DIR not in sys.path:
 
 
 @tool
+def finish_task(summary: str = "") -> dict:
+    """
+    【任务完成信号】所有 Agent 在完成全部工作后必须调用此工具，表示 ReAct Loop 正常结束。
+
+    ⚠️ 铁律：
+    - 必须是最后一个调用的工具
+    - 调用前确认所有文件已保存、所有操作已完成
+    - summary 中包含本次任务的关键结果（文件路径、操作摘要等）
+
+    summary: 任务完成摘要（建议包含生成文件路径、操作结果等关键信息）
+    返回: {"status": "finished", "summary": str}
+    """
+    return {"status": "finished", "summary": summary or "任务已完成"}
+
+
+@tool
 async def abc_to_sky_json(abc: str) -> str:
     """将 ABC 谱转换为 Sky/CUBY JSON 格式，供小程序键盘使用。
     abc: 完整的 ABC Notation 字符串
     返回 JSON 字符串（数组格式，包含 songNotes）
+    ⚠️ 如需生成 MIDI 文件，请使用 abc_to_midi 工具（自动保存到项目 .sky/ 目录）。
     """
     from tools.abc_to_json import abc_to_cuby_json
     loop = asyncio.get_running_loop()
     cuby = await loop.run_in_executor(None, abc_to_cuby_json, abc)
     return json.dumps([cuby], ensure_ascii=False, indent=2)
-
-
-@tool
-async def abc_to_midi_file(abc: str, instrument: int = 0, filename: str = "") -> dict:
-    """将 ABC 谱转换为 MIDI 文件，保存到工作区并返回可访问 URL（不返回 base64）。
-    abc: 完整的 ABC Notation 字符串
-    instrument: MIDI 乐器编号（0=钢琴, 40=小提琴, 46=竖琴 等 GM 标准）
-    filename: 输出文件名（不含扩展名，留空则自动生成）
-    返回: {"midi_url": str, "file_path": str, "size_bytes": int}
-    """
-    import uuid
-    import re
-    from tools.abc_to_json import abc_to_cuby_json
-    from tools.parser import parse_game_score
-    from tools.midi_writer import to_midi
-    from app.config import config
-
-    loop = asyncio.get_running_loop()
-
-    # 生成安全文件名
-    if not filename:
-        # 尝试从 ABC T: 字段提取标题
-        for line in abc.splitlines():
-            if line.startswith("T:"):
-                filename = line[2:].strip()
-                break
-        if not filename:
-            filename = f"midi_{uuid.uuid4().hex[:8]}"
-    safe_name = re.sub(r"[^\w\-]", "_", filename)
-
-    # ABC → CUBY JSON → Score → MIDI
-    with tempfile.NamedTemporaryFile(mode='w', suffix='.json',
-                                     delete=False, encoding='utf-8') as f:
-        cuby = abc_to_cuby_json(abc)
-        json.dump([cuby], f, ensure_ascii=False)
-        tmp_json = f.name
-    tmp_mid = tmp_json + '.mid'
-
-    try:
-        score_obj = await loop.run_in_executor(None, parse_game_score, tmp_json)
-        await loop.run_in_executor(
-            None,
-            lambda: to_midi(score_obj, tmp_mid,
-                            instrument=instrument,
-                            add_expression=True,
-                            humanize_ticks=6)
-        )
-        # 复制到 H5 midi 静态目录，通过 URL 访问（与 generate_h5_from_midi 保持一致）
-        from pathlib import Path as _Path
-        import shutil as _shutil
-        h5_midi_dir = _Path(config.H5_OUTPUT_DIR) / "midi"
-        h5_midi_dir.mkdir(parents=True, exist_ok=True)
-        dest = h5_midi_dir / f"{safe_name}.mid"
-        _shutil.copy2(tmp_mid, dest)
-        # 相对路径：H5 页面与 midi/ 目录同在 H5_OUTPUT_DIR 下
-        # 模板里直接用 midi/xxx.mid 即可，无需绝对 URL
-        midi_url = f"midi/{safe_name}.mid"
-        return {
-            "midi_url":   midi_url,
-            "file_path":  str(dest),
-            "size_bytes": dest.stat().st_size,
-            "_note": "相对路径，H5 页面与 midi/ 同目录，直接加载",
-        }
-    finally:
-        for p in [tmp_json, tmp_mid]:
-            try:
-                os.unlink(p)
-            except Exception:
-                pass

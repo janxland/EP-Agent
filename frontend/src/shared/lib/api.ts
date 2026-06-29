@@ -14,20 +14,51 @@ import type {
 // 优先使用环境变量；开发时留空走 next.config.js 代理，生产时由 NEXT_PUBLIC_API_URL 指定
 const BASE_URL = process.env.NEXT_PUBLIC_API_URL ?? ''
 
-// ─── Workspace ────────────────────────────────────────────────
+// ─── Models ──────────────────────────────────────────────────────────────────
 
-export interface WorkspaceDto {
+export interface ModelItem {
   id: string
   name: string
-  description: string
-  created_at: string
-  updated_at: string
-  sessions?: SessionInfoDto[]
+  group: string
+  desc: string
+  current?: boolean
 }
+
+export async function listModels(): Promise<{ models: ModelItem[]; active: string }> {
+  const res = await fetch(`${BASE_URL}/api/models`)
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
+}
+
+export async function setActiveModel(modelId: string): Promise<void> {
+  const res = await fetch(`${BASE_URL}/api/models/active`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ model_id: modelId }),
+  })
+  if (!res.ok) throw new Error(await res.text())
+}
+
+export async function getContextUsage(sessionId: string): Promise<{
+  session_id: string; msg_count: number; total_chars: number
+  est_tokens: number; ctx_limit: number; pct: number
+}> {
+  const res = await fetch(`${BASE_URL}/api/sessions/${sessionId}/context`)
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
+}
+
+// ─── Workspace / Project / Session 三层架构 ──────────────────
+//
+// 层级关系：Workspace（固定容器）→ Project（文件隔离边界）→ Session/Topic（对话上下文）
+// - Workspace 是机械的固定容器，Agent 不感知其 ID
+// - Project 拥有独立文件目录，Session 只能操作所属 Project 的文件
+// - Session（Topic）是上下文隔离单位，可无数个话题操作同一个 Project
 
 export interface SessionInfoDto {
   id: string
   workspace_id: string | null
+  project_id: string | null
   title: string
   score_title: string | null
   score_key: string | null
@@ -37,6 +68,26 @@ export interface SessionInfoDto {
   created_at: string
   updated_at: string
   stale?: boolean
+}
+
+export interface ProjectDto {
+  id: string
+  workspace_id: string
+  name: string
+  description: string
+  created_at: string
+  updated_at: string
+  sessions?: SessionInfoDto[]
+}
+
+export interface WorkspaceDto {
+  id: string
+  name: string
+  description: string
+  created_at: string
+  updated_at: string
+  projects?: ProjectDto[]       // 三层结构：项目列表（含嵌套 sessions）
+  sessions?: SessionInfoDto[]   // 向后兼容：该工作区下所有 sessions 的扁平列表
 }
 
 export async function listWorkspaces(): Promise<{ workspaces: WorkspaceDto[] }> {
@@ -69,6 +120,46 @@ export async function deleteWorkspace(wsId: string): Promise<void> {
   if (!res.ok && res.status !== 404) throw new Error(await res.text())
 }
 
+// ─── Project API（三层架构：Workspace → Project → Session）──────────────────
+
+export async function listProjects(wsId: string): Promise<{ workspace_id: string; projects: ProjectDto[] }> {
+  const res = await fetch(`${BASE_URL}/api/workspaces/${wsId}/projects`)
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
+}
+
+export async function createProject(wsId: string, name: string, description = ''): Promise<ProjectDto> {
+  const res = await fetch(`${BASE_URL}/api/workspaces/${wsId}/projects`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name, description }),
+  })
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
+}
+
+export async function renameProject(projId: string, name: string): Promise<void> {
+  const res = await fetch(`${BASE_URL}/api/projects/${projId}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name }),
+  })
+  if (!res.ok) throw new Error(await res.text())
+}
+
+export async function deleteProject(projId: string): Promise<void> {
+  const res = await fetch(`${BASE_URL}/api/projects/${projId}`, { method: 'DELETE' })
+  if (!res.ok && res.status !== 404) throw new Error(await res.text())
+}
+
+export async function getProjectInfo(projId: string): Promise<ProjectDto> {
+  const res = await fetch(`${BASE_URL}/api/projects/${projId}`)
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
+}
+
+// ─── Session ──────────────────────────────────────────────────
+
 export async function deleteSession(sessionId: string): Promise<void> {
   const res = await fetch(`${BASE_URL}/api/sessions/${sessionId}`, { method: 'DELETE' })
   if (!res.ok && res.status !== 404) throw new Error(await res.text())
@@ -89,13 +180,23 @@ export async function getSessionInfo(sessionId: string): Promise<SessionInfoDto>
   return res.json()
 }
 
-// ─── Session ──────────────────────────────────────────────────
-
-export async function createSession(workspaceId?: string, title = '新对话'): Promise<{ session_id: string; workspace_id: string | null; title: string }> {
+/**
+ * 创建新对话（Session/Topic）
+ * projectId 为空时后端自动关联工作区的默认项目（或自动创建）
+ */
+export async function createSession(
+  workspaceId?: string,
+  title = '新对话',
+  projectId?: string,
+): Promise<{ session_id: string; workspace_id: string | null; project_id: string | null; title: string }> {
   const res = await fetch(`${BASE_URL}/api/sessions`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ workspace_id: workspaceId ?? '', title }),
+    body: JSON.stringify({
+      workspace_id: workspaceId ?? '',
+      project_id:   projectId   ?? '',
+      title,
+    }),
   })
   if (!res.ok) throw new Error(await res.text())
   return res.json()
@@ -398,6 +499,8 @@ export async function getSessionTodos(sessionId: string): Promise<{ session_id: 
 
 export interface UniversalChatRequest {
   message: string
+  workspace_id?: string                // 工作区 ID（必带，与 project_id 共同定位文件系统路径）
+  project_id?: string                  // 项目 ID（必带，工具层文件隔离边界依赖此字段）
   attachment_content?: string          // 文本附件内容（ABC/JSON/TXT，可进 LLM context）
   attachment_name?: string             // 附件文件名
   attachment_workspace_path?: string   // 工作区相对路径（MIDI/图片/音频，后端 Runner 层处理，不传 base64）

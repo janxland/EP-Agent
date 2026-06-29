@@ -31,6 +31,33 @@ Publisher = Callable[[str, dict], Awaitable[None]]
 
 logger = logging.getLogger("ep_agent")
 
+# ── TODO 规划 System Prompt（惰性缓存，避免每次 plan() 重建）────────────────────
+_TODO_SYSTEM_CACHE: str = ""
+
+def _build_todo_system() -> str:
+    """构建并缓存 TODO 规划 system prompt（domain_config 动态读取）。"""
+    global _TODO_SYSTEM_CACHE
+    if _TODO_SYSTEM_CACHE:
+        return _TODO_SYSTEM_CACHE
+    _domain_section = build_todo_prompt()
+    _TODO_SYSTEM_CACHE = f"""你是 EP-Agent 的任务规划器。根据用户意图输出结构化 TODO 列表。
+
+输出严格 JSON，不要任何其他文字：
+{{
+  "todos": [
+    {{"title": "任务标题（≤15字）", "detail": "详细说明（≤30字）"}}
+  ],
+  "summary": "一句话总结本次任务（≤20字）"
+}}
+
+规则：
+- 每个意图通常 2-4 个 TODO，简洁清晰，每个 TODO 必须对应真实可执行的操作
+- 不要包含 id 和 status 字段（系统自动分配）
+- 各意图域的 TODO 模板（按此规划）：
+{_domain_section}
+- 每个 TODO 必须有明确的完成标志（工具返回/LLM输出/验证通过）"""
+    return _TODO_SYSTEM_CACHE
+
 
 class TodoManager:
     """
@@ -87,30 +114,13 @@ class TodoManager:
             f"意图域：{domain}\n"
             f"已有谱子：{'是' if has_score else '否'}"
         )
-        # 意图域 TODO 模板从 domain_config 动态读取（单一来源，扩展新域无需修改此文件）
-        _domain_todo_section = build_todo_prompt()
-        _TODO_SYSTEM = f"""你是 EP-Agent 的任务规划器。根据用户意图输出结构化 TODO 列表。
-
-输出严格 JSON，不要任何其他文字：
-{{
-  "todos": [
-    {{"title": "任务标题（≤15字）", "detail": "详细说明（≤30字）"}}
-  ],
-  "summary": "一句话总结本次任务（≤20字）"
-}}
-
-规则：
-- 每个意图通常 2-4 个 TODO，简洁清晰，每个 TODO 必须对应真实可执行的操作
-- 不要包含 id 和 status 字段（系统自动分配）
-- 各意图域的 TODO 模板（按此规划）：
-{_domain_todo_section}
-- 每个 TODO 必须有明确的完成标志（工具返回/LLM输出/验证通过）"""
+        _TODO_SYSTEM = _build_todo_system()
 
         try:
             resp = await complete([
                 {"role": "system", "content": _TODO_SYSTEM},
                 {"role": "user",   "content": context},
-            ])
+            ], tier="lite")  # M1: TODO 规划用轻量模型
             raw = resp if isinstance(resp, str) else resp.get("content", "{}")
             m = re.search(r'\{.*\}', raw, re.DOTALL)
             if m:
@@ -210,7 +220,7 @@ class TodoManager:
             resp = await complete([
                 {"role": "system", "content": _CRITIC_SYSTEM},
                 {"role": "user",   "content": json.dumps(payload, ensure_ascii=False)},
-            ], temperature=0.1)
+            ], temperature=0.1, tier="lite")  # M1: TodoCritic 用轻量模型
             raw = resp if isinstance(resp, str) else resp.get("content", "{}")
             raw = re.sub(r'```[a-z]*\n?', '', raw).strip()
             m = re.search(r'\{.*\}', raw, re.DOTALL)

@@ -1,0 +1,423 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>GPT-SoVITS · 安装</title>
+<script src="https://cdn.tailwindcss.com/3.4.17"></script>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.7.2/css/all.min.css">
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
+  *{box-sizing:border-box}
+  body{font-family:'Inter',sans-serif;background:#0a0a0f;color:#e2e8f0;overflow-x:hidden}
+  .bg-grid{position:fixed;inset:0;z-index:0;background-image:linear-gradient(rgba(139,92,246,0.03) 1px,transparent 1px),linear-gradient(90deg,rgba(139,92,246,0.03) 1px,transparent 1px);background-size:40px 40px}
+  .bg-glow{position:fixed;inset:0;z-index:0;pointer-events:none;background:radial-gradient(ellipse 60% 40% at 20% 20%,rgba(139,92,246,0.12) 0%,transparent 60%),radial-gradient(ellipse 40% 30% at 80% 80%,rgba(236,72,153,0.08) 0%,transparent 60%)}
+  .glass{background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.08);backdrop-filter:blur(20px);border-radius:16px}
+  .glass-dark{background:rgba(0,0,0,0.3);border:1px solid rgba(255,255,255,0.06);backdrop-filter:blur(12px);border-radius:12px}
+  .grad-text{background:linear-gradient(135deg,#a78bfa 0%,#ec4899 50%,#f97316 100%);-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text}
+  .step-card{transition:all 0.3s ease;cursor:pointer}
+  .step-card:hover{transform:translateY(-2px);border-color:rgba(167,139,250,0.3)!important}
+  .step-card.active{border-color:rgba(167,139,250,0.5)!important;background:rgba(167,139,250,0.06)!important}
+  .step-card.done{border-color:rgba(34,197,94,0.4)!important;background:rgba(34,197,94,0.04)!important}
+  .step-card.error{border-color:rgba(239,68,68,0.4)!important;background:rgba(239,68,68,0.04)!important}
+  .step-num{width:32px;height:32px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:600;flex-shrink:0;background:rgba(167,139,250,0.15);border:1px solid rgba(167,139,250,0.3);color:#a78bfa;transition:all 0.3s}
+  .step-num.done{background:rgba(34,197,94,0.15);border-color:rgba(34,197,94,0.4);color:#22c55e}
+  .step-num.active{background:rgba(167,139,250,0.25);border-color:#a78bfa;color:#fff;box-shadow:0 0 12px rgba(167,139,250,0.4)}
+  .step-num.error{background:rgba(239,68,68,0.15);border-color:rgba(239,68,68,0.4);color:#ef4444}
+  .progress-bar{height:4px;border-radius:2px;background:rgba(255,255,255,0.06);overflow:hidden}
+  .progress-fill{height:100%;border-radius:2px;background:linear-gradient(90deg,#a78bfa,#ec4899);transition:width 0.6s cubic-bezier(0.4,0,0.2,1)}
+  .terminal{font-family:'JetBrains Mono',monospace;font-size:12.5px;line-height:1.7;background:#060810;border:1px solid rgba(255,255,255,0.06);border-radius:10px;padding:16px;max-height:340px;overflow-y:auto;scroll-behavior:smooth}
+  .terminal::-webkit-scrollbar{width:4px}
+  .terminal::-webkit-scrollbar-thumb{background:rgba(255,255,255,0.1);border-radius:2px}
+  .log-info{color:#94a3b8}.log-success{color:#22c55e}.log-warn{color:#f59e0b}.log-error{color:#ef4444}.log-cmd{color:#60a5fa}.log-highlight{color:#a78bfa}
+  .btn-primary{background:linear-gradient(135deg,#7c3aed,#db2777);border:none;color:white;font-weight:600;padding:12px 28px;border-radius:10px;cursor:pointer;transition:all 0.2s;display:inline-flex;align-items:center;gap:8px}
+  .btn-primary:hover{transform:translateY(-1px);box-shadow:0 8px 25px rgba(124,58,237,0.4)}
+  .btn-primary:disabled{opacity:0.4;cursor:not-allowed;transform:none;box-shadow:none}
+  .btn-secondary{background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.12);color:#cbd5e1;font-weight:500;padding:10px 20px;border-radius:10px;cursor:pointer;transition:all 0.2s;display:inline-flex;align-items:center;gap:8px}
+  .btn-secondary:hover{background:rgba(255,255,255,0.1);border-color:rgba(255,255,255,0.2)}
+  .option-pill{padding:8px 16px;border-radius:8px;font-size:13px;font-weight:500;cursor:pointer;transition:all 0.2s;border:1px solid rgba(255,255,255,0.1);color:#64748b;background:rgba(255,255,255,0.03)}
+  .option-pill.selected{background:rgba(167,139,250,0.15);color:#a78bfa;border-color:rgba(167,139,250,0.4)}
+  .option-pill:hover:not(.selected){border-color:rgba(255,255,255,0.2);color:#94a3b8}
+  .badge{padding:3px 10px;border-radius:20px;font-size:11px;font-weight:600;display:inline-flex;align-items:center;gap:4px}
+  .badge-idle{background:rgba(100,116,139,0.15);color:#64748b;border:1px solid rgba(100,116,139,0.2)}
+  .badge-running{background:rgba(167,139,250,0.15);color:#a78bfa;border:1px solid rgba(167,139,250,0.3)}
+  .badge-done{background:rgba(34,197,94,0.12);color:#22c55e;border:1px solid rgba(34,197,94,0.25)}
+  .badge-error{background:rgba(239,68,68,0.12);color:#ef4444;border:1px solid rgba(239,68,68,0.25)}
+  @keyframes spin{to{transform:rotate(360deg)}}
+  .spin{animation:spin 1s linear infinite}
+  @keyframes pulse-dot{0%,100%{opacity:1;transform:scale(1)}50%{opacity:0.5;transform:scale(0.8)}}
+  .pulse-dot{animation:pulse-dot 1.2s ease-in-out infinite}
+  @keyframes fadeIn{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}
+  .fade-in{animation:fadeIn 0.4s ease forwards}
+  @keyframes successPop{0%{transform:scale(0.5);opacity:0}70%{transform:scale(1.1)}100%{transform:scale(1);opacity:1}}
+  .success-pop{animation:successPop 0.5s cubic-bezier(0.34,1.56,0.64,1) forwards}
+  ::-webkit-scrollbar{width:6px}
+  ::-webkit-scrollbar-thumb{background:rgba(255,255,255,0.08);border-radius:3px}
+</style>
+</head>
+<body>
+<div class="bg-grid"></div>
+<div class="bg-glow"></div>
+<div class="relative z-10 min-h-screen p-6">
+
+  <!-- 顶部导航 -->
+  <div class="max-w-5xl mx-auto mb-6 flex items-center justify-between">
+    <div class="flex items-center gap-3">
+      <div class="w-9 h-9 rounded-xl flex items-center justify-center" style="background:linear-gradient(135deg,#7c3aed,#db2777)">
+        <i class="fa-solid fa-microphone-lines text-white"></i>
+      </div>
+      <div>
+        <h1 class="text-lg font-bold grad-text leading-tight">GPT-SoVITS</h1>
+        <p class="text-xs text-slate-500">安装向导</p>
+      </div>
+    </div>
+    <div class="flex items-center gap-2">
+      <span class="badge badge-idle" id="overallBadge"><span class="w-1.5 h-1.5 rounded-full bg-slate-500 pulse-dot"></span>等待开始</span>
+      <a href="/launcher" class="btn-secondary text-xs py-2 px-3"><i class="fa-solid fa-rocket text-xs"></i>启动页</a>
+      <a href="/updater" class="btn-secondary text-xs py-2 px-3"><i class="fa-solid fa-rotate text-xs"></i>更新页</a>
+    </div>
+  </div>
+
+  <!-- 进度条 -->
+  <div class="max-w-5xl mx-auto mb-5">
+    <div class="flex justify-between items-center mb-2">
+      <span class="text-xs text-slate-500 font-medium">安装进度</span>
+      <span class="text-xs text-slate-400 font-mono" id="progressPct">0%</span>
+    </div>
+    <div class="progress-bar"><div class="progress-fill" id="progressFill" style="width:0%"></div></div>
+  </div>
+
+  <div class="max-w-5xl mx-auto grid grid-cols-1 lg:grid-cols-3 gap-5">
+
+    <!-- 左栏 -->
+    <div class="lg:col-span-1 space-y-3">
+
+      <!-- 环境信息 -->
+      <div class="glass p-4">
+        <p class="text-xs text-slate-500 font-semibold uppercase tracking-wider mb-3">运行环境</p>
+        <div class="space-y-2">
+          <div class="flex items-center justify-between">
+            <span class="text-sm text-slate-400">操作系统</span>
+            <span class="text-sm font-medium text-slate-200" id="osLabel">检测中…</span>
+          </div>
+          <div class="flex items-center justify-between">
+            <span class="text-sm text-slate-400">Python</span>
+            <span class="text-sm font-medium" id="pyLabel"><span class="text-slate-500">未检测</span></span>
+          </div>
+          <div class="flex items-center justify-between">
+            <span class="text-sm text-slate-400">Conda</span>
+            <span class="text-sm font-medium" id="condaLabel"><span class="text-slate-500">未检测</span></span>
+          </div>
+          <div class="flex items-center justify-between">
+            <span class="text-sm text-slate-400">Git</span>
+            <span class="text-sm font-medium" id="gitLabel"><span class="text-slate-500">未检测</span></span>
+          </div>
+          <div class="flex items-center justify-between">
+            <span class="text-sm text-slate-400">CUDA</span>
+            <span class="text-sm font-medium" id="cudaLabel"><span class="text-slate-500">检测中…</span></span>
+          </div>
+        </div>
+      </div>
+
+      <!-- 步骤列表 -->
+      <div class="glass p-4">
+        <p class="text-xs text-slate-500 font-semibold uppercase tracking-wider mb-3">安装步骤</p>
+        <div class="space-y-2" id="stepList"></div>
+      </div>
+
+      <!-- 安装配置 -->
+      <div class="glass p-4" id="configPanel">
+        <p class="text-xs text-slate-500 font-semibold uppercase tracking-wider mb-3">安装配置</p>
+        <div class="mb-4">
+          <p class="text-xs text-slate-500 mb-2">设备类型 <span class="text-violet-400 ml-1" id="cudaAutoTip"></span></p>
+          <div class="flex flex-wrap gap-2" id="deviceOptions">
+            <button class="option-pill selected" data-val="CPU">CPU</button>
+            <button class="option-pill" data-val="MPS">MPS</button>
+            <button class="option-pill" data-val="CU126">CUDA 12.6</button>
+            <button class="option-pill" data-val="CU128">CUDA 12.8</button>
+          </div>
+        </div>
+        <div class="mb-4">
+          <p class="text-xs text-slate-500 mb-2">模型下载源</p>
+          <div class="flex flex-wrap gap-2" id="sourceOptions">
+            <button class="option-pill" data-val="HF">HuggingFace</button>
+            <button class="option-pill selected" data-val="HF-Mirror">HF 镜像（国内）</button>
+            <button class="option-pill" data-val="ModelScope">ModelScope</button>
+          </div>
+        </div>
+        <div class="mb-4">
+          <p class="text-xs text-slate-500 mb-2">安装目录</p>
+          <input type="text" id="installDir" placeholder="默认: ./GPT-SoVITS"
+            class="w-full text-sm bg-black/30 border border-white/10 rounded-lg px-3 py-2 text-slate-300 placeholder-slate-600 outline-none focus:border-violet-500/50 transition-colors">
+        </div>
+        <div class="flex items-center gap-2">
+          <input type="checkbox" id="dlUVR5" class="w-4 h-4 rounded" style="accent-color:#a78bfa">
+          <label for="dlUVR5" class="text-sm text-slate-400 cursor-pointer">下载 UVR5 人声分离模型</label>
+        </div>
+      </div>
+    </div>
+
+    <!-- 右栏 -->
+    <div class="lg:col-span-2 space-y-4">
+
+      <!-- 当前步骤 -->
+      <div class="glass p-5">
+        <div class="flex items-start justify-between mb-4">
+          <div>
+            <h2 class="text-lg font-semibold text-white" id="stepTitle">准备安装</h2>
+            <p class="text-sm text-slate-400 mt-1" id="stepDesc">配置安装选项后点击「开始安装」</p>
+          </div>
+          <span class="badge badge-idle" id="stepBadge"><span class="w-1.5 h-1.5 rounded-full bg-slate-500"></span>就绪</span>
+        </div>
+        <div class="flex flex-wrap gap-3">
+          <button class="btn-primary" id="btnStart">
+            <i class="fa-solid fa-play text-sm"></i>开始安装
+          </button>
+          <button class="btn-secondary hidden" id="btnRetry">
+            <i class="fa-solid fa-rotate-right text-sm"></i>重试
+          </button>
+        </div>
+      </div>
+
+      <!-- 终端 -->
+      <div class="glass p-4">
+        <div class="flex items-center justify-between mb-3">
+          <div class="flex items-center gap-2">
+            <div class="flex gap-1.5">
+              <div class="w-3 h-3 rounded-full bg-red-500/70"></div>
+              <div class="w-3 h-3 rounded-full bg-yellow-500/70"></div>
+              <div class="w-3 h-3 rounded-full bg-green-500/70"></div>
+            </div>
+            <span class="text-xs text-slate-500 font-medium ml-1">安装日志</span>
+          </div>
+          <button class="btn-secondary text-xs py-1 px-3" id="btnClearLog"><i class="fa-solid fa-trash text-xs"></i></button>
+        </div>
+        <div class="terminal" id="terminal"></div>
+      </div>
+
+      <!-- 完成卡片 -->
+      <div class="glass p-6 hidden text-center" id="doneCard">
+        <div class="success-pop inline-block mb-4">
+          <div class="w-16 h-16 rounded-full flex items-center justify-center mx-auto" style="background:linear-gradient(135deg,rgba(34,197,94,0.2),rgba(34,197,94,0.05));border:2px solid rgba(34,197,94,0.4)">
+            <i class="fa-solid fa-check text-2xl text-green-400"></i>
+          </div>
+        </div>
+        <h3 class="text-xl font-bold text-white mb-2">安装完成！🎉</h3>
+        <p class="text-slate-400 text-sm mb-5">GPT-SoVITS 已成功安装，前往启动页开始使用</p>
+        <a href="/launcher" class="btn-primary inline-flex">
+          <i class="fa-solid fa-rocket text-sm"></i>前往启动页
+        </a>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+const BACKEND = 'http://localhost:3333';
+const state = { os:'unknown', device:'CPU', source:'HF-Mirror', installDir:'', dlUVR5:false, running:false, currentStep:-1, stepStatuses:[] };
+
+const STEPS = [
+  { id:'detect',    icon:'fa-magnifying-glass', title:'环境检测',       desc:'检测 Python、Conda、Git、CUDA' },
+  { id:'deps',      icon:'fa-box-open',         title:'安装前置依赖',   desc:'检查 FFmpeg 等系统依赖' },
+  { id:'conda_env', icon:'fa-snake',            title:'创建 Conda 环境', desc:'创建 Python 3.10 虚拟环境' },
+  { id:'clone',     icon:'fa-code-branch',      title:'克隆仓库',       desc:'拉取 GPT-SoVITS 源码' },
+  { id:'install',   icon:'fa-gear',             title:'安装 Python 依赖', desc:'安装 PyTorch 及所有依赖（耗时较长）' },
+  { id:'verify',    icon:'fa-circle-check',     title:'验证安装',       desc:'验证安装完整性' },
+];
+
+// ── 初始化 ────────────────────────────────────────────────────
+window.addEventListener('load', () => {
+  renderStepList();
+  initPills();
+  initButtons();
+  connectSSE();
+  log('highlight', '  GPT-SoVITS 安装器已就绪');
+  log('info', '  配置好选项后点击「开始安装」');
+});
+
+function renderStepList() {
+  const c = document.getElementById('stepList');
+  c.innerHTML = STEPS.map((s, i) => {
+    const st = state.stepStatuses[i] || 'idle';
+    return `<div class="step-card glass-dark p-3 flex items-center gap-3 ${st}" id="sc${i}">
+      <div class="step-num ${st}" id="sn${i}">
+        ${st==='done'?'<i class="fa-solid fa-check text-xs"></i>':st==='error'?'<i class="fa-solid fa-xmark text-xs"></i>':st==='running'?'<i class="fa-solid fa-spinner spin text-xs"></i>':`<span>${i+1}</span>`}
+      </div>
+      <div class="flex-1 min-w-0">
+        <p class="text-sm font-medium text-slate-200 truncate">${s.title}</p>
+        <p class="text-xs text-slate-500 truncate">${s.desc}</p>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+function updateStep(idx, status) {
+  state.stepStatuses[idx] = status;
+  const card = document.getElementById(`sc${idx}`);
+  const num  = document.getElementById(`sn${idx}`);
+  if (!card||!num) return;
+  card.className = `step-card glass-dark p-3 flex items-center gap-3 ${status}`;
+  num.className  = `step-num ${status}`;
+  const icons = { done:'<i class="fa-solid fa-check text-xs"></i>', error:'<i class="fa-solid fa-xmark text-xs"></i>', running:'<i class="fa-solid fa-spinner spin text-xs"></i>' };
+  num.innerHTML = icons[status] || `<span>${idx+1}</span>`;
+  if (status==='running') {
+    document.getElementById('stepTitle').textContent = STEPS[idx].title;
+    document.getElementById('stepDesc').textContent  = STEPS[idx].desc;
+    setBadge('stepBadge','running','执行中');
+  }
+}
+
+function initPills() {
+  ['deviceOptions','sourceOptions'].forEach(gid => {
+    document.getElementById(gid).querySelectorAll('.option-pill').forEach(btn => {
+      btn.addEventListener('click', () => {
+        document.getElementById(gid).querySelectorAll('.option-pill').forEach(b=>b.classList.remove('selected'));
+        btn.classList.add('selected');
+        if (gid==='deviceOptions') state.device = btn.dataset.val;
+        if (gid==='sourceOptions') state.source = btn.dataset.val;
+      });
+    });
+  });
+  document.getElementById('installDir').addEventListener('input', e => state.installDir = e.target.value);
+  document.getElementById('dlUVR5').addEventListener('change', e => state.dlUVR5 = e.target.checked);
+}
+
+function initButtons() {
+  document.getElementById('btnStart').addEventListener('click', startInstall);
+  document.getElementById('btnRetry').addEventListener('click', () => {
+    document.getElementById('btnRetry').classList.add('hidden');
+    startInstall();
+  });
+  document.getElementById('btnClearLog').addEventListener('click', () => {
+    document.getElementById('terminal').innerHTML = '';
+  });
+}
+
+// ── 安装 ──────────────────────────────────────────────────────
+async function startInstall() {
+  if (state.running) return;
+  state.running = true;
+  state.stepStatuses = [];
+  renderStepList();
+
+  const btn = document.getElementById('btnStart');
+  btn.disabled = true;
+  btn.innerHTML = '<i class="fa-solid fa-spinner spin text-sm"></i> 安装中…';
+  document.getElementById('configPanel').style.opacity = '0.5';
+  document.getElementById('configPanel').style.pointerEvents = 'none';
+  setBadge('overallBadge','running','安装中');
+
+  log('highlight', '\n▶ 开始安装 GPT-SoVITS');
+  log('info', `  设备: ${state.device} | 源: ${state.source}`);
+
+  try {
+    await fetch(`${BACKEND}/install`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ device:state.device, source:state.source, installDir:state.installDir||'./GPT-SoVITS', dlUVR5:state.dlUVR5 }),
+    });
+  } catch (e) {
+    log('error', `  后端请求失败: ${e.message}`);
+    log('warn', '  请确保已运行 start.bat / start.sh');
+    state.running = false;
+    btn.disabled = false;
+    btn.innerHTML = '<i class="fa-solid fa-play text-sm"></i> 开始安装';
+  }
+}
+
+// ── SSE ───────────────────────────────────────────────────────
+function connectSSE() {
+  const sse = new EventSource(`${BACKEND}/events`);
+  sse.onopen = () => {
+    log('success', '  ✓ 已连接后端服务');
+    fetch(`${BACKEND}/detect`).then(r=>r.json()).then(env => {
+      const osMap = { darwin:'macOS', win32:'Windows', linux:'Linux' };
+      document.getElementById('osLabel').textContent = osMap[env.os] || env.os;
+      const r = env.results || {};
+      if (r.python) document.getElementById('pyLabel').innerHTML = `<span class="text-green-400 font-mono text-xs">${r.python.split(' ').slice(-1)[0]} ✓</span>`;
+      else document.getElementById('pyLabel').innerHTML = `<span class="text-red-400 text-xs">未安装</span>`;
+      if (r.conda) document.getElementById('condaLabel').innerHTML = `<span class="text-green-400 font-mono text-xs">${r.conda} ✓</span>`;
+      else document.getElementById('condaLabel').innerHTML = `<span class="text-yellow-400 text-xs">未找到</span>`;
+      if (r.git) document.getElementById('gitLabel').innerHTML = `<span class="text-green-400 font-mono text-xs">${r.git.split(' ')[2]||'ok'} ✓</span>`;
+      // CUDA
+      const cuda = env.cuda;
+      if (cuda && cuda.raw) {
+        document.getElementById('cudaLabel').innerHTML = `<span class="text-green-400 font-mono text-xs">${cuda.raw} ✓</span>`;
+        document.getElementById('cudaAutoTip').textContent = `自动检测: ${cuda.device}`;
+        if (env.os !== 'darwin' && cuda.device !== 'CPU') {
+          selectPill('deviceOptions', cuda.device);
+          state.device = cuda.device;
+          log('success', `  ✓ 检测到 CUDA ${cuda.raw}，已自动选择 ${cuda.device}`);
+        }
+      } else {
+        document.getElementById('cudaLabel').innerHTML = `<span class="text-slate-500 text-xs">未检测到 GPU</span>`;
+      }
+      // macOS → MPS
+      if (env.os==='darwin' && env.arch==='arm64') { selectPill('deviceOptions','MPS'); state.device='MPS'; }
+    }).catch(()=>{});
+  };
+  sse.onmessage = e => {
+    try {
+      const msg = JSON.parse(e.data);
+      if (msg.type==='log') {
+        log(msg.level||'info', msg.msg||'');
+      } else if (msg.type==='step') {
+        updateStep(msg.idx, msg.status);
+      } else if (msg.type==='progress') {
+        setProgress(msg.pct);
+      } else if (msg.type==='cuda_detected') {
+        document.getElementById('cudaLabel').innerHTML = `<span class="text-green-400 font-mono text-xs">${msg.raw} ✓</span>`;
+        selectPill('deviceOptions', msg.device); state.device = msg.device;
+      } else if (msg.type==='install_done') {
+        state.running = false;
+        setBadge('overallBadge','done','安装完成');
+        setProgress(100);
+        document.getElementById('btnStart').classList.add('hidden');
+        setTimeout(() => {
+          document.getElementById('doneCard').classList.remove('hidden');
+          document.getElementById('doneCard').classList.add('fade-in');
+        }, 500);
+      } else if (msg.type==='install_error') {
+        state.running = false;
+        setBadge('overallBadge','error','安装失败');
+        setBadge('stepBadge','error','失败');
+        document.getElementById('btnRetry').classList.remove('hidden');
+        const btn = document.getElementById('btnStart');
+        btn.disabled = false;
+        btn.innerHTML = '<i class="fa-solid fa-play text-sm"></i> 重新安装';
+        document.getElementById('configPanel').style.opacity = '1';
+        document.getElementById('configPanel').style.pointerEvents = 'auto';
+      }
+    } catch(_) {}
+  };
+  sse.onerror = () => log('warn', '  后端连接断开，请检查 server.js 是否运行');
+}
+
+// ── 工具函数 ──────────────────────────────────────────────────
+function log(type, msg) {
+  const t = document.getElementById('terminal');
+  const d = document.createElement('div');
+  const time = new Date().toLocaleTimeString('zh',{hour12:false});
+  const cls = {info:'log-info',success:'log-success',warn:'log-warn',error:'log-error',cmd:'log-cmd',highlight:'log-highlight'};
+  d.className = cls[type]||'log-info';
+  d.innerHTML = `<span style="color:#334155;font-size:11px">${time}</span> ${escHtml(msg)}`;
+  t.appendChild(d); t.scrollTop = t.scrollHeight;
+}
+function escHtml(s) { return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+function setProgress(pct) {
+  document.getElementById('progressFill').style.width = pct+'%';
+  document.getElementById('progressPct').textContent = pct+'%';
+}
+function setBadge(id, type, label) {
+  const el = document.getElementById(id);
+  const map = {idle:'badge-idle',running:'badge-running',done:'badge-done',error:'badge-error'};
+  const dot = {idle:'#64748b',running:'#a78bfa',done:'#22c55e',error:'#ef4444'};
+  el.className = `badge ${map[type]}`;
+  el.innerHTML = `<span class="w-1.5 h-1.5 rounded-full pulse-dot" style="background:${dot[type]}"></span>${label}`;
+}
+function selectPill(gid, val) {
+  document.getElementById(gid).querySelectorAll('.option-pill').forEach(b => b.classList.toggle('selected', b.dataset.val===val));
+}
+</script>
+</body>
+</html>

@@ -1,0 +1,476 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>GPT-SoVITS · 启动器</title>
+<script src="https://cdn.tailwindcss.com/3.4.17"></script>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.7.2/css/all.min.css">
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
+  *{box-sizing:border-box}
+  body{font-family:'Inter',sans-serif;background:#0a0a0f;color:#e2e8f0;overflow-x:hidden;margin:0}
+  .bg-grid{position:fixed;inset:0;z-index:0;background-image:linear-gradient(rgba(139,92,246,0.03) 1px,transparent 1px),linear-gradient(90deg,rgba(139,92,246,0.03) 1px,transparent 1px);background-size:40px 40px}
+  .bg-glow{position:fixed;inset:0;z-index:0;pointer-events:none;background:radial-gradient(ellipse 60% 40% at 20% 20%,rgba(139,92,246,0.12) 0%,transparent 60%),radial-gradient(ellipse 40% 30% at 80% 80%,rgba(236,72,153,0.08) 0%,transparent 60%)}
+  .glass{background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.08);backdrop-filter:blur(20px);border-radius:16px}
+  .glass-dark{background:rgba(0,0,0,0.3);border:1px solid rgba(255,255,255,0.06);backdrop-filter:blur(12px);border-radius:12px}
+  .grad-text{background:linear-gradient(135deg,#a78bfa 0%,#ec4899 50%,#f97316 100%);-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text}
+  .terminal{font-family:'JetBrains Mono',monospace;font-size:12px;line-height:1.7;background:#060810;border:1px solid rgba(255,255,255,0.06);border-radius:10px;padding:14px;max-height:280px;overflow-y:auto}
+  .terminal::-webkit-scrollbar{width:4px}
+  .terminal::-webkit-scrollbar-thumb{background:rgba(255,255,255,0.1);border-radius:2px}
+  .log-info{color:#94a3b8}.log-success{color:#22c55e}.log-warn{color:#f59e0b}.log-error{color:#ef4444}.log-cmd{color:#60a5fa}.log-highlight{color:#a78bfa}
+  .btn-primary{background:linear-gradient(135deg,#7c3aed,#db2777);border:none;color:white;font-weight:600;padding:12px 24px;border-radius:10px;cursor:pointer;transition:all 0.2s;display:inline-flex;align-items:center;gap:8px;font-size:14px}
+  .btn-primary:hover{transform:translateY(-1px);box-shadow:0 8px 25px rgba(124,58,237,0.4)}
+  .btn-primary:disabled{opacity:0.4;cursor:not-allowed;transform:none;box-shadow:none}
+  .btn-danger{background:rgba(239,68,68,0.15);border:1px solid rgba(239,68,68,0.3);color:#ef4444;font-weight:600;padding:12px 24px;border-radius:10px;cursor:pointer;transition:all 0.2s;display:inline-flex;align-items:center;gap:8px;font-size:14px}
+  .btn-danger:hover{background:rgba(239,68,68,0.25);border-color:rgba(239,68,68,0.5)}
+  .btn-secondary{background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.12);color:#cbd5e1;font-weight:500;padding:10px 18px;border-radius:10px;cursor:pointer;transition:all 0.2s;display:inline-flex;align-items:center;gap:8px;font-size:13px}
+  .btn-secondary:hover{background:rgba(255,255,255,0.1);border-color:rgba(255,255,255,0.2)}
+  .btn-link{background:rgba(96,165,250,0.12);border:1px solid rgba(96,165,250,0.25);color:#60a5fa;font-weight:600;padding:12px 24px;border-radius:10px;cursor:pointer;transition:all 0.2s;display:inline-flex;align-items:center;gap:8px;font-size:14px;text-decoration:none}
+  .btn-link:hover{background:rgba(96,165,250,0.2);border-color:rgba(96,165,250,0.4);transform:translateY(-1px)}
+  .stat-card{background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.07);border-radius:12px;padding:16px;transition:all 0.2s}
+  .stat-card:hover{border-color:rgba(255,255,255,0.12);background:rgba(255,255,255,0.05)}
+  .status-dot{width:10px;height:10px;border-radius:50%;flex-shrink:0}
+  .status-dot.online{background:#22c55e;box-shadow:0 0 8px rgba(34,197,94,0.6)}
+  .status-dot.offline{background:#64748b}
+  .status-dot.starting{background:#f59e0b;box-shadow:0 0 8px rgba(245,158,11,0.6)}
+  @keyframes spin{to{transform:rotate(360deg)}}
+  .spin{animation:spin 1s linear infinite}
+  @keyframes pulse{0%,100%{opacity:1}50%{opacity:0.4}}
+  .pulse{animation:pulse 1.5s ease-in-out infinite}
+  @keyframes fadeIn{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}
+  .fade-in{animation:fadeIn 0.4s ease forwards}
+  @keyframes glow{0%,100%{box-shadow:0 0 20px rgba(34,197,94,0.2)}50%{box-shadow:0 0 40px rgba(34,197,94,0.5)}}
+  .glow-green{animation:glow 2s ease-in-out infinite}
+  .info-row{display:flex;align-items:center;justify-content:space-between;padding:8px 0;border-bottom:1px solid rgba(255,255,255,0.05)}
+  .info-row:last-child{border-bottom:none}
+  ::-webkit-scrollbar{width:6px}
+  ::-webkit-scrollbar-thumb{background:rgba(255,255,255,0.08);border-radius:3px}
+</style>
+</head>
+<body>
+<div class="bg-grid"></div>
+<div class="bg-glow"></div>
+<div class="relative z-10 min-h-screen p-6">
+
+  <!-- 顶部导航 -->
+  <div class="max-w-5xl mx-auto mb-6 flex items-center justify-between">
+    <div class="flex items-center gap-3">
+      <div class="w-9 h-9 rounded-xl flex items-center justify-center" style="background:linear-gradient(135deg,#7c3aed,#db2777)">
+        <i class="fa-solid fa-microphone-lines text-white"></i>
+      </div>
+      <div>
+        <h1 class="text-lg font-bold grad-text leading-tight">GPT-SoVITS</h1>
+        <p class="text-xs text-slate-500">启动控制台</p>
+      </div>
+    </div>
+    <div class="flex items-center gap-2">
+      <a href="/install" class="btn-secondary text-xs py-2 px-3"><i class="fa-solid fa-download text-xs"></i>安装页</a>
+      <a href="/updater" class="btn-secondary text-xs py-2 px-3"><i class="fa-solid fa-rotate text-xs"></i>更新页</a>
+    </div>
+  </div>
+
+  <div class="max-w-5xl mx-auto grid grid-cols-1 lg:grid-cols-3 gap-5">
+
+    <!-- 左栏：状态 + 信息 -->
+    <div class="lg:col-span-1 space-y-4">
+
+      <!-- WebUI 状态卡 -->
+      <div class="glass p-5 text-center" id="statusCard">
+        <div class="relative inline-block mb-4">
+          <div class="w-20 h-20 rounded-full flex items-center justify-center mx-auto" id="statusCircle"
+               style="background:rgba(100,116,139,0.15);border:2px solid rgba(100,116,139,0.3)">
+            <i class="fa-solid fa-microphone-slash text-3xl text-slate-500" id="statusIcon"></i>
+          </div>
+        </div>
+        <h2 class="text-lg font-bold text-white mb-1" id="statusTitle">检测中…</h2>
+        <p class="text-sm text-slate-400 mb-4" id="statusSub">正在连接后端服务</p>
+        <div class="flex items-center justify-center gap-2 mb-1">
+          <div class="status-dot offline" id="statusDot"></div>
+          <span class="text-sm font-medium text-slate-300" id="statusLabel">未知</span>
+        </div>
+        <p class="text-xs text-slate-500 mt-1" id="pidLabel"></p>
+      </div>
+
+      <!-- 安装信息 -->
+      <div class="glass p-4">
+        <p class="text-xs text-slate-500 font-semibold uppercase tracking-wider mb-3">安装信息</p>
+        <div>
+          <div class="info-row">
+            <span class="text-sm text-slate-400">安装目录</span>
+            <span class="text-xs font-mono text-slate-300 truncate max-w-32" id="infoDir" title="">—</span>
+          </div>
+          <div class="info-row">
+            <span class="text-sm text-slate-400">模型文件</span>
+            <span class="text-sm font-medium text-slate-200" id="infoModels">—</span>
+          </div>
+          <div class="info-row">
+            <span class="text-sm text-slate-400">最新提交</span>
+            <span class="text-xs font-mono text-slate-400 truncate max-w-36" id="infoGit" title="">—</span>
+          </div>
+          <div class="info-row">
+            <span class="text-sm text-slate-400">WebUI 地址</span>
+            <a href="http://localhost:9872" target="_blank" class="text-xs text-blue-400 hover:text-blue-300">localhost:9872</a>
+          </div>
+        </div>
+      </div>
+
+      <!-- 环境检测 -->
+      <div class="glass p-4">
+        <p class="text-xs text-slate-500 font-semibold uppercase tracking-wider mb-3">运行环境</p>
+        <div>
+          <div class="info-row">
+            <span class="text-sm text-slate-400">操作系统</span>
+            <span class="text-sm text-slate-200" id="envOs">—</span>
+          </div>
+          <div class="info-row">
+            <span class="text-sm text-slate-400">CUDA</span>
+            <span class="text-sm" id="envCuda">—</span>
+          </div>
+          <div class="info-row">
+            <span class="text-sm text-slate-400">Python</span>
+            <span class="text-xs font-mono text-slate-300" id="envPython">—</span>
+          </div>
+          <div class="info-row">
+            <span class="text-sm text-slate-400">Conda</span>
+            <span class="text-xs font-mono text-slate-300" id="envConda">—</span>
+          </div>
+        </div>
+        <button class="btn-secondary w-full mt-3 justify-center text-xs py-2" id="btnRecheck">
+          <i class="fa-solid fa-arrows-rotate text-xs"></i>重新检测环境
+        </button>
+      </div>
+    </div>
+
+    <!-- 右栏：操作 + 日志 -->
+    <div class="lg:col-span-2 space-y-4">
+
+      <!-- 主操作区 -->
+      <div class="glass p-6">
+        <h2 class="text-base font-semibold text-white mb-1">WebUI 控制</h2>
+        <p class="text-sm text-slate-400 mb-5">启动 GPT-SoVITS WebUI，在浏览器中进行音色克隆</p>
+
+        <!-- 主按钮区 -->
+        <div class="flex flex-wrap gap-3 mb-5" id="actionBtns">
+          <button class="btn-primary" id="btnLaunch">
+            <i class="fa-solid fa-rocket text-sm"></i>一键启动 WebUI
+          </button>
+          <button class="btn-danger hidden" id="btnStop">
+            <i class="fa-solid fa-stop text-sm"></i>停止服务
+          </button>
+          <a href="http://localhost:9872" target="_blank" class="btn-link hidden" id="btnOpen">
+            <i class="fa-solid fa-arrow-up-right-from-square text-sm"></i>打开 WebUI
+          </a>
+        </div>
+
+        <!-- 快捷操作 -->
+        <div class="grid grid-cols-2 sm:grid-cols-3 gap-3">
+          <button class="stat-card text-center cursor-pointer" id="btnReinstall">
+            <i class="fa-solid fa-screwdriver-wrench text-violet-400 text-xl mb-2 block"></i>
+            <p class="text-sm font-medium text-slate-200">重新安装依赖</p>
+            <p class="text-xs text-slate-500 mt-1">修复损坏的环境</p>
+          </button>
+          <a href="/updater" class="stat-card text-center cursor-pointer block no-underline">
+            <i class="fa-solid fa-code-branch text-blue-400 text-xl mb-2 block"></i>
+            <p class="text-sm font-medium text-slate-200">检查更新</p>
+            <p class="text-xs text-slate-500 mt-1">拉取最新代码</p>
+          </a>
+          <a href="/install" class="stat-card text-center cursor-pointer block no-underline">
+            <i class="fa-solid fa-plus text-green-400 text-xl mb-2 block"></i>
+            <p class="text-sm font-medium text-slate-200">重新安装</p>
+            <p class="text-xs text-slate-500 mt-1">全新安装流程</p>
+          </a>
+        </div>
+      </div>
+
+      <!-- 健康检测 -->
+      <div class="glass p-5">
+        <div class="flex items-center justify-between mb-4">
+          <div>
+            <h3 class="text-base font-semibold text-white">健康检测</h3>
+            <p class="text-xs text-slate-500 mt-0.5">每 10 秒自动检测一次</p>
+          </div>
+          <button class="btn-secondary text-xs py-1.5 px-3" id="btnHealthCheck">
+            <i class="fa-solid fa-stethoscope text-xs"></i>立即检测
+          </button>
+        </div>
+        <div class="grid grid-cols-2 sm:grid-cols-4 gap-3" id="healthGrid">
+          <!-- 动态生成 -->
+        </div>
+        <p class="text-xs text-slate-600 mt-3 text-right" id="lastCheckTime">尚未检测</p>
+      </div>
+
+      <!-- 实时日志 -->
+      <div class="glass p-4">
+        <div class="flex items-center justify-between mb-3">
+          <div class="flex items-center gap-2">
+            <div class="flex gap-1.5">
+              <div class="w-3 h-3 rounded-full bg-red-500/70"></div>
+              <div class="w-3 h-3 rounded-full bg-yellow-500/70"></div>
+              <div class="w-3 h-3 rounded-full bg-green-500/70"></div>
+            </div>
+            <span class="text-xs text-slate-500 font-medium ml-1">实时日志</span>
+          </div>
+          <button class="btn-secondary text-xs py-1 px-3" id="btnClearLog"><i class="fa-solid fa-trash text-xs"></i></button>
+        </div>
+        <div class="terminal" id="terminal"></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+const BACKEND = 'http://localhost:3333';
+let webuiRunning = false;
+let healthTimer  = null;
+let statusTimer  = null;
+
+// ── 初始化 ────────────────────────────────────────────────────
+window.addEventListener('load', () => {
+  initButtons();
+  connectSSE();
+  renderHealthGrid('unknown');
+  refreshStatus();
+  loadEnv();
+  // 定时刷新状态
+  statusTimer = setInterval(refreshStatus, 10000);
+});
+
+// ── 按钮绑定 ─────────────────────────────────────────────────
+function initButtons() {
+  document.getElementById('btnLaunch').addEventListener('click', launchWebUI);
+  document.getElementById('btnStop').addEventListener('click', stopWebUI);
+  document.getElementById('btnRecheck').addEventListener('click', loadEnv);
+  document.getElementById('btnHealthCheck').addEventListener('click', doHealthCheck);
+  document.getElementById('btnClearLog').addEventListener('click', () => document.getElementById('terminal').innerHTML = '');
+  document.getElementById('btnReinstall').addEventListener('click', () => {
+    if (!confirm('将重新安装 Python 依赖，确认继续？')) return;
+    fetch(`${BACKEND}/reinstall`, { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({}) })
+      .then(() => { log('highlight','▶ 重新安装依赖已启动，请查看日志…'); window.location.href='/install'; })
+      .catch(e => log('error', `请求失败: ${e.message}`));
+  });
+}
+
+// ── 刷新状态 ─────────────────────────────────────────────────
+async function refreshStatus() {
+  try {
+    const s = await fetch(`${BACKEND}/status`).then(r=>r.json());
+    webuiRunning = s.webuiRunning || s.webuiOnline;
+
+    // 安装信息
+    const dir = s.installDir || '—';
+    const dirEl = document.getElementById('infoDir');
+    dirEl.textContent = dir.length > 30 ? '…'+dir.slice(-28) : dir;
+    dirEl.title = dir;
+    document.getElementById('infoModels').textContent = s.hasModels ? `${s.modelCount} 个文件 ✓` : '未下载';
+    document.getElementById('infoGit').textContent = s.gitLog || '—';
+    document.getElementById('infoGit').title = s.gitLog || '';
+
+    if (!s.installed) {
+      setStatus('notInstalled');
+    } else if (s.webuiOnline) {
+      setStatus('online', s.webuiPid);
+    } else if (s.webuiRunning) {
+      setStatus('starting', s.webuiPid);
+    } else {
+      setStatus('offline');
+    }
+
+    // 同步按钮
+    syncButtons();
+  } catch(_) {
+    setStatus('backendOffline');
+  }
+}
+
+function setStatus(state, pid) {
+  const circle = document.getElementById('statusCircle');
+  const icon   = document.getElementById('statusIcon');
+  const title  = document.getElementById('statusTitle');
+  const sub    = document.getElementById('statusSub');
+  const dot    = document.getElementById('statusDot');
+  const label  = document.getElementById('statusLabel');
+  const pidEl  = document.getElementById('pidLabel');
+
+  const cfg = {
+    online:        { bg:'rgba(34,197,94,0.15)',  border:'rgba(34,197,94,0.5)',  iconCls:'fa-microphone text-green-400',  title:'WebUI 运行中',   sub:'服务正常，可以开始使用',       dotCls:'online',   labelTxt:'在线',     extra:'glow-green' },
+    starting:      { bg:'rgba(245,158,11,0.12)', border:'rgba(245,158,11,0.4)', iconCls:'fa-spinner spin text-yellow-400', title:'正在启动…',    sub:'WebUI 加载中，请稍候',         dotCls:'starting', labelTxt:'启动中' },
+    offline:       { bg:'rgba(100,116,139,0.12)',border:'rgba(100,116,139,0.3)',iconCls:'fa-microphone-slash text-slate-500',title:'WebUI 已停止', sub:'点击「一键启动」开始使用',      dotCls:'offline',  labelTxt:'离线' },
+    notInstalled:  { bg:'rgba(239,68,68,0.12)',  border:'rgba(239,68,68,0.3)',  iconCls:'fa-triangle-exclamation text-red-400', title:'未检测到安装', sub:'请先完成安装流程',          dotCls:'offline',  labelTxt:'未安装' },
+    backendOffline:{ bg:'rgba(100,116,139,0.12)',border:'rgba(100,116,139,0.3)',iconCls:'fa-plug text-slate-500',         title:'后端未连接',    sub:'请运行 start.bat / start.sh', dotCls:'offline',  labelTxt:'离线' },
+  };
+  const c = cfg[state] || cfg.offline;
+  circle.style.background = c.bg;
+  circle.style.border = `2px solid ${c.border}`;
+  circle.className = `w-20 h-20 rounded-full flex items-center justify-center mx-auto ${c.extra||''}`;
+  icon.className = `fa-solid ${c.iconCls} text-3xl`;
+  title.textContent = c.title;
+  sub.textContent   = c.sub;
+  dot.className  = `status-dot ${c.dotCls}`;
+  label.textContent = c.labelTxt;
+  pidEl.textContent = pid ? `PID: ${pid}` : '';
+  webuiRunning = (state === 'online' || state === 'starting');
+}
+
+function syncButtons() {
+  document.getElementById('btnLaunch').classList.toggle('hidden', webuiRunning);
+  document.getElementById('btnStop').classList.toggle('hidden', !webuiRunning);
+  document.getElementById('btnOpen').classList.toggle('hidden', !webuiRunning);
+}
+
+// ── 启动 WebUI ────────────────────────────────────────────────
+async function launchWebUI() {
+  const btn = document.getElementById('btnLaunch');
+  btn.disabled = true;
+  btn.innerHTML = '<i class="fa-solid fa-spinner spin text-sm"></i> 启动中…';
+  log('highlight', '▶ 正在启动 GPT-SoVITS WebUI…');
+  try {
+    const r = await fetch(`${BACKEND}/launch`, {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({}),
+    }).then(res=>res.json());
+    if (r.ok) {
+      log('success', `✓ 启动命令已发送，PID: ${r.pid || '—'}`);
+      log('info', '  WebUI 加载需要约 30~60 秒，请耐心等待…');
+      setStatus('starting', r.pid);
+      syncButtons();
+      // 30s 后开始轮询是否上线
+      setTimeout(() => pollWebuiOnline(), 15000);
+    } else {
+      log('warn', r.msg || '启动失败');
+      btn.disabled = false;
+      btn.innerHTML = '<i class="fa-solid fa-rocket text-sm"></i> 一键启动 WebUI';
+    }
+  } catch(e) {
+    log('error', `请求失败: ${e.message}`);
+    btn.disabled = false;
+    btn.innerHTML = '<i class="fa-solid fa-rocket text-sm"></i> 一键启动 WebUI';
+  }
+}
+
+// ── 停止 WebUI ────────────────────────────────────────────────
+async function stopWebUI() {
+  if (!confirm('确认停止 WebUI 服务？')) return;
+  try {
+    await fetch(`${BACKEND}/stop`, { method:'POST' });
+    log('warn', '⏹ 已发送停止信号');
+    setStatus('offline');
+    syncButtons();
+    document.getElementById('btnLaunch').disabled = false;
+    document.getElementById('btnLaunch').innerHTML = '<i class="fa-solid fa-rocket text-sm"></i> 一键启动 WebUI';
+  } catch(e) {
+    log('error', `停止失败: ${e.message}`);
+  }
+}
+
+// ── 轮询 WebUI 是否上线 ───────────────────────────────────────
+async function pollWebuiOnline(tries = 0) {
+  if (tries > 20) return; // 最多等 200s
+  const s = await fetch(`${BACKEND}/status`).then(r=>r.json()).catch(()=>({}));
+  if (s.webuiOnline) {
+    setStatus('online', s.webuiPid);
+    syncButtons();
+    log('success', '✓ WebUI 已上线！点击「打开 WebUI」开始使用');
+    doHealthCheck();
+  } else {
+    setTimeout(() => pollWebuiOnline(tries + 1), 10000);
+  }
+}
+
+// ── 健康检测 ─────────────────────────────────────────────────
+const HEALTH_ITEMS = [
+  { id:'hWebui',   label:'WebUI',    check: async () => { const s=await fetch(`${BACKEND}/status`).then(r=>r.json()).catch(()=>({})); return s.webuiOnline; } },
+  { id:'hBackend', label:'后端服务', check: async () => { try { await fetch(`${BACKEND}/detect`,{signal:AbortSignal.timeout(2000)}); return true; } catch(_){return false;} } },
+  { id:'hCuda',    label:'CUDA',     check: async () => { const e=await fetch(`${BACKEND}/detect`).then(r=>r.json()).catch(()=>({})); return !!(e.cuda&&e.cuda.raw); } },
+  { id:'hModels',  label:'预训练模型', check: async () => { const s=await fetch(`${BACKEND}/status`).then(r=>r.json()).catch(()=>({})); return s.hasModels; } },
+];
+
+function renderHealthGrid(state) {
+  const grid = document.getElementById('healthGrid');
+  grid.innerHTML = HEALTH_ITEMS.map(item => {
+    const cls = state==='unknown'?'text-slate-500':state==='ok'?'text-green-400':'text-red-400';
+    const icon = state==='unknown'?'fa-circle-question':state==='ok'?'fa-circle-check':'fa-circle-xmark';
+    return `<div class="glass-dark p-3 text-center" id="${item.id}">
+      <i class="fa-solid ${icon} ${cls} text-xl mb-1 block"></i>
+      <p class="text-xs text-slate-400">${item.label}</p>
+    </div>`;
+  }).join('');
+}
+
+async function doHealthCheck() {
+  document.getElementById('btnHealthCheck').innerHTML = '<i class="fa-solid fa-spinner spin text-xs"></i> 检测中';
+  const results = await Promise.all(HEALTH_ITEMS.map(async item => {
+    try { return { id: item.id, ok: await item.check() }; }
+    catch(_) { return { id: item.id, ok: false }; }
+  }));
+  results.forEach(({ id, ok }) => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    const icon = el.querySelector('i');
+    icon.className = `fa-solid ${ok?'fa-circle-check text-green-400':'fa-circle-xmark text-red-400'} text-xl mb-1 block`;
+  });
+  document.getElementById('lastCheckTime').textContent = `上次检测: ${new Date().toLocaleTimeString('zh',{hour12:false})}`;
+  document.getElementById('btnHealthCheck').innerHTML = '<i class="fa-solid fa-stethoscope text-xs"></i> 立即检测';
+}
+
+// ── 加载环境信息 ──────────────────────────────────────────────
+async function loadEnv() {
+  document.getElementById('btnRecheck').innerHTML = '<i class="fa-solid fa-spinner spin text-xs"></i> 检测中…';
+  try {
+    const env = await fetch(`${BACKEND}/detect`).then(r=>r.json());
+    const osMap = { darwin:'macOS', win32:'Windows', linux:'Linux' };
+    document.getElementById('envOs').textContent = `${osMap[env.os]||env.os} (${env.arch})`;
+    const r = env.results || {};
+    document.getElementById('envPython').textContent = r.python ? r.python.split(' ').slice(-1)[0] : '未安装';
+    document.getElementById('envConda').textContent  = r.conda  || '未找到';
+    if (env.cuda && env.cuda.raw) {
+      document.getElementById('envCuda').innerHTML = `<span class="text-green-400 font-mono text-xs">${env.cuda.raw} → ${env.cuda.device} ✓</span>`;
+    } else {
+      document.getElementById('envCuda').innerHTML = `<span class="text-slate-500 text-xs">未检测到 GPU</span>`;
+    }
+    log('success', `✓ 环境检测完成 | OS: ${osMap[env.os]||env.os} | CUDA: ${env.cuda?.raw||'无'}`);
+  } catch(e) {
+    log('error', `环境检测失败: ${e.message}`);
+  }
+  document.getElementById('btnRecheck').innerHTML = '<i class="fa-solid fa-arrows-rotate text-xs"></i> 重新检测环境';
+}
+
+// ── SSE ───────────────────────────────────────────────────────
+function connectSSE() {
+  const sse = new EventSource(`${BACKEND}/events`);
+  sse.onopen = () => log('success', '✓ 已连接后端服务（实时模式）');
+  sse.onmessage = e => {
+    try {
+      const msg = JSON.parse(e.data);
+      if (msg.type==='log') {
+        log(msg.level||'info', msg.msg||'');
+      } else if (msg.type==='webui_status') {
+        webuiRunning = msg.running;
+        if (msg.running) setStatus('starting', msg.pid);
+        else { setStatus('offline'); syncButtons(); document.getElementById('btnLaunch').disabled=false; document.getElementById('btnLaunch').innerHTML='<i class="fa-solid fa-rocket text-sm"></i> 一键启动 WebUI'; }
+        syncButtons();
+      } else if (msg.type==='webui_ready') {
+        setStatus('online');
+        syncButtons();
+        log('success', `✓ WebUI 已就绪 → ${msg.url}`);
+        doHealthCheck();
+      }
+    } catch(_) {}
+  };
+  sse.onerror = () => {};
+}
+
+// ── 工具函数 ──────────────────────────────────────────────────
+function log(type, msg) {
+  const t = document.getElementById('terminal');
+  const d = document.createElement('div');
+  const time = new Date().toLocaleTimeString('zh',{hour12:false});
+  const cls = {info:'log-info',success:'log-success',warn:'log-warn',error:'log-error',cmd:'log-cmd',highlight:'log-highlight'};
+  d.className = cls[type]||'log-info';
+  d.innerHTML = `<span style="color:#334155;font-size:11px">${time}</span> ${escHtml(msg)}`;
+  t.appendChild(d); t.scrollTop = t.scrollHeight;
+}
+function escHtml(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+</script>
+</body>
+</html>

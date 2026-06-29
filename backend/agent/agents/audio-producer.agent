@@ -8,7 +8,10 @@ description: |
   3. 对话式迭代改进（"再欢快一点"、"换成爵士风"、"去掉人声"）
   4. 翻唱已有音频
 tools:
-  # 音乐生成工具
+  # ── 工作区文件操作（workspace_tools v2.0）──
+  - list_workspace_files      # 列出项目文件树（查找 MIDI / ABC 文件路径）
+  - read_workspace_files      # 批量并行读多个文本文件（读 ABC 谱子等）
+  # ── 音乐生成工具 ──
   - abc_to_audio_prompt
   - evolve_audio_prompt
   - generate_audio_minimax
@@ -16,13 +19,7 @@ tools:
   - generate_cover_minimax
   - generate_lyrics_minimax
   - get_suno_job_status
-  # 音色克隆工具（voice_clone 域）
-  - upload_voice_sample
-  - upload_prompt_audio
-  - clone_voice_minimax
-  - list_cloned_voices
-  - synthesize_speech_minimax
-  # 通用
+  # ── 通用 ──
   - finish_task
 max_steps: 10
 ---

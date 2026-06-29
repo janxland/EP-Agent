@@ -331,16 +331,15 @@ def _build_carrier_message(carrier: dict) -> dict:
 
 
 def _infer_type(path: str) -> str:
-    """从文件路径推断类型。"""
+    """从文件路径推断类型（复用 session_context._FILE_TYPE_MAP）。"""
     import os
+    from app.agentcore.session_context import _FILE_TYPE_MAP
     ext = os.path.splitext(path)[1].lower()
-    return {
-        ".mid": "midi", ".midi": "midi",
-        ".abc": "abc",  ".txt":  "abc",
-        ".json": "json",
-        ".html": "h5",
-        ".mp3": "audio", ".wav": "audio", ".ogg": "audio",
-    }.get(ext, "other")
+    # session_context 未覆盖的音频格式补充
+    _AUDIO_EXTS = {".mp3", ".wav", ".ogg", ".flac", ".m4a"}
+    if ext in _AUDIO_EXTS:
+        return "audio"
+    return _FILE_TYPE_MAP.get(ext, "other")
 
 
 def _load_carrier(session_id: str) -> dict:
