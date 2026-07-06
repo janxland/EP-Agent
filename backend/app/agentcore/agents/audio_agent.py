@@ -13,10 +13,13 @@ AudioAgent — 音频/音色 SubAgent
 """
 from __future__ import annotations
 
+import uuid
 from typing import Callable, Awaitable
 
 from app.agentcore.todo_manager import TodoManager, assert_finish_gate
 from app.agentcore.agent_registry import register
+from app.pipeline import db as _db
+from app.pipeline.domain import new_id
 
 if False:  # TYPE_CHECKING
     from app.agentcore.run_context import RunContext
@@ -74,10 +77,24 @@ class AudioAgent:
             reply = f"音频/语音生成失败：{e}"
             await stream_text(reply, publish)
             await publish("message.completed", {"message": reply})
-            return {"domain": domain, "message": reply, "abc_updated": False}
+            # ── 落库：失败时 assistant 回复消息 ──────────────────────────────
+            if session_id:
+                try:
+                    _db.insert_message(
+                        msg_id=f"asst_{uuid.uuid4().hex[:12]}",
+                        session_id=session_id,
+                        role="assistant",
+                        content=reply,
+                    )
+                except Exception:
+                    pass
+            return {"domain": domain, "message": reply, "abc_updated": False, "_persisted": True}
 
         r       = result if isinstance(result, dict) else {}
         summary = r.get("summary", "音频已生成")
+
+        # 注意：audio_runner 已在 Tool-Calling Loop 内部逐条落库 assistant/tool 消息，
+        # 此处不再重复落库，避免消息重复写入。
 
         await publish("tool.call", {
             "call_id":        audio_call_id,
@@ -93,12 +110,36 @@ class AudioAgent:
 
         await stream_text(summary, publish)
         await publish("message.completed", {"message": summary})
-        return {"domain": domain, "message": summary, "abc_updated": False, **r}
+
+        # ── 落库：最终 assistant 文字回复 ────────────────────────────────────
+        if session_id:
+            try:
+                _db.insert_message(
+                    msg_id=f"asst_{uuid.uuid4().hex[:12]}",
+                    session_id=session_id,
+                    role="assistant",
+                    content=summary,
+                )
+            except Exception:
+                pass
+
+        # _persisted=True 告知 service.universal_chat 不再重复落库
+        return {"domain": domain, "message": summary, "abc_updated": False, "_persisted": True, **r}
 
     async def run_with_ctx(self, ctx: "RunContext") -> dict:
-        """v4.0 解耦接口：从 RunContext 解包参数，调用原 run()。"""
-        audio_chat_fn = ctx.extra.get("audio_chat_fn") or (lambda *a, **kw: {})
-        todo_mgr      = ctx.extra.get("todo_mgr")
+        """v4.0 解耦接口：从 RunContext 解包参数，调用原 run()。
+        AGENT-5 修复： audio_chat_fn 未注入时明确报错，不再静默返回 {}。
+        """
+        audio_chat_fn = ctx.extra.get("audio_chat_fn")
+        if audio_chat_fn is None:
+            import logging as _log
+            _log.getLogger("ep_agent.audio_agent").error(
+                "[AudioAgent] audio_chat_fn 未注入，请确认 _dispatch_v5 传入 audio_chat_fn=svc.audio_chat"
+            )
+            async def _missing_audio_fn(**kw):
+                raise RuntimeError("audio_chat_fn 未配置，请联系管理员配置音频服务")
+            audio_chat_fn = _missing_audio_fn
+        todo_mgr = ctx.extra.get("todo_mgr")
         if todo_mgr is None:
             from app.agentcore.todo_manager import TodoManager as _TM
             todo_mgr = _TM()

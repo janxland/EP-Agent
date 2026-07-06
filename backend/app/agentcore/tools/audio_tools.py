@@ -4,15 +4,17 @@
 设计原则：
 - 每个工具是独立的 @tool 注册函数，Agent 可自主决定调用
 - 支持异步轮询（Suno 异步任务）和同步响应（MiniMax）
-- 工具返回 dict，包含 audio_url / audio_b64 / duration 等字段
+- 工具返回 dict，包含 audio_url / audio_b64 / duration / workspace_path 等字段
 - API Key 从环境变量读取，未配置时工具返回友好错误
+- 音频自动落盘：生成完成后立即下载到项目工作区，返回 workspace_path
 
 工具清单：
   generate_audio_suno     - Suno AI 生成原创歌曲（支持歌词/纯音乐/风格）
-  generate_audio_minimax  - MiniMax music-2.6 生成原创歌曲
-  generate_cover_minimax  - MiniMax music-cover 翻唱已有参考音频
+  generate_audio_minimax  - MiniMax music-2.6 生成原创歌曲（自动落盘）
+  generate_cover_minimax  - MiniMax music-cover 翻唱已有参考音频（自动落盘）
   generate_lyrics_minimax - MiniMax 生成歌词（供后续 generate_audio_minimax 使用）
   abc_to_prompt           - 将 ABC 谱元信息转换为音频生成 prompt（辅助工具）
+  save_audio_from_url     - 将远程音频 URL 下载保存到工作区（通用落盘工具）
 """
 from __future__ import annotations
 
@@ -20,12 +22,64 @@ import asyncio
 import base64
 import json
 import time
+import re
+from pathlib import Path
 from typing import Any
 
 import httpx
 
 from app.agentcore.tools import tool
 from app.config import config
+
+
+# ─── 落盘辅助函数 ─────────────────────────────────────────────────────────────
+
+async def _download_and_save(audio_url: str, filename: str) -> str:
+    """
+    将远程音频 URL 下载并保存到当前 session 的项目工作区。
+    返回 workspace_path（相对路径），失败时返回空字符串。
+
+    filename: 建议文件名，如 "music_20240706_143022.mp3"
+    """
+    if not audio_url:
+        return ""
+    try:
+        from app.agentcore.session_context import get_current_project_root, remember_workspace_file, get_current_session_id
+        root = get_current_project_root()
+        if not root:
+            return ""
+
+        audio_dir = Path(root) / "audio"
+        audio_dir.mkdir(parents=True, exist_ok=True)
+
+        dest = audio_dir / filename
+        # 避免重名
+        if dest.exists():
+            stem, suffix = dest.stem, dest.suffix
+            dest = audio_dir / f"{stem}_{int(time.time())}{suffix}"
+
+        async with httpx.AsyncClient(timeout=120) as client:
+            resp = await client.get(audio_url)
+            resp.raise_for_status()
+            dest.write_bytes(resp.content)
+
+        workspace_path = f"audio/{dest.name}"
+        # 写入 session 重要记忆
+        sid = get_current_session_id()
+        if sid:
+            remember_workspace_file(sid, workspace_path, dest.name)
+        return workspace_path
+    except Exception as e:
+        import logging
+        logging.getLogger("ep_agent.audio_tools").warning("落盘失败: %s", e)
+        return ""
+
+
+def _safe_filename(title: str, suffix: str = ".mp3") -> str:
+    """将标题转为安全文件名，加时间戳避免重名"""
+    safe = re.sub(r'[^\w\u4e00-\u9fff\-]', '_', title or "music")[:30]
+    ts = time.strftime("%Y%m%d_%H%M%S")
+    return f"{safe}_{ts}{suffix}"
 
 
 # ─── 常量（运行时从 config 读取，支持热更新）─────────────────────────────────
@@ -220,9 +274,11 @@ async def generate_lyrics_minimax(prompt: str) -> dict:
     if base.get("status_code", -1) != 0:
         raise RuntimeError(f"MiniMax 歌词生成失败: {base.get('status_msg')}")
 
-    lyrics = data.get("data", {}).get("lyrics", "")
-    title  = data.get("data", {}).get("title", prompt[:20])
-    return {"lyrics": lyrics, "title": title}
+    # 注意：响应字段是顶层 song_title/style_tags/lyrics，不在 data 子对象里
+    lyrics = data.get("lyrics", "")
+    title  = data.get("song_title", "") or prompt[:20]
+    style_tags = data.get("style_tags", "")
+    return {"lyrics": lyrics, "title": title, "style_tags": style_tags}
 
 
 @tool(group="audio")
@@ -230,19 +286,23 @@ async def generate_audio_minimax(
     prompt: str,
     lyrics: str = "",
     instrumental: bool = False,
-    model: str = "music-2.6",
+    model: str = "music-2.6-free",  # BUG-M12 修复：默认免费版，付费版通过参数显式传入
     output_format: str = "url",
 ) -> dict:
     """使用 MiniMax music-2.6 生成原创歌曲（同步，直接返回音频）。
-    prompt: 音乐风格描述，如 "Indie folk, melancholic, rainy night"
+    prompt: 音乐风格描述，如 "Indie folk, melancholic, rainy night"。instrumental=true 时必填（1-2000字符）
     lyrics: 歌词文本，使用 \\n 分行，支持 [Verse]/[Chorus] 等结构标签。留空且 instrumental=false 时自动生成
     instrumental: true 生成纯音乐（无人声），此时 prompt 必填
-    model: 模型名，music-2.6（付费）或 music-2.6-free（免费，RPM 较低）
+    model: 模型名，music-2.6-free（免费，所有用户可用）或 music-2.6（付费/Token Plan，RPM 更高）
     output_format: url（返回下载链接，有效 24h）或 hex（返回 base64 编码）
     返回: {"audio_url": str, "audio_b64": str, "duration_ms": int, "provider": "minimax"}
     """
     if not _minimax_api_key():
         return {"error": "MINIMAX_API_KEY 未配置，请设置环境变量 MINIMAX_API_KEY"}
+
+    # BUG-M5 修复：instrumental=True 时 prompt 必填（官方要求 1-2000 字符）
+    if instrumental and not prompt:
+        return {"error": "instrumental=True 时 prompt 必填，请提供音乐风格描述（如 'Chinese traditional, guzheng, peaceful'）"}
 
     payload: dict[str, Any] = {
         "model": model,
@@ -289,6 +349,14 @@ async def generate_audio_minimax(
         result["audio_b64"] = _minimax_hex_to_b64(hex_str) if hex_str else ""
         result["audio_url"] = ""
 
+    # ── 自动落盘：下载临时 URL 到工作区，防止 24h 后失效 ──
+    if result.get("audio_url"):
+        fname = _safe_filename(prompt[:20], ".mp3")
+        wp = await _download_and_save(result["audio_url"], fname)
+        result["workspace_path"] = wp
+    else:
+        result["workspace_path"] = ""
+
     return result
 
 
@@ -301,13 +369,19 @@ async def generate_cover_minimax(
 ) -> dict:
     """使用 MiniMax music-cover 对已有音频进行 AI 翻唱/风格转换。
     audio_url: 原始音频的公开 URL（mp3/wav/flac，时长 6s-6min，≤50MB）
-    prompt: 翻唱风格描述，如 "Jazz, smooth, late night lounge"（10-300字符）
-    lyrics: 可选，替换原曲歌词（留空则保留原歌词）
+    prompt: 翻唱风格描述，如 "Jazz, smooth, late night lounge"（10-300字符，必填）
+    lyrics: 可选，替换原曲歌词（留空则 ASR 自动提取；若填写需 10-1000 字符）
     model: music-cover（付费）或 music-cover-free（免费）
     返回: {"audio_url": str, "audio_b64": str, "duration_ms": int, "provider": "minimax"}
     """
     if not _minimax_api_key():
         return {"error": "MINIMAX_API_KEY 未配置，请设置环境变量 MINIMAX_API_KEY"}
+
+    # BUG-M8 修复：music-cover 的 prompt 要求 10-300 字符
+    if not prompt or len(prompt.strip()) < 10:
+        return {"error": "prompt 不能为空且至少 10 字符，请提供翻唱风格描述（如 'Jazz, smooth, late night lounge'）"}
+    if len(prompt) > 300:
+        prompt = prompt[:300]  # 超长截断，不报错
 
     payload: dict[str, Any] = {
         "model": model,
@@ -316,8 +390,12 @@ async def generate_cover_minimax(
         "audio_setting": {"sample_rate": 44100, "bitrate": 256000, "format": "mp3"},
         "output_format": "url",
     }
+    # BUG-M9 修复：lyrics 长度要求 10-1000 字符，不满足则不传（让 ASR 自动提取）
     if lyrics:
-        payload["lyrics"] = lyrics
+        if len(lyrics) < 10:
+            pass  # 太短，不传 lyrics，让 MiniMax ASR 自动提取原曲歌词
+        else:
+            payload["lyrics"] = lyrics[:1000]  # 超长截断到 1000 字符
 
     async with httpx.AsyncClient(timeout=120) as client:
         resp = await client.post(
@@ -335,13 +413,23 @@ async def generate_cover_minimax(
     audio_data = data.get("data", {})
     extra      = data.get("extra_info", {})
 
-    return {
+    cover_result = {
         "audio_url":   audio_data.get("audio", ""),
         "audio_b64":   "",
         "duration_ms": extra.get("music_duration", 0),
         "provider":    "minimax",
         "model":       model,
     }
+
+    # ── 自动落盘 ──
+    if cover_result.get("audio_url"):
+        fname = _safe_filename(f"cover_{prompt[:15]}", ".mp3")
+        wp = await _download_and_save(cover_result["audio_url"], fname)
+        cover_result["workspace_path"] = wp
+    else:
+        cover_result["workspace_path"] = ""
+
+    return cover_result
 
 
 # ─── 辅助工具 ─────────────────────────────────────────────────────────────────
@@ -403,3 +491,32 @@ def abc_to_audio_prompt(abc: str, style_hint: str = "") -> dict:
         "bpm":    bpm,
         "meter":  meter,
     }
+
+
+# ─── 通用落盘工具 ──────────────────────────────────────────────────────────────
+
+@tool(group="audio")
+async def save_audio_from_url(
+    audio_url: str,
+    filename: str = "",
+) -> dict:
+    """将远程音频 URL 下载并保存到当前项目工作区（audio/ 子目录）。
+    用于将 MiniMax / Suno 返回的临时链接永久保存，防止 24h 后失效。
+    audio_url: 音频文件的公开 HTTP(S) URL
+    filename: 保存的文件名（留空则自动生成，格式 music_YYYYMMDD_HHMMSS.mp3）
+    返回: {"workspace_path": str, "filename": str, "success": bool, "error": str}
+    """
+    if not audio_url:
+        return {"workspace_path": "", "filename": "", "success": False, "error": "audio_url 不能为空"}
+
+    fname = filename or _safe_filename("music", ".mp3")
+    # 确保扩展名
+    if "." not in fname:
+        fname += ".mp3"
+
+    wp = await _download_and_save(audio_url, fname)
+    if wp:
+        return {"workspace_path": wp, "filename": Path(wp).name, "success": True, "error": ""}
+    else:
+        return {"workspace_path": "", "filename": "", "success": False,
+                "error": "下载失败，请检查 URL 是否有效或 session 上下文是否已注入"}

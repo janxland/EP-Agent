@@ -123,9 +123,19 @@ class EditAgent:
         })
 
         # ── TODO 纪律：真实落地后 complete_one ───────────────────────────────
-        # ReactExecutor 在 ReAct Loop 内部已经 complete_one 了 running TODO，
-        # 此处只需 finish_all 收尾剩余 pending TODO（如"验证结果"等）
-        await todo_mgr.finish_all(publish, "done")
+        # BUG-E1 修复：检查 ReactExecutor 是否超轮退出（exceeded_rounds=True）
+        # 超轮时任务未完整执行，应 finish_all(failed) 而非 done，避免掩盖问题
+        _timed_out = result.get("exceeded_rounds", False)
+        if _timed_out:
+            await publish("pipeline.step", {
+                "step": "edit_timeout", "status": "warning",
+                "text": f"⚠️ 编辑超过最大轮次（{result.get('rounds', '?')} 轮），任务可能未完整执行",
+            })
+            await todo_mgr.finish_all(publish, "failed")
+        else:
+            # ReactExecutor 在 ReAct Loop 内部已经 complete_one 了 running TODO，
+            # 此处只需 finish_all 收尾剩余 pending TODO（如"验证结果"等）
+            await todo_mgr.finish_all(publish, "done")
 
         # ── 落库 + 推送 abc.updated ───────────────────────────────────────────
         try:
@@ -133,10 +143,12 @@ class EditAgent:
 
             header = parse_abc_header(new_abc)
             new_meta = ScoreMeta(
-                title      = header["title"],
-                key        = header["key"],
-                bpm        = header["bpm"],
-                note_count = count_notes(new_abc),
+                title        = header["title"],
+                key          = header["key"],
+                bpm          = header["bpm"],
+                note_count   = count_notes(new_abc),
+                time_sig_num = header.get("time_sig_num", 4),  # NEW-05 修复：补充拍号字段
+                time_sig_den = header.get("time_sig_den", 4),
             )
             new_score = Score(
                 title        = header["title"],
@@ -174,9 +186,17 @@ class EditAgent:
 
         # 从新 ABC 重新解析 header（转调/变速后 key/bpm 已变，必须用新值）
         new_header = parse_abc_header(new_abc)
+        # BUG-04 修复：简化脆弱的 getattr 链，改用安全的 try/except
+        _version = 2
+        try:
+            _sv = session_getter(session_id)
+            if _sv and _sv.score and hasattr(_sv.score, 'latest_version'):
+                _version = _sv.score.latest_version()
+        except Exception:
+            pass
         await publish("abc.updated", {
             "abc":     new_abc,
-            "version": (getattr(getattr(session_getter(session_id), 'score', None), 'latest_version', lambda: 2)() if session_getter else 2),
+            "version": _version,
             "summary": summary,
             "meta": {
                 "title":       new_header["title"] or getattr(meta, "title", ""),
@@ -206,23 +226,51 @@ class EditAgent:
         }
 
     async def run_with_ctx(self, ctx: "RunContext") -> dict:
-        """v4.0 解耦接口：从 RunContext 解包参数，调用原 run()。"""
-        from app.pipeline import db as _db
-        session_getter = ctx.extra.get("session_getter") or _db.get_session
-        session_saver  = ctx.extra.get("session_saver")  or _db.save_session
-        edit_fn        = ctx.extra.get("edit_fn") or (lambda *a, **kw: None)
-        todo_mgr       = ctx.extra.get("todo_mgr")
+        """v4.0 解耦接口：从 RunContext 解包参数，调用原 run()。
+        AGENT-2 修复：session_getter/saver 通过 ctx 属性统一解包（fallback 逻辑在 RunContext 中）。
+        BUG-CH1 修复：链式 convert→edit 时，chain_ctx 携带了 current_abc；
+                      若 session_saver 在 convert 阶段静默失败，session 中可能仍是旧谱子。
+                      此处将 current_abc 补写入 session，确保 EditAgent.run() 读到正确谱子。
+        """
+        edit_fn  = ctx.extra.get("edit_fn") or (lambda *a, **kw: None)
+        todo_mgr = ctx.extra.get("todo_mgr")
         if todo_mgr is None:
             from app.agentcore.todo_manager import TodoManager as _TM
             todo_mgr = _TM()
             todo_mgr.session_id = ctx.session_id
+
+        # BUG-CH1 修复：链式 convert→edit 传入的 current_abc 补写 session
+        _current_abc = ctx.extra.get("current_abc", "")
+        if _current_abc:
+            try:
+                _sess = ctx.session_getter(ctx.session_id)
+                if _sess and (not _sess.score or not _sess.score.abc_notation):
+                    from app.agentcore.abc_utils import parse_abc_header, count_notes
+                    from app.pipeline.domain import Score, ScoreMeta
+                    _h = parse_abc_header(_current_abc)
+                    _sess.score = Score(
+                        title=_h["title"] or "score",
+                        abc_notation=_current_abc,
+                        meta=ScoreMeta(
+                            title=_h["title"] or "score",
+                            key=_h["key"],
+                            bpm=float(_h["bpm"] or 120),
+                            note_count=count_notes(_current_abc),
+                            time_sig_num=_h.get("time_sig_num", 4),
+                            time_sig_den=_h.get("time_sig_den", 4),
+                        ),
+                    )
+                    ctx.session_saver(_sess)
+            except Exception:
+                pass
+
         return await self.run(
             session_id=ctx.session_id,
             message=ctx.message,
             publish=ctx.publish,
             edit_fn=edit_fn,
             todo_mgr=todo_mgr,
-            session_getter=session_getter,
-            session_saver=session_saver,
+            session_getter=ctx.session_getter,
+            session_saver=ctx.session_saver,
             workspace_id=ctx.workspace_id,
         )

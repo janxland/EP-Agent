@@ -1,133 +1,339 @@
 'use client'
 
-import { useState, useEffect, useRef, memo } from 'react'
+import { useState, useEffect, useRef, memo, useCallback } from 'react'
+import type { MouseEvent } from 'react'
+import { useWorkspaceStore } from '@/features/workspace/store/workspace.store'
 
-// ─── 工具图标配置 ─────────────────────────────────────────────────────────────
+// ─── 工具配置（图标 + 标签合表，单一数据源）─────────────────────────────────
 
-interface ToolIconConfig { bg: string; fg: string; emoji: string }
+interface ToolConfig { bg: string; fg: string; emoji: string; label: string }
 
-const TOOL_ICON_MAP: Record<string, ToolIconConfig> = {
-  // ── Universal Runner 路由工具 ──────────────────────────────────────────────
-  intent_router:      { bg: '#FFF7ED', fg: '#EA580C', emoji: '🧭' },
-  convert_sky_json:   { bg: '#ECFEFF', fg: '#0891B2', emoji: '🎮' },
-  abc_editor:         { bg: '#FFFBEB', fg: '#D97706', emoji: '✏️' },
-  abc_composer:       { bg: '#FAF5FF', fg: '#7C3AED', emoji: '🎵' },
-  audio_generator:    { bg: '#FAF5FF', fg: '#9333EA', emoji: '🎧' },
-  voice_clone:        { bg: '#EDE9FE', fg: '#6D28D9', emoji: '🎤' },
-  h5_generator:       { bg: '#FFF1F2', fg: '#E11D48', emoji: '🎨' },
-  // ── 工作区工具 ────────────────────────────────────────────────────────────
-  list_workspace_files:    { bg: '#F0FDF4', fg: '#16A34A', emoji: '📂' },
-  read_workspace_file:     { bg: '#EFF6FF', fg: '#2563EB', emoji: '📄' },
-  write_workspace_file:    { bg: '#FFF7ED', fg: '#EA580C', emoji: '💾' },
-  delete_workspace_file:   { bg: '#FFF1F2', fg: '#E11D48', emoji: '🗑️' },
-  get_workspace_file_url:  { bg: '#F0FDF4', fg: '#16A34A', emoji: '🔗' },
-  copy_workspace_file:     { bg: '#ECFEFF', fg: '#0891B2', emoji: '📋' },
-  rename_workspace_file:   { bg: '#FFFBEB', fg: '#D97706', emoji: '✏️' },
-  move_workspace_file:     { bg: '#EDE9FE', fg: '#7C3AED', emoji: '📦' },
-  // ── H5 工具 ───────────────────────────────────────────────────────────────
-  list_h5_templates:       { bg: '#FFF1F2', fg: '#E11D48', emoji: '🖼️' },
-  generate_h5_poster:      { bg: '#FFF1F2', fg: '#E11D48', emoji: '🎨' },
-  generate_h5_from_abc:    { bg: '#FFF1F2', fg: '#BE123C', emoji: '🎵' },
-  generate_h5_from_midi:   { bg: '#FFF1F2', fg: '#BE123C', emoji: '🎹' },
-  save_h5_file:            { bg: '#F0FDF4', fg: '#15803D', emoji: '💾' },
-  finish_task:             { bg: '#F0FDF4', fg: '#15803D', emoji: '✅' },
-  // ── ABC 编辑工具 ──────────────────────────────────────────────────────────
-  transpose_abc:      { bg: '#FFFBEB', fg: '#D97706', emoji: '🎵' },
-  change_tempo:       { bg: '#FFFBEB', fg: '#B45309', emoji: '🥁' },
-  change_style:       { bg: '#FAF5FF', fg: '#7C3AED', emoji: '🎨' },
-  add_ornament:       { bg: '#F0FDF4', fg: '#15803D', emoji: '🎶' },
-  analyze_abc:        { bg: '#EFF6FF', fg: '#1D4ED8', emoji: '🔬' },
-  abc_to_sky_json:    { bg: '#ECFEFF', fg: '#0E7490', emoji: '🎮' },
-  abc_to_midi_b64:    { bg: '#EEF2FF', fg: '#4338CA', emoji: '🎹' },
-  // ── 音频生成工具 ──────────────────────────────────────────────────────────
-  generate_audio_suno:     { bg: '#FAF5FF', fg: '#9333EA', emoji: '🎸' },
-  generate_audio_minimax:  { bg: '#EFF6FF', fg: '#2563EB', emoji: '🎼' },
-  generate_cover_minimax:  { bg: '#FDF2F8', fg: '#C026D3', emoji: '🎤' },
-  generate_lyrics_minimax: { bg: '#FFF7ED', fg: '#EA580C', emoji: '📝' },
-  abc_to_audio_prompt:     { bg: '#F0FDFA', fg: '#0D9488', emoji: '🔊' },
-  evolve_audio_prompt:     { bg: '#FAF5FF', fg: '#7C3AED', emoji: '🔄' },
-  diff_audio_params:       { bg: '#F9FAFB', fg: '#374151', emoji: '📊' },
-  // ── 音色克隆工具（MiniMax）─────────────────────────────────────────────────
-  upload_voice_sample:       { bg: '#FAF5FF', fg: '#9333EA', emoji: '🎙️' },
-  clone_voice_minimax:       { bg: '#EDE9FE', fg: '#6D28D9', emoji: '🧬' },
-  list_cloned_voices:        { bg: '#EDE9FE', fg: '#5B21B6', emoji: '📋' },
-  synthesize_speech_minimax: { bg: '#EDE9FE', fg: '#4C1D95', emoji: '🔈' },
-  // ── GPT-SoVITS 工具 ───────────────────────────────────────────────────────
-  voice_clone_router:        { bg: '#EDE9FE', fg: '#6D28D9', emoji: '🎙️' },
-  sovits_health_check:       { bg: '#F0FDF4', fg: '#16A34A', emoji: '💚' },
-  sovits_tts_and_save:       { bg: '#EDE9FE', fg: '#7C3AED', emoji: '🔊' },
-  sovits_clone_and_save:     { bg: '#EDE9FE', fg: '#6D28D9', emoji: '🧬' },
-  sovits_list_models:        { bg: '#EFF6FF', fg: '#2563EB', emoji: '📋' },
-  sovits_set_model:          { bg: '#FFFBEB', fg: '#D97706', emoji: '🔄' },
-  sovits_list_audio_files:   { bg: '#F0FDF4', fg: '#15803D', emoji: '🎵' },
-  upload_prompt_audio:       { bg: '#FAF5FF', fg: '#9333EA', emoji: '🎤' },
+const TOOL_CONFIG: Record<string, ToolConfig> = {
+  intent_router:      { bg: '#FFF7ED', fg: '#EA580C', emoji: '🧭', label: '意图识别' },
+  convert_sky_json:   { bg: '#ECFEFF', fg: '#0891B2', emoji: '🎮', label: '解析 Sky 谱子' },
+  abc_editor:         { bg: '#FFFBEB', fg: '#D97706', emoji: '✏️', label: 'ABC 谱子编辑' },
+  abc_composer:       { bg: '#FAF5FF', fg: '#7C3AED', emoji: '🎵', label: 'ABC 谱子创作' },
+  audio_generator:    { bg: '#FAF5FF', fg: '#9333EA', emoji: '🎧', label: '音频生成' },
+  voice_clone:        { bg: '#EDE9FE', fg: '#6D28D9', emoji: '🎤', label: '音色克隆' },
+  h5_generator:       { bg: '#FFF1F2', fg: '#E11D48', emoji: '🎨', label: 'H5 海报生成' },
+  list_workspace_files:    { bg: '#F0FDF4', fg: '#16A34A', emoji: '📂', label: '列出工作区文件' },
+  read_workspace_file:     { bg: '#EFF6FF', fg: '#2563EB', emoji: '📄', label: '读取文件' },
+  write_workspace_file:    { bg: '#FFF7ED', fg: '#EA580C', emoji: '💾', label: '写入文件' },
+  delete_workspace_file:   { bg: '#FFF1F2', fg: '#E11D48', emoji: '🗑️', label: '删除文件' },
+  get_workspace_file_url:  { bg: '#F0FDF4', fg: '#16A34A', emoji: '🔗', label: '获取文件 URL' },
+  copy_workspace_file:     { bg: '#ECFEFF', fg: '#0891B2', emoji: '📋', label: '复制文件' },
+  rename_workspace_file:   { bg: '#FFFBEB', fg: '#D97706', emoji: '✏️', label: '重命名文件' },
+  move_workspace_file:     { bg: '#EDE9FE', fg: '#7C3AED', emoji: '📦', label: '移动文件' },
+  list_h5_templates:       { bg: '#FFF1F2', fg: '#E11D48', emoji: '🖼️', label: '查看 H5 模板' },
+  generate_h5_poster:      { bg: '#FFF1F2', fg: '#E11D48', emoji: '🎨', label: '生成 H5 海报' },
+  generate_h5_from_abc:    { bg: '#FFF1F2', fg: '#BE123C', emoji: '🎵', label: '从 ABC 生成 H5' },
+  generate_h5_from_midi:   { bg: '#FFF1F2', fg: '#BE123C', emoji: '🎹', label: '从 MIDI 生成 H5' },
+  save_h5_file:            { bg: '#F0FDF4', fg: '#15803D', emoji: '💾', label: '保存 H5 文件' },
+  finish_task:             { bg: '#F0FDF4', fg: '#15803D', emoji: '✅', label: '完成任务' },
+  transpose_abc:      { bg: '#FFFBEB', fg: '#D97706', emoji: '🎵', label: '转调' },
+  change_tempo:       { bg: '#FFFBEB', fg: '#B45309', emoji: '🥁', label: '调整速度' },
+  change_style:       { bg: '#FAF5FF', fg: '#7C3AED', emoji: '🎨', label: '风格转换' },
+  add_ornament:       { bg: '#F0FDF4', fg: '#15803D', emoji: '🎶', label: '添加装饰音' },
+  analyze_abc:        { bg: '#EFF6FF', fg: '#1D4ED8', emoji: '🔬', label: '分析谱子' },
+  abc_to_sky_json:    { bg: '#ECFEFF', fg: '#0E7490', emoji: '🎮', label: '生成 Sky JSON' },
+  abc_to_midi_b64:    { bg: '#EEF2FF', fg: '#4338CA', emoji: '🎹', label: '生成 MIDI' },
+  generate_audio_suno:     { bg: '#FAF5FF', fg: '#9333EA', emoji: '🎸', label: 'Suno 生成音乐' },
+  generate_audio_minimax:  { bg: '#EFF6FF', fg: '#2563EB', emoji: '🎼', label: 'MiniMax 生成音乐' },
+  generate_cover_minimax:  { bg: '#FDF2F8', fg: '#C026D3', emoji: '🎤', label: 'MiniMax 翻唱' },
+  generate_lyrics_minimax: { bg: '#FFF7ED', fg: '#EA580C', emoji: '📝', label: '生成歌词' },
+  abc_to_audio_prompt:     { bg: '#F0FDFA', fg: '#0D9488', emoji: '🔊', label: '提取音频 Prompt' },
+  evolve_audio_prompt:     { bg: '#FAF5FF', fg: '#7C3AED', emoji: '🔄', label: '进化音频 Prompt' },
+  diff_audio_params:       { bg: '#F9FAFB', fg: '#374151', emoji: '📊', label: '对比生成参数' },
+  upload_voice_sample:       { bg: '#FAF5FF', fg: '#9333EA', emoji: '🎙️', label: '上传音色样本' },
+  clone_voice_minimax:       { bg: '#EDE9FE', fg: '#6D28D9', emoji: '🧬', label: '克隆音色' },
+  list_cloned_voices:        { bg: '#EDE9FE', fg: '#5B21B6', emoji: '📋', label: '查询已克隆音色' },
+  synthesize_speech_minimax: { bg: '#EDE9FE', fg: '#4C1D95', emoji: '🔈', label: '合成语音' },
+  voice_clone_router:        { bg: '#EDE9FE', fg: '#6D28D9', emoji: '🎙️', label: '音色克隆路由' },
+  sovits_health_check:       { bg: '#F0FDF4', fg: '#16A34A', emoji: '💚', label: '检查 SoVITS 服务' },
+  sovits_tts_and_save:       { bg: '#EDE9FE', fg: '#7C3AED', emoji: '🔊', label: 'SoVITS 语音合成' },
+  sovits_clone_and_save:     { bg: '#EDE9FE', fg: '#6D28D9', emoji: '🧬', label: 'SoVITS 音色克隆' },
+  sovits_list_models:        { bg: '#EFF6FF', fg: '#2563EB', emoji: '📋', label: '查看可用模型' },
+  sovits_set_model:          { bg: '#FFFBEB', fg: '#D97706', emoji: '🔄', label: '切换音色模型' },
+  sovits_list_audio_files:   { bg: '#F0FDF4', fg: '#15803D', emoji: '🎵', label: '查看已保存音频' },
+  upload_prompt_audio:       { bg: '#FAF5FF', fg: '#9333EA', emoji: '🎤', label: '上传提示音频' },
+
+  // ── abc_edit 组 ────────────────────────────────────────────────────────────
+  abc_to_midi:               { bg: '#EEF2FF', fg: '#4338CA', emoji: '🎹', label: '生成 MIDI 文件' },
+  validate_abc:              { bg: '#F0FDF4', fg: '#16A34A', emoji: '✔️',  label: '验证 ABC 音域' },
+
+  // ── agent_call 组（SupervisorAgent 调用子 Agent）──────────────────────────
+  call_audio_agent:          { bg: '#FAF5FF', fg: '#9333EA', emoji: '🎧', label: '调用音频 Agent' },
+  call_convert_agent:        { bg: '#ECFEFF', fg: '#0891B2', emoji: '🔄', label: '调用转换 Agent' },
+  call_h5_agent:             { bg: '#FFF1F2', fg: '#E11D48', emoji: '🎨', label: '调用 H5 Agent' },
+
+  // ── audio 组 ──────────────────────────────────────────────────────────────
+  get_suno_job_status:       { bg: '#FAF5FF', fg: '#9333EA', emoji: '⏳', label: '查询 Suno 任务' },
+
+  // ── h5 组 ─────────────────────────────────────────────────────────────────
+  get_h5_template:           { bg: '#FFF1F2', fg: '#E11D48', emoji: '📋', label: '读取 H5 模板' },
+  parse_abc_to_json:         { bg: '#FFFBEB', fg: '#D97706', emoji: '🔍', label: '解析 ABC 元数据' },
+  parse_sky_json_to_json:    { bg: '#ECFEFF', fg: '#0891B2', emoji: '🎮', label: '解析 Sky JSON' },
+  save_h5_output:            { bg: '#F0FDF4', fg: '#15803D', emoji: '💾', label: '保存 H5 输出' },
+
+  // ── workspace 组 ──────────────────────────────────────────────────────────
+  edit_workspace_file:       { bg: '#FFFBEB', fg: '#D97706', emoji: '✏️',  label: '精准编辑文件' },
+  read_workspace_files:      { bg: '#EFF6FF', fg: '#2563EB', emoji: '📚', label: '批量读取文件' },
+  run_write_tasks_in_parallel: { bg: '#FFF7ED', fg: '#EA580C', emoji: '⚡', label: '并行写入文件' },
 }
 
-const TOOL_LABELS: Record<string, string> = {
-  intent_router:    '意图识别',
-  convert_sky_json: '解析 Sky 谱子',
-  abc_editor:       'ABC 谱子编辑',
-  abc_composer:     'ABC 谱子创作',
-  audio_generator:  '音频生成',
-  voice_clone:      '音色克隆',
-  h5_generator:     'H5 海报生成',
-  // 工作区
-  list_workspace_files:    '列出工作区文件',
-  read_workspace_file:     '读取文件',
-  write_workspace_file:    '写入文件',
-  delete_workspace_file:   '删除文件',
-  get_workspace_file_url:  '获取文件 URL',
-  copy_workspace_file:     '复制文件',
-  rename_workspace_file:   '重命名文件',
-  move_workspace_file:     '移动文件',
-  // H5
-  list_h5_templates:       '查看 H5 模板',
-  generate_h5_poster:      '生成 H5 海报',
-  generate_h5_from_abc:    '从 ABC 生成 H5',
-  generate_h5_from_midi:   '从 MIDI 生成 H5',
-  save_h5_file:            '保存 H5 文件',
-  finish_task:             '完成任务',
-  // ABC
-  transpose_abc:   '转调',
-  change_tempo:    '调整速度',
-  change_style:    '风格转换',
-  add_ornament:    '添加装饰音',
-  analyze_abc:     '分析谱子',
-  abc_to_sky_json: '生成 Sky JSON',
-  abc_to_midi_b64: '生成 MIDI',
-  // 音频
-  generate_audio_suno:     'Suno 生成音乐',
-  generate_audio_minimax:  'MiniMax 生成音乐',
-  generate_cover_minimax:  'MiniMax 翻唱',
-  generate_lyrics_minimax: '生成歌词',
-  abc_to_audio_prompt:     '提取音频 Prompt',
-  evolve_audio_prompt:     '进化音频 Prompt',
-  diff_audio_params:       '对比生成参数',
-  // 音色（MiniMax）
-  upload_voice_sample:       '上传音色样本',
-  clone_voice_minimax:       '克隆音色',
-  list_cloned_voices:        '查询已克隆音色',
-  synthesize_speech_minimax: '合成语音',
-  // GPT-SoVITS
-  voice_clone_router:        '音色克隆路由',
-  sovits_health_check:       '检查 SoVITS 服务',
-  sovits_tts_and_save:       'SoVITS 语音合成',
-  sovits_clone_and_save:     'SoVITS 音色克隆',
-  sovits_list_models:        '查看可用模型',
-  sovits_set_model:          '切换音色模型',
-  sovits_list_audio_files:   '查看已保存音频',
-  upload_prompt_audio:       '上传提示音频',
+const _DEFAULT_CONFIG: ToolConfig = { bg: '#F9FAFB', fg: '#6B7280', emoji: '🔧', label: '' }
+function getToolConfig(name: string): ToolConfig {
+  return TOOL_CONFIG[name] ?? { ..._DEFAULT_CONFIG, label: name.replace(/_/g, ' ') }
 }
 
-function getToolIcon(name: string): ToolIconConfig {
-  return TOOL_ICON_MAP[name] ?? { bg: '#F9FAFB', fg: '#6B7280', emoji: '🔧' }
+// ─── 文件类型判断 ─────────────────────────────────────────────────────────────
+
+const AUDIO_EXTS = new Set(['.wav', '.mp3', '.ogg', '.flac', '.m4a', '.aac', '.opus'])
+const VIDEO_EXTS = new Set(['.mp4', '.webm', '.mov', '.avi', '.mkv'])
+const IMAGE_EXTS = new Set(['.png', '.jpg', '.jpeg', '.gif', '.webp', '.svg'])
+
+type FileKind = 'audio' | 'video' | 'image' | 'other'
+
+function getFileKind(filename: string): FileKind {
+  const ext = ('.' + filename.split('.').pop()).toLowerCase()
+  if (AUDIO_EXTS.has(ext)) return 'audio'
+  if (VIDEO_EXTS.has(ext)) return 'video'
+  if (IMAGE_EXTS.has(ext)) return 'image'
+  return 'other'
 }
 
-function getToolLabel(name: string): string {
-  return TOOL_LABELS[name] ?? name.replace(/_/g, ' ')
+function fmtBytes(n: number): string {
+  if (n < 1024) return `${n} B`
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`
+  return `${(n / 1024 / 1024).toFixed(2)} MB`
 }
 
-// ─── JSON 语法高亮（轻量级，无依赖）─────────────────────────────────────────
+// ─── 从结果 JSON 中提取文件信息 ───────────────────────────────────────────────
+
+interface FileInfo {
+  workspace_path: string
+  filename: string
+  size_bytes?: number
+  kind: FileKind
+  url: string  // /api/workspace/file?path=...
+}
+
+function extractFileInfo(resultText: string, wsId: string, projId: string): FileInfo | null {
+  if (!resultText || !wsId) return null
+  try {
+    const obj = JSON.parse(resultText)
+    const wp: string = obj.workspace_path || obj.output_path || ''
+    if (!wp) return null
+    const filename = wp.split('/').pop() || wp
+    const kind = getFileKind(filename)
+    if (kind === 'other') return null
+    // 构造访问 URL：GET /workspaces/{ws_id}/files/content?path=xxx&project_id=xxx&encoding=raw
+    const params = new URLSearchParams({ path: wp, encoding: 'raw' })
+    if (projId) params.set('project_id', projId)
+    const url = `/workspaces/${encodeURIComponent(wsId)}/files/content?${params.toString()}`
+    return {
+      workspace_path: wp,
+      filename,
+      size_bytes: obj.size_bytes,
+      kind,
+      url,
+    }
+  } catch {
+    return null
+  }
+}
+
+// ─── 音频播放卡片 ─────────────────────────────────────────────────────────────
+
+function AudioFileCard({ info }: { info: FileInfo }) {
+  const [playing, setPlaying] = useState(false)
+  const [progress, setProgress] = useState(0)
+  const [duration, setDuration] = useState(0)
+  const [loaded, setLoaded] = useState(false)
+  const [error, setError] = useState(false)
+  const audioRef = useRef<HTMLAudioElement>(null)
+
+  const fmtTime = (s: number) => {
+    if (!isFinite(s)) return '0:00'
+    const m = Math.floor(s / 60)
+    const sec = Math.floor(s % 60)
+    return `${m}:${sec.toString().padStart(2, '0')}`
+  }
+
+  const togglePlay = useCallback(() => {
+    const a = audioRef.current
+    if (!a) return
+    if (playing) { a.pause() } else { a.play().catch(() => setError(true)) }
+  }, [playing])
+
+  const handleSeek = useCallback((e: MouseEvent<HTMLDivElement>) => {
+    const a = audioRef.current
+    if (!a || !duration) return
+    const rect = e.currentTarget.getBoundingClientRect()
+    const ratio = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width))
+    a.currentTime = ratio * duration
+    setProgress(ratio * duration)
+  }, [duration])
+
+  return (
+    <div className="mt-2 rounded-2xl overflow-hidden border border-violet-100 bg-gradient-to-br from-violet-50 to-purple-50 shadow-sm">
+      {/* 音频元素 */}
+      <audio
+        ref={audioRef}
+        src={info.url}
+        preload="metadata"
+        onLoadedMetadata={e => { setDuration((e.target as HTMLAudioElement).duration); setLoaded(true) }}
+        onTimeUpdate={e => setProgress((e.target as HTMLAudioElement).currentTime)}
+        onPlay={() => setPlaying(true)}
+        onPause={() => setPlaying(false)}
+        onEnded={() => { setPlaying(false); setProgress(0) }}
+        onError={() => setError(true)}
+      />
+
+      <div className="px-3.5 py-3 flex items-center gap-3">
+        {/* 播放按钮 */}
+        <button
+          onClick={togglePlay}
+          disabled={error}
+          className={[
+            'shrink-0 w-10 h-10 rounded-full flex items-center justify-center',
+            'shadow-md transition-all duration-200 active:scale-95',
+            error
+              ? 'bg-gray-200 cursor-not-allowed'
+              : playing
+                ? 'bg-violet-500 hover:bg-violet-600 shadow-violet-200'
+                : 'bg-white hover:bg-violet-50 shadow-violet-100 border border-violet-100',
+          ].join(' ')}
+        >
+          {error ? (
+            <span className="text-gray-400 text-xs">✗</span>
+          ) : playing ? (
+            /* 暂停图标 */
+            <svg className="w-4 h-4 text-white" viewBox="0 0 24 24" fill="currentColor">
+              <rect x="6" y="4" width="4" height="16" rx="1"/><rect x="14" y="4" width="4" height="16" rx="1"/>
+            </svg>
+          ) : (
+            /* 播放图标 */
+            <svg className="w-4 h-4 text-violet-500" viewBox="0 0 24 24" fill="currentColor">
+              <path d="M8 5v14l11-7z"/>
+            </svg>
+          )}
+        </button>
+
+        {/* 中间：文件名 + 进度条 */}
+        <div className="flex-1 min-w-0 space-y-1.5">
+          <div className="flex items-center justify-between gap-2">
+            <span className="text-[11px] font-semibold text-violet-700 truncate">{info.filename}</span>
+            {info.size_bytes && (
+              <span className="text-[10px] text-violet-400 shrink-0">{fmtBytes(info.size_bytes)}</span>
+            )}
+          </div>
+
+          {/* 进度条 */}
+          <div
+            className="relative h-1.5 bg-violet-100 rounded-full cursor-pointer group"
+            onClick={handleSeek}
+          >
+            <div
+              className="absolute inset-y-0 left-0 bg-violet-400 rounded-full transition-all"
+              style={{ width: duration ? `${(progress / duration) * 100}%` : '0%' }}
+            />
+            {/* 拖拽点 */}
+            <div
+              className="absolute top-1/2 -translate-y-1/2 w-3 h-3 bg-violet-500 rounded-full shadow opacity-0 group-hover:opacity-100 transition-opacity"
+              style={{ left: duration ? `calc(${(progress / duration) * 100}% - 6px)` : '-6px' }}
+            />
+          </div>
+
+          {/* 时间 */}
+          <div className="flex justify-between text-[10px] text-violet-400 tabular-nums">
+            <span>{fmtTime(progress)}</span>
+            <span>{loaded ? fmtTime(duration) : '--:--'}</span>
+          </div>
+        </div>
+
+        {/* 波形装饰 */}
+        <div className="shrink-0 flex items-end gap-0.5 h-6">
+          {[3, 5, 8, 6, 9, 5, 7, 4, 8, 6].map((h, i) => (
+            <div
+              key={i}
+              className={['w-0.5 rounded-full transition-all duration-150',
+                playing ? 'bg-violet-400' : 'bg-violet-200'].join(' ')}
+              style={{
+                height: `${playing ? h * (0.6 + 0.4 * Math.sin(Date.now() / 200 + i)) : h * 0.5}px`,
+              }}
+            />
+          ))}
+        </div>
+      </div>
+
+      {error && (
+        <div className="px-3.5 pb-2 text-[10px] text-red-400">音频加载失败，请检查文件路径</div>
+      )}
+    </div>
+  )
+}
+
+// ─── 视频/图片文件卡片（点击在预览区打开）────────────────────────────────────
+
+function MediaFileCard({ info }: { info: FileInfo }) {
+  const handleOpen = useCallback(() => {
+    window.open(info.url, '_blank')
+  }, [info])
+
+  const isVideo = info.kind === 'video'
+  const isImage = info.kind === 'image'
+
+  return (
+    <div
+      className="mt-2 rounded-2xl overflow-hidden border border-gray-100 bg-gray-50 shadow-sm cursor-pointer group hover:border-blue-200 hover:bg-blue-50/30 transition-all"
+      onClick={handleOpen}
+    >
+      <div className="px-3.5 py-3 flex items-center gap-3">
+        {/* 图标 */}
+        <div className={[
+          'shrink-0 w-10 h-10 rounded-xl flex items-center justify-center text-xl',
+          isVideo ? 'bg-blue-100' : 'bg-emerald-100',
+        ].join(' ')}>
+          {isVideo ? '🎬' : '🖼️'}
+        </div>
+
+        <div className="flex-1 min-w-0">
+          <div className="text-[11px] font-semibold text-gray-700 truncate">{info.filename}</div>
+          <div className="text-[10px] text-gray-400 mt-0.5 flex items-center gap-1.5">
+            {info.size_bytes && <span>{fmtBytes(info.size_bytes)}</span>}
+            <span className="text-gray-300">·</span>
+            <span className={isVideo ? 'text-blue-400' : 'text-emerald-400'}>
+              点击在预览区打开
+            </span>
+          </div>
+        </div>
+
+        {/* 箭头 */}
+        <svg className="w-4 h-4 text-gray-300 group-hover:text-blue-400 transition-colors shrink-0"
+          fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+            d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
+        </svg>
+      </div>
+
+      {/* 图片预览缩略图 */}
+      {isImage && (
+        <div className="px-3.5 pb-3">
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img
+            src={info.url}
+            alt={info.filename}
+            className="w-full max-h-32 object-cover rounded-xl border border-gray-100"
+            onError={e => { (e.target as HTMLImageElement).style.display = 'none' }}
+          />
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ─── JSON 语法高亮 ────────────────────────────────────────────────────────────
 
 function JsonHighlight({ raw }: { raw: string }) {
   if (!raw || raw === '{}' || raw === 'NULL') {
@@ -136,7 +342,6 @@ function JsonHighlight({ raw }: { raw: string }) {
   let formatted = raw
   try { formatted = JSON.stringify(JSON.parse(raw), null, 2) } catch { /* keep raw */ }
 
-  // 简单正则高亮：key / string / number / bool / null
   const highlighted = formatted.replace(
     /("(\\u[a-zA-Z0-9]{4}|\\[^u]|[^\\"])*"(\s*:)?|\b(true|false|null)\b|-?\d+(?:\.\d*)?(?:[eE][+\-]?\d+)?)/g,
     (match) => {
@@ -150,10 +355,7 @@ function JsonHighlight({ raw }: { raw: string }) {
     }
   )
   return (
-    <span
-      className="text-zinc-100"
-      dangerouslySetInnerHTML={{ __html: highlighted }}
-    />
+    <span className="text-zinc-100" dangerouslySetInnerHTML={{ __html: highlighted }} />
   )
 }
 
@@ -186,7 +388,7 @@ function fmtElapsed(ms: number): string {
   return `${(ms / 1000).toFixed(1)}s`
 }
 
-// ─── ToolCard 组件 ────────────────────────────────────────────────────────────
+// ─── ToolCard 主组件 ──────────────────────────────────────────────────────────
 
 export interface ToolCardProps {
   toolName: string
@@ -205,21 +407,28 @@ export const ToolCard = memo(function ToolCard({
 }: ToolCardProps) {
   const [open, setOpen] = useState(status === 'running' || status === 'failed')
   const bodyRef = useRef<HTMLDivElement>(null)
-  const icon = getToolIcon(toolName)
-  const label = getToolLabel(toolName)
+  const { label, ...icon } = getToolConfig(toolName)
   const isRunning = status === 'running'
   const isFailed = status === 'failed'
   const elapsed = useElapsedTimer(isRunning)
+
+  // 从 workspace store 获取当前 ws/proj id，用于构造文件 URL
+  const { activeWorkspaceId, activeProjectId } = useWorkspaceStore()
 
   const displayResult = error
     ? `错误: ${error}`
     : (resultText && resultText !== '{}' ? resultText : '')
 
+  // 解析文件信息（仅成功时）
+  const fileInfo = (!isRunning && !isFailed && displayResult)
+    ? extractFileInfo(displayResult, activeWorkspaceId || '', activeProjectId || '')
+    : null
+
   // 流式时自动展开，完成后自动折叠（用户点击后不再自动）
   const userClickedRef = useRef(false)
   useEffect(() => {
-    if (!userClickedRef.current) setOpen(isRunning)
-  }, [isRunning])
+    if (!userClickedRef.current) setOpen(isRunning || isFailed)
+  }, [isRunning, isFailed])
 
   // 滚到底
   useEffect(() => {
@@ -229,7 +438,6 @@ export const ToolCard = memo(function ToolCard({
   }, [open, isRunning, argumentsJson])
 
   return (
-    // 始终 w-full，避免展开/收起时宽度跳变闪烁
     <div
       className={[
         'w-full rounded-xl border text-xs overflow-hidden',
@@ -240,24 +448,20 @@ export const ToolCard = memo(function ToolCard({
             : 'border-gray-100 shadow-sm',
       ].join(' ')}
     >
-      {/* 头部：始终 w-full，展开按钮固定右侧 */}
+      {/* 头部 */}
       <button
         className="flex items-center gap-2 px-2.5 py-2 bg-white w-full text-left hover:bg-gray-50/80 transition-colors"
         onClick={() => { userClickedRef.current = true; setOpen((o) => !o) }}
       >
-        {/* 图标徽章 */}
         <span
           className="shrink-0 w-6 h-6 rounded-lg flex items-center justify-center text-sm"
           style={{ background: icon.bg }}
         >
           {icon.emoji}
         </span>
-
-        {/* 标签 + 工具名：min-w-0 + truncate 防止撑宽 */}
         <span className="font-semibold shrink-0" style={{ color: icon.fg }}>{label}</span>
         <span className="text-gray-300 truncate min-w-0 font-mono text-[10px]">{toolName}</span>
 
-        {/* 状态区：ml-auto 固定右侧，shrink-0 不压缩 */}
         <span className="shrink-0 ml-auto flex items-center gap-1.5">
           {isRunning && (
             <>
@@ -273,7 +477,6 @@ export const ToolCard = memo(function ToolCard({
           {isFailed && (
             <span className="text-red-500 font-bold text-sm">✗</span>
           )}
-          {/* 折叠箭头：始终可见，不随展开状态改变位置 */}
           <svg
             className={['w-3 h-3 text-gray-300 transition-transform duration-200', open ? 'rotate-90' : ''].join(' ')}
             fill="none" stroke="currentColor" viewBox="0 0 24 24"
@@ -293,7 +496,7 @@ export const ToolCard = memo(function ToolCard({
               <span className="text-gray-400 text-[10px] uppercase tracking-wider font-medium">
                 输入参数
               </span>
-              <pre className="bg-zinc-900 rounded-lg p-2.5 text-[11px] leading-relaxed overflow-x-hidden whitespace-pre-wrap break-words font-mono max-h-36 overflow-y-auto">
+              <pre className="bg-zinc-900 rounded-lg p-2.5 text-[11px] leading-relaxed overflow-x-hidden whitespace-pre-wrap break-words font-mono max-h-48 overflow-y-auto">
                 <JsonHighlight raw={argumentsJson} />
                 {isRunning && (
                   <span className="inline-block w-px h-3 bg-zinc-300 ml-0.5 animate-pulse align-text-bottom" />
@@ -302,7 +505,7 @@ export const ToolCard = memo(function ToolCard({
             </div>
           )}
 
-          {/* 结果（完成后显示） */}
+          {/* 结果区域 */}
           {!isRunning && displayResult && (
             <div className="space-y-1">
               <span className={[
@@ -311,12 +514,29 @@ export const ToolCard = memo(function ToolCard({
               ].join(' ')}>
                 {isFailed ? '错误详情' : '执行结果'}
               </span>
-              <pre className={[
-                'rounded-lg p-2.5 text-[11px] leading-relaxed overflow-x-hidden whitespace-pre-wrap break-words font-mono max-h-96 overflow-y-auto',
-                isFailed ? 'bg-red-950 text-red-200' : 'bg-zinc-900 text-zinc-200',
-              ].join(' ')}>
-                {displayResult}
-              </pre>
+
+              {/* 文件卡片（优先渲染） */}
+              {fileInfo && fileInfo.kind === 'audio' && (
+                <AudioFileCard info={fileInfo} />
+              )}
+              {fileInfo && (fileInfo.kind === 'video' || fileInfo.kind === 'image') && (
+                <MediaFileCard info={fileInfo} />
+              )}
+
+              {/* 原始 JSON（文件卡片下方折叠展示，或无文件时展示） */}
+              {(!fileInfo || isFailed) && (
+                <pre className={[
+                  'rounded-lg p-2.5 text-[11px] leading-relaxed overflow-x-hidden whitespace-pre-wrap break-words font-mono overflow-y-auto max-h-48',
+                  isFailed ? 'bg-red-950 text-red-200' : 'bg-zinc-900 text-zinc-200',
+                ].join(' ')}>
+                  {displayResult}
+                </pre>
+              )}
+
+              {/* 有文件卡片时，原始 JSON 可折叠查看 */}
+              {fileInfo && !isFailed && (
+                <RawJsonCollapse raw={displayResult} />
+              )}
             </div>
           )}
         </div>
@@ -324,3 +544,28 @@ export const ToolCard = memo(function ToolCard({
     </div>
   )
 })
+
+// ─── 可折叠的原始 JSON（文件卡片下方） ───────────────────────────────────────
+
+function RawJsonCollapse({ raw }: { raw: string }) {
+  const [show, setShow] = useState(false)
+  return (
+    <div>
+      <button
+        className="text-[10px] text-gray-400 hover:text-gray-600 transition-colors flex items-center gap-1 mt-1"
+        onClick={() => setShow(v => !v)}
+      >
+        <svg className={['w-2.5 h-2.5 transition-transform', show ? 'rotate-90' : ''].join(' ')}
+          fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+        </svg>
+        {show ? '收起原始数据' : '查看原始数据'}
+      </button>
+      {show && (
+        <pre className="mt-1 bg-zinc-900 rounded-lg p-2.5 text-[11px] leading-relaxed overflow-x-hidden whitespace-pre-wrap break-words font-mono overflow-y-auto max-h-36">
+          <JsonHighlight raw={raw} />
+        </pre>
+      )}
+    </div>
+  )
+}

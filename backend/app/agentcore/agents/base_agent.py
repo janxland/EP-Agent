@@ -76,3 +76,23 @@ class BaseAgent(ABC):
         返回结果 dict（格式由各 Agent 自定义）。
         """
         ...
+
+    async def run_with_ctx(self, ctx: "RunContext") -> dict:
+        """
+        v4.0 解耦接口的基类默认实现（AGENT 修复：消除各子类 TodoManager 样板重复）。
+
+        默认行为：
+          1. 从 ctx.extra 取 todo_mgr，若无则自动创建并绑定 session_id
+          2. 调用子类的 run(ctx)
+
+        子类若需要更多 extra 字段（如 session_getter/convert_fn），可 override 此方法，
+        但 TodoManager 初始化逻辑无需重复实现。
+        """
+        todo_mgr = ctx.extra.get("todo_mgr")
+        if todo_mgr is None:
+            from app.agentcore.todo_manager import TodoManager as _TM
+            todo_mgr = _TM()
+            todo_mgr.session_id = ctx.session_id
+            # 注入回 extra，让 run() 内部可通过 ctx.extra["todo_mgr"] 访问
+            ctx = ctx.with_extra(todo_mgr=todo_mgr)
+        return await self.run(ctx)

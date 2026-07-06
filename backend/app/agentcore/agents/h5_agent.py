@@ -306,25 +306,55 @@ class H5Agent:
                 )
 
             elif name_lower.endswith(".abc") or name_lower.endswith(".txt"):
-                # ABC：读取文本内容，注入到消息中
+                # .txt 可能是 Sky JSON 谱子（songNotes），也可能是 ABC；需先读取内容判断
                 try:
                     from app.agentcore.session_context import get_current_project_root
                     _root = get_current_project_root()
-                    abc_text = (
+                    file_text = (
                         (_root / attachment_workspace_path)
                         .read_text(encoding="utf-8", errors="replace")
                         if _root else ""
                     )
-                    if abc_text:
-                        parts.append(
-                            f"\n\n[ABC 文件内容]\n```abc\n{abc_text[:4000]}\n```\n"
-                            f"⚡ 先调用 list_h5_templates() 选模板，再调用 get_h5_template(name) 读取 HTML，\n"
-                            f"然后将上方 ABC 内容填入 ep-config JSON 的 ABC_CONTENT 字段，"
-                            f"最后调用 save_h5_output 保存。"
-                        )
-                    else:
+                    if not file_text:
                         raise ValueError("无法读取")
                 except Exception:
+                    file_text = ""
+
+                # 判断是否为 Sky JSON（含 songNotes 字段）
+                _is_sky_json = False
+                if file_text and name_lower.endswith(".txt"):
+                    import json as _json_check
+                    try:
+                        _parsed = _json_check.loads(file_text.strip())
+                        _arr = _parsed if isinstance(_parsed, list) else [_parsed]
+                        if _arr and isinstance(_arr[0], dict) and _arr[0].get("songNotes"):
+                            _is_sky_json = True
+                    except Exception:
+                        pass
+
+                if _is_sky_json:
+                    # Sky JSON（以 .txt 导出）→ 走 Sky JSON 流程
+                    if file_text:
+                        parts.append(
+                            f"\n\n[Sky JSON 文件内容（.txt 格式导出）]\n```json\n{file_text[:4000]}\n```\n"
+                            f"⚡ 先调用 parse_sky_json_to_json(sky_json_str=<上方JSON内容>) 提取元数据，\n"
+                            f"再调用 list_h5_templates() 选模板，get_h5_template(name) 读取 HTML，\n"
+                            f"修改后 save_h5_output 保存。"
+                        )
+                    else:
+                        parts.append(
+                            f"\n\n[Sky JSON 文件（.txt 格式）]\nworkspace_path: {attachment_workspace_path}\n"
+                            f"⚡ 调用 list_workspace_files() 确认路径后按 Sky JSON 流程处理。"
+                        )
+                elif file_text:
+                    # ABC 格式
+                    parts.append(
+                        f"\n\n[ABC 文件内容]\n```abc\n{file_text[:4000]}\n```\n"
+                        f"⚡ 先调用 list_h5_templates() 选模板，再调用 get_h5_template(name) 读取 HTML，\n"
+                        f"然后将上方 ABC 内容填入 ep-config JSON 的 ABC_CONTENT 字段，"
+                        f"最后调用 save_h5_output 保存。"
+                    )
+                else:
                     parts.append(
                         f"\n\n[ABC 文件]\nworkspace_path: {attachment_workspace_path}\n"
                         f"⚡ 调用 list_workspace_files() 确认路径，"
@@ -375,7 +405,9 @@ class H5Agent:
         return "".join(parts)
 
     async def run_with_ctx(self, ctx: "RunContext") -> dict:
-        """v4.0 解耦接口：从 RunContext 解包参数，调用原 run()。"""
+        """v4.0 解耦接口：从 RunContext 解包参数，调用原 run()。
+        AGENT-4 修复：补充 attachment_b64/attachment_content，H5 Agent 可处理内联附件。
+        """
         todo_mgr = ctx.extra.get("todo_mgr")
         if todo_mgr is None:
             from app.agentcore.todo_manager import TodoManager as _TM
@@ -386,6 +418,8 @@ class H5Agent:
             message=ctx.message,
             attachment_workspace_path=ctx.attachment_workspace_path,
             attachment_name=ctx.attachment_name,
+            attachment_b64=ctx.attachment_b64,
+            attachment_content=ctx.attachment_content,
             publish=ctx.publish,
             todo_mgr=todo_mgr,
             domain=ctx.domain or "h5_create",

@@ -46,7 +46,7 @@ ROLE_CONFIG: dict[str, RoleMeta] = {
         tagline="乐谱创作、编辑与音乐分析",
         icon="🎵",
         color="orange",
-        domains=["convert", "edit", "create", "query", "voice", "sovits"],
+        domains=["convert", "edit", "create", "query", "audio"],
         system_prompt_extra=(
             "你是一位真正懂音乐的乐谱专家，有多年流行音乐创作和编曲经验。\n\n"
 
@@ -101,7 +101,7 @@ ROLE_CONFIG: dict[str, RoleMeta] = {
         tagline="AI 配乐生成、音频迭代与风格转换",
         icon="🎧",
         color="blue",
-        domains=["audio", "voice", "sovits", "create"],
+        domains=["audio", "create"],  # voice/sovits 由 voice_cloner 角色专职处理，不在此混入避免路由误判
         system_prompt_extra=(
             "你是专业的 AI 音乐制作人，擅长用 AI 工具生成高质量配乐。\n"
             "专长：MiniMax/Suno 音频生成、风格迭代、配乐建议、音频质量评估。\n"
@@ -222,9 +222,34 @@ def build_role_system_prompt(role_id: str | None) -> str:
     return role.system_prompt_extra
 
 
+def load_agent_prompt(role: RoleMeta) -> str:
+    """
+    RC2 修复：加载角色对应的 .agent 文件中的 system_prompt 字段。
+    若 agent_file 为空或文件不存在，返回空字符串（调用方回退到 system_prompt_extra）。
+    """
+    if not role.agent_file:
+        return ""
+    from pathlib import Path
+    import json as _json
+    # 查找 .agent 文件路径（相对于 backend/agent/agents/）
+    candidates = [
+        Path(__file__).parent.parent.parent / "agent" / "agents" / f"{role.agent_file}.agent",
+        Path(__file__).parent.parent.parent / "agent" / "agents" / role.agent_file,
+    ]
+    for path in candidates:
+        if path.exists():
+            try:
+                data = _json.loads(path.read_text(encoding="utf-8"))
+                return data.get("system_prompt", "")
+            except Exception:
+                return ""
+    return ""
+
+
 def to_frontend_list() -> list[dict]:
     """
     生成前端角色列表 JSON，供 /api/roles 端点返回。
+    RC6 修复：只返回 enabled=True 的角色，不暴露被禁用的角色给前端。
     """
     return [
         {
@@ -238,5 +263,6 @@ def to_frontend_list() -> list[dict]:
             "enabled":      r.enabled,
             "domains":      r.domains,
         }
-        for r in list(ROLE_CONFIG.values())
+        for r in ROLE_CONFIG.values()
+        if r.enabled   # RC6 修复：过滤 enabled=False 的角色
     ]

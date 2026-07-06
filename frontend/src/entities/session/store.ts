@@ -13,6 +13,7 @@ import type {
   ToolCallPayload,
   IntentType,
 } from '@/shared/types'
+import { useWorkspaceStore } from '@/features/workspace/store/workspace.store'
 
 // ─── Pipeline Log（展示给用户的进度日志） ─────────────────────
 
@@ -271,6 +272,20 @@ export const useScoreStore = create<ScoreState>((set, get) => ({
       case 'message.completed': {
         // 后端实现流式文本输出时使用，当前为预留分支
         commitStreamMessage()
+        break
+      }
+
+      case 'session.renamed': {
+        // 后端首轮意图识别后自动命名对话，更新侧边栏 title
+        const p = event.payload as { session_id?: string; title?: string }
+        const targetId = p.session_id ?? event.session_id
+        const newTitle = p.title
+        if (targetId && newTitle) {
+          // 触发后不等待结果，命名失败不影响主流程
+          useWorkspaceStore.getState().renameSession(targetId, newTitle).catch((e) => {
+            console.warn('[session.renamed] 更新侧边栏 title 失败:', e)
+          })
+        }
         break
       }
 

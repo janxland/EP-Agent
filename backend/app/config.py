@@ -46,8 +46,10 @@ class Config:
         self.SUNO_BASE_URL: str = os.getenv("SUNO_BASE_URL", "https://api.ttapi.io")
 
         # MiniMax 官方 API
+        # 注意：国内账号使用 minimaxi.com，国际账号使用 minimax.io
+        # sk-api-... 格式的 Key 对应 minimaxi.com 域名
         self.MINIMAX_API_KEY: str  = os.getenv("MINIMAX_API_KEY", "")
-        self.MINIMAX_BASE_URL: str = os.getenv("MINIMAX_BASE_URL", "https://api.minimax.io/v1")
+        self.MINIMAX_BASE_URL: str = os.getenv("MINIMAX_BASE_URL", "https://api.minimaxi.com/v1")
 
         # GPT-SoVITS（自部署服务，可选）
         # 部署参考：https://github.com/RVC-Boss/GPT-SoVITS

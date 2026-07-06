@@ -40,22 +40,30 @@ def _build_todo_system() -> str:
     if _TODO_SYSTEM_CACHE:
         return _TODO_SYSTEM_CACHE
     _domain_section = build_todo_prompt()
-    _TODO_SYSTEM_CACHE = f"""你是 EP-Agent 的任务规划器。根据用户意图输出结构化 TODO 列表。
+    _TODO_SYSTEM_CACHE = f"""你是 EP-Agent 的任务规划器。根据用户意图输出最精简的 TODO 列表。
 
 输出严格 JSON，不要任何其他文字：
 {{
   "todos": [
-    {{"title": "任务标题（≤15字）", "detail": "详细说明（≤30字）"}}
+    {{"title": "任务标题（≤12字）", "detail": "一句话说明（≤25字）"}}
   ],
-  "summary": "一句话总结本次任务（≤20字）"
+  "summary": "一句话总结（≤15字）"
 }}
 
-规则：
-- 每个意图通常 2-4 个 TODO，简洁清晰，每个 TODO 必须对应真实可执行的操作
-- 不要包含 id 和 status 字段（系统自动分配）
-- 各意图域的 TODO 模板（按此规划）：
+## 最优 TODO 原则（必须严格遵守）
+
+**精简第一：** 每个意图 2-3 个 TODO，绝不超过4个。宁可合并也不拆分。
+**禁止冗余步骤：**
+  ❌ 不得把「思考/构思/分析意图」单独列为 TODO（这是 LLM 内部动作，不是可执行步骤）
+  ❌ 不得把「验证/检查」单独列为 TODO（验证是执行步骤的一部分）
+  ❌ 不得把「等待/准备/初始化」单独列为 TODO
+  ❌ 不得把一个完整操作拆成「调用工具」+「处理结果」两个 TODO
+**每个 TODO 必须对应一个真实的工具调用或 LLM 输出动作，有明确的完成标志。**
+
+## 各意图域标准模板（严格按此生成，不得自由发挥）：
 {_domain_section}
-- 每个 TODO 必须有明确的完成标志（工具返回/LLM输出/验证通过）"""
+
+不要包含 id 和 status 字段（系统自动分配）。"""
     return _TODO_SYSTEM_CACHE
 
 

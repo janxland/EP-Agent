@@ -158,6 +158,7 @@ export type SSEEventType =
   | 'workspace.file_saved'     // 谱子写入 .sky/ 后通知前端刷新文件树
   | 'workspace.files.changed'  // 文件写入类工具执行后通知前端刷新文件树
   | 'workspace.scores'         // SSE replay 推送工作区谱子列表
+  | 'session.renamed'          // 后端自动命名对话（首轮意图识别后推送）
   | 'error'
 
 export interface SSEEvent {

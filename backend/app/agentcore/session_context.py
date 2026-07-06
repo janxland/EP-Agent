@@ -13,6 +13,7 @@ SessionContext — session_getter/session_saver 上下文封装
 """
 from __future__ import annotations
 
+import logging as _logging_mod
 from contextvars import ContextVar
 from typing import Callable, Any
 
@@ -104,6 +105,9 @@ def get_current_project_id() -> str:
         return ""
 
 
+_logger_ctx = _logging_mod.getLogger("ep_agent.session_context")
+
+
 def get_current_project_root() -> str:
     """
     返回当前 session 对应的项目文件根目录（绝对路径字符串）。
@@ -112,26 +116,27 @@ def get_current_project_root() -> str:
     from pathlib import Path as _Path
 
     sid = get_current_session_id()
-    print(f"[EP-Agent] get_current_project_root: session_id={sid!r}", flush=True)
     if not sid:
-        print("[EP-Agent] get_current_project_root: ❌ session_id 为空，ContextVar 未注入", flush=True)
+        _logger_ctx.debug("get_current_project_root: session_id 为空，ContextVar 未注入")
         return ""
     try:
         from app.pipeline import db as _db
         info = _db.get_session_info(sid)
         ws_id   = (info or {}).get("workspace_id") or ""
         proj_id = (info or {}).get("project_id")   or ""
-        print(f"[EP-Agent] get_current_project_root: ws_id={ws_id!r} proj_id={proj_id!r}", flush=True)
         if not ws_id or not proj_id:
-            print(f"[EP-Agent] get_current_project_root: ❌ ws_id 或 proj_id 为空，无法定位项目目录", flush=True)
+            _logger_ctx.debug(
+                "get_current_project_root: ws_id=%r proj_id=%r 为空，无法定位项目目录",
+                ws_id, proj_id,
+            )
             return ""
         _WS_ROOT = _Path(__file__).resolve().parent.parent.parent / "data" / "workspace"
         root = _WS_ROOT / ws_id / "projects" / proj_id
         root.mkdir(parents=True, exist_ok=True)
-        print(f"[EP-Agent] get_current_project_root: ✅ root={root}", flush=True)
+        _logger_ctx.debug("get_current_project_root: root=%s", root)
         return str(root)
     except Exception as _e:
-        print(f"[EP-Agent] get_current_project_root: ❌ 异常: {_e}", flush=True)
+        _logger_ctx.warning("get_current_project_root: 异常: %s", _e)
         return ""
 
 
@@ -198,9 +203,17 @@ _FILE_TYPE_MAP = {
     ".mid":  "midi",
     ".midi": "midi",
     ".abc":  "abc",
-    ".txt":  "abc",   # Sky 谱 txt 也归入 abc 类
-    ".json": "json",
+    ".txt":  "sky_json",  # Sky 谱 txt = Sky JSON，不是 ABC
+    ".json": "sky_json",  # Sky JSON（.json 统一归入 sky_json）
     ".html": "h5",
+    # 音频文件（音色克隆 / TTS 合成输出）
+    ".wav":  "audio",
+    ".mp3":  "audio",
+    ".ogg":  "audio",
+    ".flac": "audio",
+    ".m4a":  "audio",
+    ".aac":  "audio",
+    ".opus": "audio",
 }
 _MAX_PER_TYPE = 10
 

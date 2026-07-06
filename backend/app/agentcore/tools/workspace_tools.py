@@ -56,8 +56,8 @@ _BLOCKED_EXTS = {".py", ".sh", ".bash", ".zsh", ".exe", ".bat", ".cmd",
                  ".ps1", ".rb", ".pl", ".php"}
 
 # 文件大小限制
-_MAX_TEXT_BYTES   = 2 * 1024 * 1024   # 2 MB
-_MAX_BINARY_BYTES = 10 * 1024 * 1024  # 10 MB
+_MAX_TEXT_BYTES   = 2 * 1024 * 1024    # 2 MB
+_MAX_BINARY_BYTES = 200 * 1024 * 1024  # 200 MB（音频/视频文件放行）
 
 # 可读取的文本扩展名
 _TEXT_EXTS = {
@@ -80,43 +80,85 @@ def _get_file_lock(abs_path: str) -> threading.Lock:
 
 # ─── 内部工具函数 ─────────────────────────────────────────────────────────────
 
-def _get_project_root() -> Path | None:
+def _resolve_project_from_session(session_id: str) -> tuple[str, str]:
     """
-    通过 ContextVar 推断当前 session 的项目根目录。
-    v4.0 修复：project_id 为空时降级到 workspace 级目录，而非返回 None 导致工具宕机。
-    优先级：session.project_id → session.workspace_id 目录 → None
+    通过 session_id 查 DB，返回 (workspace_id, project_id)。
+    session → project 是确定性一对一关系，直接查 DB，不猜测。
+    若 DB 中 project_id 为空，说明 session 创建时未绑定，返回空字符串。
     """
     try:
-        from app.agentcore.session_context import (
-            get_current_project_root, get_current_project_id, get_current_workspace_id
-        )
-        # 优先：有 project_id → 返回精确项目目录
-        proj_id = get_current_project_id()
-        if proj_id:
-            root_str = get_current_project_root()
-            if root_str:
-                root = Path(root_str)
-                try:
-                    root.resolve().relative_to(_WS_ROOT.resolve())
-                except ValueError:
-                    pass
-                else:
-                    root.mkdir(parents=True, exist_ok=True)
-                    return root
+        from app.pipeline import db as _db_q
+        info = _db_q.get_session_info(session_id)
+        ws_id   = (info or {}).get("workspace_id") or ""
+        proj_id = (info or {}).get("project_id")   or ""
+        return ws_id.strip(), proj_id.strip()
+    except Exception:
+        return "", ""
 
-        # 降级：无 project_id 但有 workspace_id → 使用 workspace 根目录
-        ws_id = get_current_workspace_id()
-        if ws_id:
-            import logging as _log
-            _log.getLogger("ep_agent").warning(
-                "[workspace_tools] project_id 未绑定，降级到 workspace 目录: ws=%s", ws_id[:8]
+
+def _get_project_root() -> Path | None:
+    """
+    返回当前 session 对应的项目文件根目录。
+
+    查找顺序（确定性，不猜测）：
+      1. ContextVar 已有 project_id → 直接构造路径返回
+      2. ContextVar 无 project_id，但有 session_id → 查 DB sessions 表取 project_id，
+         回写 ContextVar 后构造路径返回
+      3. DB 中 project_id 也为空（session 未绑定项目）→ 返回 None，
+         让调用方收到明确错误，而不是静默操作错误目录
+    """
+    import logging as _log
+    _logger_wt = _log.getLogger("ep_agent.workspace_tools")
+    try:
+        from app.agentcore.session_context import (
+            get_current_session_id,
+            get_current_project_id,
+            get_current_workspace_id,
+            get_current_project_root,
+        )
+
+        # ── Step 1：ContextVar 已有 project_id，直接用 ──────────────────────────
+        proj_id = get_current_project_id()
+        ws_id   = get_current_workspace_id()
+        if proj_id and ws_id:
+            root = _WS_ROOT / ws_id / "projects" / proj_id
+            root.mkdir(parents=True, exist_ok=True)
+            return root
+
+        # ── Step 2：ContextVar 无 project_id，通过 session_id 查 DB ─────────────
+        sid = get_current_session_id()
+        if sid:
+            db_ws, db_proj = _resolve_project_from_session(sid)
+            if db_proj and db_ws:
+                _logger_wt.info(
+                    "[workspace_tools] 通过 session_id 从 DB 恢复绑定: "
+                    "sid=%s ws=%s proj=%s",
+                    sid[:8], db_ws[:8], db_proj,
+                )
+                root = _WS_ROOT / db_ws / "projects" / db_proj
+                root.mkdir(parents=True, exist_ok=True)
+                return root
+
+            # DB 中 project_id 为空：session 未正确绑定项目
+            _logger_wt.error(
+                "[workspace_tools] session %s 在 DB 中无 project_id 绑定，"
+                "无法定位项目目录（ws=%s）。"
+                "请检查 session 创建流程是否正确传入 project_id。",
+                sid[:8], db_ws or "?",
             )
-            ws_root = _WS_ROOT / ws_id
-            ws_root.mkdir(parents=True, exist_ok=True)
-            return ws_root
+            return None
+
+        # ── Step 3：连 session_id 都没有 → ContextVar 未注入 ────────────────────
+        _logger_wt.error(
+            "[workspace_tools] ContextVar 中无 session_id，"
+            "工具调用链路未正确注入上下文。"
+        )
+        return None
+
     except Exception as _e:
-        import logging as _log
-        _log.getLogger("ep_agent").warning("[workspace_tools] _get_project_root 异常: %s", _e)
+        _log.getLogger("ep_agent.workspace_tools").warning(
+            "[workspace_tools] _get_project_root 异常: %s", _e
+        )
     return None
 
 
@@ -186,12 +228,13 @@ def list_workspace_files(subdir: str = "") -> str:
 
 
 @tool(group="workspace")
-def read_workspace_files(file_paths: list, offset_lines: int = 0, limit_lines: int = 0) -> dict:
+def read_workspace_files(file_paths: list[str], offset_lines: int = 0, limit_lines: int = 0) -> dict:
     """
     【核心读取工具】批量并行读取多个项目内文本文件。
     一次调用读多个文件，比多次单文件调用高效得多。
 
-    file_paths: 相对路径列表，如 ["src/main.js", "docs/readme.md", "config/settings.json"]
+    file_paths: 项目内文件相对路径列表，如[".sky/score.abc"]或[".sky/a.abc","b.json"]。
+      传空列表 [] 时自动扫描并返回项目目录下所有文本文件内容（.abc/.txt/.json/.md/.html等）
     offset_lines: 从第几行开始读（0 = 从头，支持负数从尾部计算）
     limit_lines: 最多读多少行（0 = 全部）
     返回: {
@@ -205,6 +248,20 @@ def read_workspace_files(file_paths: list, offset_lines: int = 0, limit_lines: i
     root = _get_project_root()
     if root is None:
         return {"error": "会话未绑定项目，无法读取文件。", "files": []}
+
+    # file_paths 为空 → 自动扫描项目目录下所有文本文件
+    if not file_paths:
+        file_paths = [
+            str(p.relative_to(root))
+            for p in sorted(root.rglob("*"))
+            if p.is_file() and p.suffix.lower() in _TEXT_EXTS
+        ]
+        if not file_paths:
+            return {
+                "files": [],
+                "summary": "项目目录为空，未找到任何文本文件",
+                "project_root": str(root),
+            }
 
     results = []
     for rel_path in file_paths:
@@ -343,6 +400,10 @@ def write_workspace_file(file_path: str, content: str, encoding: str = "text") -
     else:
         if len(content.encode("utf-8")) > _MAX_TEXT_BYTES:
             raise ValueError("文件过大")
+        # .abc 文件保底清理：自动去除空行（ABC 解析器遇空行会截断谱子）
+        if ext == ".abc":
+            lines = content.splitlines()
+            content = "\n".join(line for line in lines if line.strip() != "")
         size = len(content.encode("utf-8"))
         target.write_text(content, encoding="utf-8")
         # M6 操作审计日志
@@ -544,7 +605,7 @@ def run_write_tasks_in_parallel(tasks: list) -> dict:
 @tool(group="workspace")
 def delete_workspace_file(file_path: str) -> str:
     """删除项目内文件。
-    file_path: 相对路径（如 'shared/old.html'）
+    file_path: 相对路径（如 'old.html' 或 'h5/old.html'）
     返回删除结果描述
     """
     target = _resolve_safe(file_path)
@@ -580,7 +641,7 @@ def copy_workspace_file(src_path: str, dst_path: str) -> str:
 @tool(group="workspace")
 def rename_workspace_file(src_path: str, new_name: str) -> str:
     """重命名项目内文件（仅改名，保持在同一目录）。
-    src_path: 源文件相对路径（如 'shared/old_name.html'）
+    src_path: 源文件相对路径（如 'old_name.html' 或 'h5/old_name.html'）
     new_name: 新文件名（仅文件名部分，如 'new_name.html'，不含路径分隔符）
     返回重命名结果描述
     """
@@ -604,7 +665,7 @@ def rename_workspace_file(src_path: str, new_name: str) -> str:
 def move_workspace_file(src_path: str, dst_path: str) -> str:
     """移动项目内文件到新路径（跨目录移动，目标已存在则覆盖）。
     src_path: 源文件相对路径（如 'tmp/temp.html'）
-    dst_path: 目标文件相对路径（如 'shared/output.html'）
+    dst_path: 目标文件相对路径（如 'h5/output.html' 或 'output.html'）
     返回移动结果描述
     """
     import shutil

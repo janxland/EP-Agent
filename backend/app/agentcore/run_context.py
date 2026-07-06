@@ -89,16 +89,8 @@ class RunContext:
             except Exception as e:
                 _logger.warning("ContextVar 注入失败: %s", e)
 
-        # v4.0 fix46：若 workspace_id/project_id 已知，直接写入 ContextVar 缓存
-        # 避免工具调用时反复查 DB，也保证即使 DB 查询失败工具也能定位目录
-        if self.workspace_id or self.project_id:
-            try:
-                from app.agentcore.session_context import _current_session_id_var
-                # 通过 session_context 的 get_current_project_root 会查 DB，
-                # 这里额外缓存到 extra 供降级使用
-                pass  # project_id 已在 RunContext.extra 中，工具通过 ContextVar→DB 获取
-            except Exception:
-                pass
+        # v4.0 fix46：workspace_id/project_id 已通过 ContextVar 注入，
+        # 工具调用时会自动从 DB 查询，RunContext.extra 无需额外缓存。
 
     # ── 不可变更新方法（返回新实例，保持原实例不变）────────────────
 
@@ -118,6 +110,26 @@ class RunContext:
         """返回 extra 字段合并更新的新 RunContext。"""
         new_extra = {**self.extra, **kwargs}
         return replace(self, extra=new_extra)
+
+    # ── AGENT-2 修复：便捷属性，消除各 Agent run_with_ctx 中重复的解包样板 ──────
+
+    @property
+    def session_getter(self):
+        """从 extra 取 session_getter，未注入时 fallback 到 db.get_session_info。"""
+        getter = self.extra.get("session_getter")
+        if getter is not None:
+            return getter
+        from app.pipeline import db as _db
+        return _db.get_session_info
+
+    @property
+    def session_saver(self):
+        """从 extra 取 session_saver，未注入时 fallback 到 db.upsert_session。"""
+        saver = self.extra.get("session_saver")
+        if saver is not None:
+            return saver
+        from app.pipeline import db as _db
+        return _db.upsert_session
 
     # ── 工厂方法 ────────────────────────────────────────────────────
 

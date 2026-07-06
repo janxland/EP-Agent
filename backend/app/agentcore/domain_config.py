@@ -44,7 +44,7 @@ DOMAIN_CONFIG: dict[str, DomainMeta] = {
             "  ⚠️ Sky 谱子常以 .txt 格式导出，不要因为扩展名是 .txt 就误判为 create！\n"
             "  ⚠️ 只要附件内容含有 songNotes 字段，无论扩展名，必须路由到 convert！"
         ),
-        todo_template="解析谱子文件 → 转换为 ABC → 加载完成",
+        todo_template="[1]告知用户转换结果（1个TODO即可，转换/保存/验证均由Python代码层自动完成，LLM只需说明结果）",
         agent_class="ConvertAgent",
         tool_groups=["abc_edit"],
     ),
@@ -54,7 +54,7 @@ DOMAIN_CONFIG: dict[str, DomainMeta] = {
         label="编辑谱子",
         icon="✏️",
         description="修改已有谱子（转调/变速/风格/加花等），需已有谱子",
-        todo_template="理解编辑意图 → 调用编辑工具 → 验证结果",
+        todo_template="[1]获取ABC并执行修改 [2]按需导出（1-2个TODO，保存由Python层自动完成无需列为TODO，简单编辑无导出需求时只需1个TODO）",
         agent_class="EditAgent",
         tool_groups=["abc_edit"],
         requires_score=True,
@@ -68,7 +68,7 @@ DOMAIN_CONFIG: dict[str, DomainMeta] = {
             "从零创作 ABC 谱子（用户描述音乐风格/旋律/情感等，无附件谱子）。\n"
             "注意：若有附件且含 songNotes，应路由到 convert 而非 create"
         ),
-        todo_template="理解风格需求 → 创作 ABC 谱子 → 验证存储",
+        todo_template="[1]创作ABC谱子 [2]按需导出（1-2个TODO，保存由Python层自动完成无需列为TODO，无导出需求时只需1个TODO，禁止把「构思」「验证」「保存」单独列为TODO）",
         agent_class="CreateAgent",
         tool_groups=["abc_edit"],
     ),
@@ -78,7 +78,7 @@ DOMAIN_CONFIG: dict[str, DomainMeta] = {
         label="生成音频",
         icon="🎧",
         description="生成/迭代音频（「生成配乐」/「再欢快一点」/「翻唱」等）",
-        todo_template="分析音频需求 → 生成音频",
+        todo_template="[1]生成音频（2个TODO即可，禁止拆分「分析」「调用」「等待」为多个TODO）",
         agent_class="AudioAgent",
         tool_groups=["audio"],
     ),
@@ -88,11 +88,12 @@ DOMAIN_CONFIG: dict[str, DomainMeta] = {
         label="MiniMax音色",
         icon="🎤",
         description=(
-            "MiniMax 云端音色克隆（无本地 GPT-SoVITS 时的降级路径）。\n"
-            "⚠️ 若用户明确提到「GPT-SoVITS」/「SoVITS」/「本地克隆」，优先路由到 sovits 域。\n"
-            "关键词：「MiniMax 克隆」/「云端音色」/「查看已克隆音色列表」"
+            "MiniMax 云端音色克隆（用户明确指定 MiniMax，或 GPT-SoVITS 不可用时的路径）。\n"
+            "⚠️ 用户说「用 MiniMax」/「MiniMax 克隆」/「用云端克隆」→ 必须路由到 voice 域，不得路由到 sovits！\n"
+            "⚠️ 若用户明确提到「GPT-SoVITS」/「SoVITS」/「本地克隆」→ 路由到 sovits 域。\n"
+            "关键词：「MiniMax 克隆」/「用 MiniMax」/「云端音色」/「查看已克隆音色列表」"
         ),
-        todo_template="分析音色需求 → MiniMax 克隆/合成音频",
+        todo_template="[1]克隆/合成音频 [2]保存结果（2个TODO，禁止冗余步骤）",
         agent_class="AudioAgent",
         tool_groups=["audio"],
     ),
@@ -107,9 +108,10 @@ DOMAIN_CONFIG: dict[str, DomainMeta] = {
             "关键词：「克隆声音」/「用我的声音」/「音色克隆」/「语音合成」/\n"
             "        「TTS」/「文字转语音」/「合成语音」/「声音克隆」/\n"
             "        「GPT-SoVITS」/「SoVITS」/「查看音色模型」\n"
-            "附件含 .wav/.mp3/.m4a 且用户提到「克隆」/「声音」时优先路由到此域"
+            "附件含 .wav/.mp3/.m4a 且用户提到「克隆」/「声音」时优先路由到此域\n"
+            "⚠️ 用户明确说「用 MiniMax」时不路由到此域，应路由到 voice 域"
         ),
-        todo_template="检查服务状态 → 克隆/合成音色 → 保存音频文件",
+        todo_template="[1]克隆音色 [2]合成/保存（2个TODO，禁止把「查询」「等待」单独列出）",
         agent_class="VoiceCloneAgent",
         tool_groups=["sovits"],
     ),
@@ -119,7 +121,7 @@ DOMAIN_CONFIG: dict[str, DomainMeta] = {
         label="查询分析",
         icon="🔍",
         description="查询/分析谱子信息（「这首是什么调」/「有多少音符」等）",
-        todo_template="分析用户问题 → 查询谱子信息 → 回答",
+        todo_template="[1]回答用户（1个TODO即可，QueryAgent直接LLM回答，谱子上下文已自动注入，无需工具调用）",
         agent_class="QueryAgent",
         tool_groups=[],
     ),
@@ -136,7 +138,7 @@ DOMAIN_CONFIG: dict[str, DomainMeta] = {
             "附件含 .mid/.midi/.abc 扩展名时优先路由到此域\n"
             "⚠️ 用户说「生成一个HTML播放MIDI」「做一个播放页面」均路由到此域"
         ),
-        todo_template="解析乐谱文件 → 生成 HTML 结构 → 渲染播放器/海报 → 保存文件",
+        todo_template="[1]解析乐谱 [2]生成HTML页面 [3]保存文件（3个TODO，禁止把「渲染」「样式」单独拆出）",
         agent_class="H5Agent",
         tool_groups=["h5"],
     ),
@@ -150,7 +152,7 @@ DOMAIN_CONFIG: dict[str, DomainMeta] = {
             "编辑已生成的 H5 页面（更换模板/修改标题/调整样式/切换播放器）。\n"
             "关键词：「换个模板」/「改成暗色」/「修改标题」/「重新生成」"
         ),
-        todo_template="读取已有 H5 → 应用修改 → 重新生成 → 保存",
+        todo_template="[1]读取H5并应用修改 [2]保存（2个TODO，读取和修改合并为一步）",
         agent_class="H5Agent",
         tool_groups=["h5"],
     ),

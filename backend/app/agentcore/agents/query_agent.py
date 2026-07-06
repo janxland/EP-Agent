@@ -126,10 +126,10 @@ class QueryAgent:
         return {"domain": "query", "message": answer, "abc_updated": False}
 
     async def run_with_ctx(self, ctx: "RunContext") -> dict:
-        """v4.0 解耦接口：从 RunContext 解包参数，调用原 run()。"""
-        from app.pipeline import db as _db
-        session_getter = ctx.extra.get("session_getter") or _db.get_session
-        todo_mgr       = ctx.extra.get("todo_mgr")
+        """v4.0 解耦接口：从 RunContext 解包参数，调用原 run()。
+        AGENT-2 修复：session_getter 通过 ctx 属性统一解包（fallback 逻辑在 RunContext 中）。
+        """
+        todo_mgr = ctx.extra.get("todo_mgr")
         if todo_mgr is None:
             from app.agentcore.todo_manager import TodoManager as _TM
             todo_mgr = _TM()
@@ -138,7 +138,7 @@ class QueryAgent:
             session_id=ctx.session_id,
             message=ctx.message,
             publish=ctx.publish,
-            session_getter=session_getter,
+            session_getter=ctx.session_getter,
             todo_mgr=todo_mgr,
             role_id=ctx.role_id or None,
         )

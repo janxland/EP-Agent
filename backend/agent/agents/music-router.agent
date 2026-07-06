@@ -6,7 +6,7 @@ description: |
   支持意图域：convert / edit / create / audio / voice / query
 tools:
   - finish_task
-max_steps: 10
+max_steps: 3
 ---
 
 <role>

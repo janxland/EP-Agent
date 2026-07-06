@@ -90,7 +90,26 @@ def migrate():
     else:
         print("[migrate] 所有 session 已有 workspace_id，跳过")
 
-    # ── 5. 创建索引（幂等）────────────────────────────────────────────────────
+    # ── 5. 为 traces 表添加 workspace_id / project_id 列 ─────────────────────
+    if table_exists(conn, "traces"):
+        if not column_exists(conn, "traces", "workspace_id"):
+            print("[migrate] 为 traces 添加 workspace_id 列...")
+            conn.execute("ALTER TABLE traces ADD COLUMN workspace_id TEXT DEFAULT ''")
+            conn.commit()
+            print("[migrate] traces.workspace_id 添加完成")
+        else:
+            print("[migrate] traces.workspace_id 已存在，跳过")
+        if not column_exists(conn, "traces", "project_id"):
+            print("[migrate] 为 traces 添加 project_id 列...")
+            conn.execute("ALTER TABLE traces ADD COLUMN project_id TEXT DEFAULT ''")
+            conn.commit()
+            print("[migrate] traces.project_id 添加完成")
+        else:
+            print("[migrate] traces.project_id 已存在，跳过")
+    else:
+        print("[migrate] traces 表不存在，跳过（首次启动会自动创建）")
+
+    # ── 6. 创建索引（幂等）────────────────────────────────────────────────────
     conn.execute("CREATE INDEX IF NOT EXISTS idx_sessions_workspace ON sessions(workspace_id)")
     conn.commit()
 
@@ -100,3 +119,4 @@ def migrate():
 
 if __name__ == "__main__":
     migrate()
+

@@ -1,20 +1,18 @@
 'use client'
 
 /**
- * /pro/[projId]/[sessionId] — 专业模式主工作台
+ * /pro/[projId]/[sessionId] — 专业模式主工作台（v2 无刷新切换版）
  *
- * 相比旧版 /pro/[sessionId]：
- *   - URL 中直接包含 projId，无需异步查询即可定位文件系统路径
- *   - restoreFromSessionId 仍保留作为兜底（处理旧书签/直接输入 URL）
- *   - projId 从 URL 读取后立即写入 store，彻底消灭 activeProjectId 为空的时序问题
+ * 架构升级（v2）：
+ *   - page.tsx 只做静态布局 + projId/sessionId 写入 store
+ *   - Session 初始化（清空/SSE订阅/历史加载）已下沉到 ChatPanel 内部
+ *   - 切换 session 时只有 ChatPanel 消息列表区域重新加载，其他组件完全不感知
+ *   - URL 仍然更新（保留书签/分享能力），但通过 store 驱动而非整页重渲染
  */
 
-import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent } from 'react'
+import { useCallback, useEffect, useRef, useState, type MouseEvent as ReactMouseEvent } from 'react'
 import { useParams, useRouter } from 'next/navigation'
-import { useScoreStore } from '@/entities/session/store'
-import { useChatStore } from '@/features/chat/store/chat.store'
 import { useWorkspaceStore } from '@/features/workspace/store/workspace.store'
-import { subscribeToSession, getSessionMessages, getSessionTodos } from '@/shared/lib/api'
 import { AudioPanel } from '@/widgets/audio-panel/AudioPanel'
 import { ChatPanel } from '@/widgets/chat-panel/ChatPanel'
 import { WorkspaceFileTree, FILE_PREVIEW_EVENT } from '@/widgets/workspace-sidebar/WorkspaceFileTree'
@@ -60,154 +58,73 @@ export default function ProSessionPage() {
   const projId    = params.projId    as string
   const sessionId = params.sessionId as string
 
-  const { setSessionId, abcNotation, score, handleSSEEvent, reset: resetScore } = useScoreStore()
-  const { handleSSEEvent: chatHandleSSE, setMessages, setTodos, resetRuntime, restoreRoleFromSession } = useChatStore(
-    (s) => ({
-      handleSSEEvent: s.handleSSEEvent,
-      setMessages: s.setMessages,
-      setTodos: s.setTodos,
-      resetRuntime: s.resetRuntime,
-      restoreRoleFromSession: s.restoreRoleFromSession,
-    })
-  )
   const {
-    restoreFromSessionId,
-    setActiveSessionId,
     setActiveProjectId,
+    setActiveSessionId,
     _pendingNavigateSessionId,
     clearPendingNavigate,
-    activeSessions,
     activeWorkspaceId,
+    workspaces,
+    activeSessions,
   } = useWorkspaceStore()
 
-  const { workspaces } = useWorkspaceStore()
-  const activeSessionsList = useMemo(() => activeSessions(), [activeSessions, workspaces])
+  const activeSessionsList = activeSessions()
   const sessionTitle = activeSessionsList.find((s) => s.id === sessionId)?.title ?? null
 
   const [chatWidth, setChatWidth]     = useState(CHAT_DEFAULT_W)
   const [sidebarOpen, setSidebarOpen] = useState(true)
-  const historyLoadedRef = useRef<string | null>(null)
-  const unsubRef = useRef<(() => void) | null>(null)
 
   const routerRef = useRef(router)
   useEffect(() => { routerRef.current = router })
+
+  // ── projId 写入 store（消灭首次发消息 project_id 为空的时序问题）────────────
+  // 加 guard：只在 projId 真正变化时才写入，避免 router.replace 同路由重挂载时
+  // 重复触发 setActiveProjectId，进而引发 WorkspaceFileTree 不必要的文件树刷新
+  const prevProjIdRef = useRef<string>('')
+  useEffect(() => {
+    if (projId && projId !== prevProjIdRef.current) {
+      prevProjIdRef.current = projId
+      setActiveProjectId(projId)
+    }
+  }, [projId, setActiveProjectId])
+
+  // ── sessionId 写入 store（供 ChatPanel 监听，触发消息区域重载）──────────────
+  // 注意：这里只更新 store，ChatPanel 内部的 useEffect([activeSessionId]) 负责实际初始化
+  // 同样加 guard：只在 sessionId 真正变化时才写入，防止重挂载时重复触发
+  const prevSessionIdRef = useRef<string>('')
+  useEffect(() => {
+    if (sessionId && sessionId !== prevSessionIdRef.current) {
+      prevSessionIdRef.current = sessionId
+      setActiveSessionId(sessionId)
+    }
+  }, [sessionId, setActiveSessionId])
 
   // ── 监听删除后的跳转信号 ──────────────────────────────────────────────────────
   useEffect(() => {
     if (_pendingNavigateSessionId === undefined) return
     clearPendingNavigate()
     if (_pendingNavigateSessionId) {
-      // 找到目标 session 的 projId
       const targetProjId = workspaces
         .flatMap((w) => w.projects ?? [])
         .find((p) => p.sessions?.some((s) => s.id === _pendingNavigateSessionId))?.id
-        ?? projId  // 兜底：同项目
+        ?? projId
       routerRef.current.replace(`/pro/${targetProjId}/${_pendingNavigateSessionId}`)
     } else {
       routerRef.current.replace('/pro')
     }
   }, [_pendingNavigateSessionId, clearPendingNavigate, projId, workspaces])
 
-  // ── 关键修复：URL 中的 projId 直接写入 store，消灭时序问题 ─────────────────────
-  // 旧版只有 sessionId，需要异步查询才能知道 projId，导致首次发消息时 project_id 为空。
-  // 新版 URL 直接携带 projId，同步写入，彻底消灭这个时序窗口。
-  useEffect(() => {
-    if (projId) setActiveProjectId(projId)
-  }, [projId, setActiveProjectId])
-
-  // ── Session 切换：原子初始化（清空 → 加载历史 → 建立 SSE）────────────────────
-  useEffect(() => {
-    if (!sessionId) return
-
-    unsubRef.current?.()
-    unsubRef.current = null
-
-    resetScore()
-    resetRuntime()
-    useChatStore.setState({ messages: [], todos: [], todoSummary: '', todoDomain: '' })
-    historyLoadedRef.current = sessionId
-
-    setSessionId(sessionId)
-    setActiveSessionId(sessionId)
-    // projId 已在上方 effect 写入，此处 restoreFromSessionId 作为兜底（补全 wsId）
-    restoreFromSessionId(sessionId)
-    restoreRoleFromSession(sessionId)
-
-    let cancelled = false
-
-    const loadHistory = async () => {
-      try {
-        const { messages: rawMsgs } = await getSessionMessages(sessionId)
-        if (cancelled) return
-        if (rawMsgs && rawMsgs.length > 0) {
-          const chatMsgs = rawMsgs
-            .filter((m) => (m.role === 'user' || m.role === 'assistant') && m.content?.trim())
-            .map((m) => ({
-              id:        m.id,
-              role:      m.role as 'user' | 'assistant',
-              content:   m.content ?? '',
-              createdAt: m.created_at,
-              ...(m.role === 'assistant' ? { kind: 'turn' as const } : {}),
-            }))
-          if (chatMsgs.length > 0 && !cancelled) {
-            useChatStore.setState({ messages: chatMsgs })
-          }
-        }
-
-        const { todos: rawTodos } = await getSessionTodos(sessionId)
-        if (cancelled) return
-        if (rawTodos && rawTodos.length > 0) {
-          const todoItems = rawTodos.map((t) => ({
-            id:     t.id,
-            title:  t.title,
-            detail: t.detail,
-            status: (t.status as 'pending' | 'running' | 'done' | 'failed' | 'skipped') ?? 'done',
-          }))
-          if (!cancelled) setTodos(todoItems, rawTodos[0]?.summary ?? '', rawTodos[0]?.domain ?? '')
-        }
-      } catch (err) {
-        if (!cancelled) console.warn('[EP-Agent] 历史恢复失败:', err)
-      }
-
-      if (!cancelled) {
-        setTimeout(() => {
-          if (cancelled) return
-          unsubRef.current = subscribeToSession(sessionId, (event) => {
-            handleSSEEvent(event)
-            chatHandleSSE(event)
-          })
-        }, 0)
-      }
-    }
-
-    loadHistory()
-
-    return () => {
-      cancelled = true
-      unsubRef.current?.()
-      unsubRef.current = null
-    }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sessionId])
-
-  // 监听工作区文件预览事件
+  // ── 监听工作区文件预览事件 ────────────────────────────────────────────────────
   useEffect(() => {
     const handler = (e: Event) => {
       const file = (e as CustomEvent).detail as WsFile & { workspaceId: string; projectId?: string }
-      const wsId   = file.workspaceId || useWorkspaceStore.getState().activeWorkspaceId || ''
-      const pId    = file.projectId   || projId || useWorkspaceStore.getState().activeProjectId || undefined
+      const wsId = file.workspaceId || useWorkspaceStore.getState().activeWorkspaceId || ''
+      const pId  = file.projectId   || projId || useWorkspaceStore.getState().activeProjectId || undefined
       previewTabs.openFile(file, wsId, pId)
     }
     window.addEventListener(FILE_PREVIEW_EVENT, handler)
     return () => window.removeEventListener(FILE_PREVIEW_EVENT, handler)
   }, [projId])
-
-  // ABC 更新时自动打开/更新 abc 标签
-  useEffect(() => {
-    if (abcNotation) {
-      previewTabs.updateAbc(abcNotation, score?.meta?.title)
-    }
-  }, [abcNotation, score?.meta?.title])
 
   const handleResizeDrag = useCallback((dx: number) => {
     setChatWidth(w => Math.max(CHAT_MIN_W, Math.min(CHAT_MAX_W, w - dx)))

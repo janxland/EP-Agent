@@ -36,8 +36,9 @@ from app.pipeline.domain import ScoreMeta
 Publisher = Callable[[str, dict], Awaitable[None]]
 Scene = Literal["editor", "player", "daw", "raw"]
 
-MAX_EDIT_ROUNDS = 5  # edit 域最多 5 轮 ReAct
-                     # 简单修改(1轮) / 分析+修改(2轮) / 转调+验证+修正(3轮) / 复杂风格改编(4-5轮)
+MAX_EDIT_ROUNDS = 8  # edit 域最多 8 轮 ReAct
+                     # 简单修改(1轮) / 分析+修改(2轮) / 转调+验证+修正(3轮)
+                     # 读文件+验证+生成MIDI(3轮) / 复杂风格改编(4-5轮) / 多步骤组合任务(6-8轮)
 
 # ── tools/ 扫描已由 universal_runner.py 在模块加载时统一完成，此处无需重复扫描 ──
 # （edit_runner 始终由 EditAgent 调用，而 EditAgent 由 universal_runner 调度，
@@ -48,7 +49,7 @@ MAX_EDIT_ROUNDS = 5  # edit 域最多 5 轮 ReAct
 _REACT_SUPPLEMENT = """
 ## ReAct 工作模式补充
 
-你在 ReAct 循环中工作（最多 5 轮）：
+你在 ReAct 循环中工作（最多 8 轮）：
 1. **Thought**：理解意图，思考修改策略（乐理分析）
 2. **Action（可选）**：必要时调用 analyze_abc 分析结构，或 validate_abc 验证范围
 3. **Observation**：查看工具结果，确认修改方向
@@ -151,8 +152,15 @@ async def run_edit(
     # ── 构造 messages ─────────────────────────────────────────────────────────
     # default 组：analyze_abc / validate_abc / transpose_abc / abc_to_sky_json 等
     # abc_edit 组：abc_to_midi / load_abc_score
-    # workspace 组：list_workspace_files / read_workspace_file 等（编辑时可能需要读文件）
-    tools = get_tool_schemas("default") + get_tool_schemas("abc_edit") + get_tool_schemas("workspace")
+    # BUG-10 修复：workspace 组只暴露只读工具（list/read），移除写入工具（write/edit）
+    # 防止 LLM 在 ReAct 中调用 write_workspace_file 导致双重写入
+    # （Python 代码层 save_score_to_workspace_impl 已在 EditAgent 中自动保存）
+    _workspace_read_tools = [
+        s for s in get_tool_schemas("workspace")
+        if s["function"]["name"] in ("list_workspace_files", "read_workspace_files",
+                                     "read_workspace_file", "list_workspace_scores")
+    ]
+    tools = get_tool_schemas("default") + get_tool_schemas("abc_edit") + _workspace_read_tools
     # ── 注入重要记忆前缀（跨轮次上下文携带体）─────────────────────────────────
     _memory_prefix = ""
     if session_id:

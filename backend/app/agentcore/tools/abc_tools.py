@@ -357,13 +357,28 @@ def validate_abc(abc: str) -> dict:
     out_of_range: list[str] = []
     warnings: list[str] = []
     in_body = False
+    prev_was_blank = False
+    k_line_no = -1
 
     for line_no, line in enumerate(abc.split('\n'), 1):
         stripped = line.strip()
         if stripped.startswith('K:'):
             in_body = True
+            k_line_no = line_no
+            prev_was_blank = False
             continue
-        if not in_body or not stripped or re.match(r'^[A-Za-z]:', stripped):
+        if not in_body:
+            continue
+        # 空行检测：K: 之后出现空行是致命错误
+        if not stripped:
+            if k_line_no > 0 and line_no == k_line_no + 1:
+                out_of_range.append(f"第{line_no}行：K: 之后紧跟空行——ABC 解析器将截断，谱子无法识别")
+            else:
+                warnings.append(f"第{line_no}行：正文中出现空行——ABC 解析器可能截断，建议删除")
+            prev_was_blank = True
+            continue
+        prev_was_blank = False
+        if re.match(r'^[A-Za-z]:', stripped):
             continue
 
         # 检查高八度标记（c'' 及以上超出范围）
@@ -509,7 +524,7 @@ def abc_to_midi(
         _project_root = ""
 
     if not _project_root:
-        # v4.0 fix46：降级到 workspace_tools._get_project_root()（含 ws 级目录兜底）
+        # 通过 session_id → DB 确定性查询 project_id，无任何文件系统猜测
         try:
             from app.agentcore.tools.workspace_tools import _get_project_root as _wt_root
             _fallback = _wt_root()

@@ -127,8 +127,8 @@ async def abc_to_prompt(req: AbcToPromptRequest):
 # ─── 音色克隆端点 ─────────────────────────────────────────────────────────────
 
 class VoiceUploadRequest(BaseModel):
-    audio_b64: str = Field(..., description="音频文件的 base64 编码（mp3/m4a/wav）")
-    filename: str = Field("sample.mp3", description="文件名，需带扩展名")
+    audio_workspace_path: str = Field(..., description="音频文件的工作区相对路径（mp3/m4a/wav），如 audio/ref.wav")
+    filename: str = Field("", description="上传时使用的文件名（留空则从路径自动推断）")
 
 
 class VoiceCloneRequest(BaseModel):
@@ -157,9 +157,9 @@ class VoiceSynthesizeRequest(BaseModel):
 
 @router.post("/voice/upload-sample")
 async def upload_voice_sample(req: VoiceUploadRequest):
-    """上传音色克隆源音频（base64），获取 file_id"""
+    """上传音色克隆源音频（工作区路径），获取 file_id"""
     return await call_tool("upload_voice_sample", {
-        "audio_b64": req.audio_b64,
+        "audio_workspace_path": req.audio_workspace_path,
         "filename": req.filename,
     })
 
@@ -168,7 +168,7 @@ async def upload_voice_sample(req: VoiceUploadRequest):
 async def upload_prompt_audio(req: VoiceUploadRequest):
     """上传增强样本（可选，<8s，提升克隆相似度），获取 file_id"""
     return await call_tool("upload_prompt_audio", {
-        "audio_b64": req.audio_b64,
+        "audio_workspace_path": req.audio_workspace_path,
         "filename": req.filename,
     })
 

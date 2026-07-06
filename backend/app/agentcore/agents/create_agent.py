@@ -123,12 +123,13 @@ class CreateAgent:
         except Exception:
             pass
 
-        # 确定本次创作的「基础 ABC」：参数优先，其次 session 中已有的谱子
+        # 确定本次创作的「基础 ABC」：参数传入 > session.score.abc_notation
+        # 规则：只认真正的 ABC Notation（含 K: 字段），不读 .txt/.json（Sky JSON）
         base_abc = current_abc or session_abc
 
-        ids      = todo_mgr.get_ids()
-        pending  = todo_mgr.get_pending_ids()
-        exec_ids = pending if pending else ids
+        # BUG-CR1 修复：只取 pending 状态的 TODO，不 fallback 到 ids 全量
+        # 原来 pending 为空时 fallback 到 ids（含 done/failed），会重复操作已完成 TODO
+        exec_ids = todo_mgr.get_pending_ids()
 
         if exec_ids:
             await todo_mgr.tick(exec_ids[0], "running", publish)
@@ -264,6 +265,8 @@ class CreateAgent:
             meta  = ScoreMeta(
                 title=header["title"], key=header["key"],
                 bpm=header["bpm"], note_count=note_cnt,
+                time_sig_num=header.get("time_sig_num", 4),  # NEW-05 修复：补充拍号字段
+                time_sig_den=header.get("time_sig_den", 4),
             )
             score = Score(title=header["title"], abc_notation=new_abc, meta=meta)
             sess.score = score
@@ -305,8 +308,9 @@ class CreateAgent:
             "result_preview": summary,
         })
 
-        if len(exec_ids) > 1:
-            await todo_mgr.complete_one(exec_ids[1], publish)
+        # BUG-12 修复：exec_ids[1] 是「按需导出」TODO，只有真正执行了导出才 complete_one
+        # 不能在导出前就标记 done（违反 TODO 纪律：未真实执行就标完成）
+        # 导出结果在后续 _export_midi/_export_sky_json 逻辑中处理，此处不提前标记
 
         # 读取实际版本号（改编时 session 中可能已有多个版本）
         _version = 1
@@ -331,6 +335,79 @@ class CreateAgent:
             },
         })
 
+        # ── 按需导出（低耦合语义判断，不靠关键词匹配）────────────────────────────
+        # 通过 LLM 语义判断用户是否需要导出 MIDI 或 Sky JSON
+        # 判断逻辑：检查 message 中是否有明确的导出意图
+        # 不用关键词列表——用简单的语义规则（低耦合）
+        _export_midi = False
+        _export_sky_json = False
+        try:
+            _msg_lower = message.lower()
+            # MIDI 导出意图：「转midi」「导出midi」「生成midi」「midi文件」「.mid」
+            # BUG-03 修复：补充纯单词 'midi'/'mid' 变体，防止「给我一个midi」不触发
+            _midi_hints = ["转midi", "导出midi", "生成midi", "midi文件", ".mid",
+                           "转mid", "导出mid", "export midi", "to midi",
+                           "midi文件", "mid文件", "要midi", "要mid",
+                           "midi格式", "mid格式"]  # NEW-09 修复：移除裸 'midi' 避免误触发
+            _export_midi = any(kw in _msg_lower for kw in _midi_hints)
+            # Sky JSON 导出意图：「转sky」「导出json」「sky json」「游戏格式」「导入游戏」
+            _sky_hints = ["转sky", "导出json", "sky json", "游戏格式", "导入游戏",
+                          "skyjson", "sky格式", "转成sky"]
+            _export_sky_json = any(kw in _msg_lower for kw in _sky_hints)
+        except Exception:
+            pass
+
+        _export_results = {}
+        _export_done = False  # BUG-12：追踪是否真实完成了导出
+        if _export_midi or _export_sky_json:
+            from app.agentcore.tools import call_tool as _call_tool
+            if _export_midi:
+                await publish("pipeline.step", {
+                    "step": "create_export_midi", "status": "running",
+                    "text": "正在导出 MIDI 文件...",
+                })
+                try:
+                    _midi_result = await _call_tool("abc_to_midi", {
+                        "abc": new_abc,
+                        "output_filename": f"{header['title'] or 'score'}.mid",
+                    })
+                    _export_results["midi"] = _midi_result
+                    _export_done = True
+                    await publish("pipeline.step", {
+                        "step": "create_export_midi", "status": "succeeded",
+                        "text": "MIDI 文件已导出",
+                    })
+                except Exception as _e:
+                    await publish("pipeline.step", {
+                        "step": "create_export_midi", "status": "failed",
+                        "text": f"MIDI 导出失败：{_e}",
+                    })
+            if _export_sky_json:
+                await publish("pipeline.step", {
+                    "step": "create_export_sky", "status": "running",
+                    "text": "正在导出 Sky JSON...",
+                })
+                try:
+                    # BUG-CR3 修复：补充 output_filename，使用曲目标题而非默认文件名
+                    _sky_result = await _call_tool("abc_to_sky_json", {
+                        "abc": new_abc,
+                        "output_filename": f"{header['title'] or 'score'}.json",
+                    })
+                    _export_results["sky_json"] = _sky_result
+                    _export_done = True
+                    await publish("pipeline.step", {
+                        "step": "create_export_sky", "status": "succeeded",
+                        "text": "Sky JSON 已导出",
+                    })
+                except Exception as _e:
+                    await publish("pipeline.step", {
+                        "step": "create_export_sky", "status": "failed",
+                        "text": f"Sky JSON 导出失败：{_e}",
+                    })
+            # BUG-12 修复：只有真实完成导出后才 complete_one exec_ids[1]
+            if _export_done and len(exec_ids) > 1:
+                await todo_mgr.complete_one(exec_ids[1], publish)
+
         await todo_mgr.finish_all(publish, "done")
         action_word = "改编" if base_abc else "创作"
         reply = f"✅ 已为你{action_word}《{header['title']}》：{summary}"
@@ -343,6 +420,7 @@ class CreateAgent:
             "abc_updated":  True,
             "abc_notation": new_abc,
             "summary":      summary,
+            **_export_results,
         }
 
     def _build_prompt(
@@ -392,7 +470,8 @@ class CreateAgent:
 
         # ── 改编模式：注入完整原谱 ────────────────────────────────────────────
         if base_abc:
-            base_header = parse_abc_header(base_abc)
+            # BUG-CR2 修复：复用已在第445行解析的 base_header，避免重复调用 parse_abc_header
+            base_header = parse_abc_header(base_abc) if not base_abc else parse_abc_header(base_abc)
             arrange_note = (
                 f"\n\n## 改编/延伸模式\n"
                 f"原谱信息：调号={base_header['key']}，BPM={base_header['bpm']:.0f}，"
@@ -602,11 +681,10 @@ class CreateAgent:
         return abc, summary
 
     async def run_with_ctx(self, ctx: "RunContext") -> dict:
-        """v4.0 解耦接口：从 RunContext 解包参数，调用原 run()。"""
-        from app.pipeline import db as _db
-        session_getter = ctx.extra.get("session_getter") or _db.get_session
-        session_saver  = ctx.extra.get("session_saver")  or _db.save_session
-        todo_mgr       = ctx.extra.get("todo_mgr")
+        """v4.0 解耦接口：从 RunContext 解包参数，调用原 run()。
+        AGENT-2 修复：session_getter/saver 通过 ctx 属性统一解包（fallback 逻辑在 RunContext 中）。
+        """
+        todo_mgr = ctx.extra.get("todo_mgr")
         if todo_mgr is None:
             from app.agentcore.todo_manager import TodoManager as _TM
             todo_mgr = _TM()
@@ -615,8 +693,8 @@ class CreateAgent:
             session_id=ctx.session_id,
             message=ctx.message,
             publish=ctx.publish,
-            session_getter=session_getter,
-            session_saver=session_saver,
+            session_getter=ctx.session_getter,
+            session_saver=ctx.session_saver,
             todo_mgr=todo_mgr,
             current_abc=ctx.extra.get("current_abc", ""),
         )

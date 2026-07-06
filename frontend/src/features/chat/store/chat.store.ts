@@ -18,6 +18,30 @@ import type {
   ToolCall,
 } from '../types/chat.types'
 import type { SSEEvent, ToolCallPayload, PipelineStepPayload } from '@/shared/types'
+import { abortSession } from '@/shared/lib/api'
+
+// ─── 文件操作工具集（触发文件树刷新）─────────────────────────────────────────
+// ⚠️  与后端 react_executor.py _FILE_WRITE_TOOLS 保持同步！
+//     新增工具时需同时更新两处。
+export const FILE_OP_TOOLS = new Set([
+  // 旧工具名（兼容）
+  'write_workspace_file', 'delete_workspace_file',
+  'rename_workspace_file', 'copy_workspace_file',
+  'upload_workspace_file', 'save_abc_score',
+  'save_h5_file', 'create_workspace_dir',
+  // workspace_tools v2.0 实际注册名
+  'edit_workspace_file', 'move_workspace_file',
+  'run_write_tasks_in_parallel',
+  // 通用文件名
+  'write_file', 'append_file', 'delete_file',
+  'copy_file', 'rename_file', 'move_file',
+  // 谱子 / H5 导出
+  'abc_to_midi', 'generate_h5_from_midi',
+  'generate_h5_from_abc', 'save_h5_output',
+  // SoVITS 音频合成（合成后自动落盘）
+  'sovits_tts_and_save', 'sovits_clone_and_save', 'sovits_save_audio',
+  'save_score_to_workspace',
+])
 
 // ─── 流式累积状态（临时，不进 messages）──────────────────────────────────────
 
@@ -39,6 +63,73 @@ const emptyStream = (): StreamState => ({
   roundIdx: 0,
   streamTurnId: null,
 })
+
+// ─── RAF 批量刷新：token 到达写 ref，RAF 统一 flush 到 store ─────────────────
+// 解耦 SSE token 到达频率（~100/s）与 React 渲染频率（~60fps），
+// 消除每个 token 触发一次 Zustand set() + React re-render 的性能瓶颈。
+
+interface StreamBuffer {
+  content: string
+  reasoning: string
+  dirty: boolean
+  rafId: number | null
+}
+
+const _streamBuf: StreamBuffer = {
+  content: '',
+  reasoning: '',
+  dirty: false,
+  rafId: null,
+}
+
+/** 将缓冲区 flush 到 Zustand store（在 RAF 回调中调用） */
+function _flushStreamBuf() {
+  _streamBuf.rafId = null
+  if (!_streamBuf.dirty) return
+  const { content, reasoning } = _streamBuf
+  _streamBuf.dirty = false
+  // 直接写 store，不触发额外 RAF
+  useChatStore.setState((s) => ({
+    streaming: {
+      ...s.streaming,
+      content: s.streaming.content + content,
+      reasoning_content: s.streaming.reasoning_content + reasoning,
+    },
+    status: 'running' as const,
+  }))
+  _streamBuf.content = ''
+  _streamBuf.reasoning = ''
+}
+
+/** 追加 delta 到缓冲区，调度 RAF flush（幂等：已有 RAF 则不重复调度） */
+export function bufferStreamDelta(delta: string, reasoning: string) {
+  _streamBuf.content += delta
+  _streamBuf.reasoning += reasoning
+  _streamBuf.dirty = true
+  if (_streamBuf.rafId === null && typeof requestAnimationFrame !== 'undefined') {
+    _streamBuf.rafId = requestAnimationFrame(_flushStreamBuf)
+  }
+}
+
+/** 立即 flush（在 commitStreamMessage / startRun 前调用，确保缓冲区清空） */
+export function flushStreamBufNow() {
+  if (_streamBuf.rafId !== null) {
+    cancelAnimationFrame(_streamBuf.rafId)
+    _streamBuf.rafId = null
+  }
+  _flushStreamBuf()
+}
+
+/** 丢弃缓冲区（startRun 时重置，避免上轮残留内容混入新轮次） */
+export function discardStreamBuf() {
+  if (_streamBuf.rafId !== null) {
+    cancelAnimationFrame(_streamBuf.rafId)
+    _streamBuf.rafId = null
+  }
+  _streamBuf.content = ''
+  _streamBuf.reasoning = ''
+  _streamBuf.dirty = false
+}
 
 // ─── Store 类型 ───────────────────────────────────────────────────────────────
 
@@ -111,6 +202,12 @@ interface ChatStoreState {
 
   /** 角色切换欢迎语直接注入对话框（修复：原来用 window.dispatchEvent 但无监听者） */
   addGreetingMessage: (greeting: string, roleName: string, roleIcon: string) => void
+
+  /** 清空消息列表和运行时 TODO（保留角色状态） */
+  clearMessages: () => void
+
+  /** 主动中断当前正在运行的对话（调用后端 abort 接口） */
+  abortRun: (sessionId: string) => Promise<void>
 
   // ── SSE 统一入口（对接 EP-Agent 后端 SSE 格式）──
   handleSSEEvent: (event: SSEEvent) => void
@@ -185,18 +282,14 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
     return msg
   },
 
-  appendStreamingChunk: (chunk) =>
-    set((s) => ({
-      streaming: { ...s.streaming, content: s.streaming.content + chunk },
-    })),
+  appendStreamingChunk: (chunk) => {
+    // RAF 批量缓冲：写 ref，不触发 set()，由 RAF 统一 flush
+    bufferStreamDelta(chunk, '')
+  },
 
-  appendReasoningChunk: (chunk) =>
-    set((s) => ({
-      streaming: {
-        ...s.streaming,
-        reasoning_content: s.streaming.reasoning_content + chunk,
-      },
-    })),
+  appendReasoningChunk: (chunk) => {
+    bufferStreamDelta('', chunk)
+  },
 
   appendToolCallChunk: (toolCall) =>
     set((s) => {
@@ -230,6 +323,8 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
     }),
 
   commitStreamMessage: () => {
+    // 先 flush 缓冲区，确保所有 delta 都已写入 store
+    flushStreamBufNow()
     set((s) => {
       const { streaming } = s
       const hasContent = streaming.content.trim().length > 0
@@ -252,7 +347,9 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
     })
   },
 
-  startRun: () =>
+  startRun: () => {
+    // 丢弃上一轮残留的 RAF 缓冲（防止旧内容混入新轮次）
+    discardStreamBuf()
     set({
       status: 'running',
       errorMessage: null,
@@ -260,9 +357,12 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
       streaming: emptyStream(),
       // TODO 不立即清空：等 todo.list 事件覆盖，避免发消息瞬间卡片闪烁
       // activeRole* 跨轮次保持，_roleRestored 不重置
-    }),
+    })
+  },
 
   finishRun: () => {
+    // 先 flush 缓冲区，确保最后几个 token 不丢失
+    flushStreamBufNow()
     // tool.call(succeeded) 已 commit 过；此处仅处理纯文本轮次（无工具调用）的收尾
     set((s) => {
       const { streaming } = s
@@ -291,6 +391,7 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
   },
 
   failRun: (error) => {
+    flushStreamBufNow()
     set((s) => {
       const { streaming } = s
       const hasContent = streaming.content.trim().length > 0
@@ -324,10 +425,21 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
       errorMessage: null,
       currentStep: null,
       streaming: emptyStream(),
-      // session 切换：清空 TODO 避免旧卡片残留，重置角色恢复标记
+      // session 切换：清空 TODO 避免旧卡片残留
       todos: [],
       todoSummary: '',
       todoDomain: '',
+      // 重置角色恢复标记：允许新 session 从后端重新拉取角色
+      _roleRestored: false,
+    }),
+
+  clearMessages: () =>
+    set({
+      messages:     [],
+      todos:        [],
+      todoSummary:  '',
+      todoDomain:   '',
+      // 重置角色恢复标记：切换/新建 session 时允许从后端重新拉取角色
       _roleRestored: false,
     }),
 
@@ -366,6 +478,40 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
 
   setTodos: (todos, summary, domain) => set({ todos, todoSummary: summary ?? '', todoDomain: domain ?? '' }),
 
+  abortRun: async (sessionId) => {
+    try {
+      await abortSession(sessionId)
+    } catch {
+      // 静默失败：即使请求失败也强制重置前端状态
+    }
+    // 无论请求是否成功，立即重置前端状态（不等 SSE run.aborted 事件）
+    set((s) => {
+      const { streaming } = s
+      const hasContent = streaming.content.trim().length > 0
+      const hasTools   = streaming.tool_calls.length > 0
+      const hasReason  = streaming.reasoning_content.trim().length > 0
+      // 将当前流式内容 commit 为已截断的消息（避免丢失已显示内容）
+      if (hasContent || hasTools || hasReason) {
+        const msg: ChatAssistantMessage = {
+          id: newMsgId(),
+          role: 'assistant',
+          content: streaming.content + (hasContent ? '\n\n> ⚠️ *已中断*' : ''),
+          reasoning_content: hasReason ? streaming.reasoning_content : undefined,
+          tool_calls: hasTools ? streaming.tool_calls : undefined,
+          createdAt: new Date().toISOString(),
+          kind: 'turn',
+        }
+        return {
+          messages: [...s.messages, msg],
+          streaming: emptyStream(),
+          status: 'idle' as const,
+          currentStep: null,
+        }
+      }
+      return { streaming: emptyStream(), status: 'idle' as const, currentStep: null }
+    })
+  },
+
   // ── SSE 事件统一处理 ───────────────────────────────────────────────────────
   //
   // 事件流时序（正常情况）：
@@ -377,6 +523,8 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
   //   → abc.updated              （可选，谱子更新）
   //
   handleSSEEvent: (event: SSEEvent) => {
+    // FE-1: 顶层 try/catch 防止单个事件异常中断整个 SSE 处理循环
+    try {
     const { setCurrentStep, appendStreamingChunk, appendReasoningChunk,
             appendToolCallChunk, commitStreamMessage, addMessage, failRun, finishRun } = get()
 
@@ -465,16 +613,19 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
       // ── 文本流式增量 ──────────────────────────────────────────────────────
       case 'message.delta': {
         const p = event.payload as { delta?: string; reasoning_delta?: string }
-        if (p.delta) appendStreamingChunk(p.delta)
-        if (p.reasoning_delta) appendReasoningChunk(p.reasoning_delta)
-        set((s) => s.status !== 'running' ? { status: 'running' } : {})
+        // 直接写 RAF 缓冲，不经过 appendStreamingChunk（避免多余函数调用）
+        bufferStreamDelta(p.delta ?? '', p.reasoning_delta ?? '')
         break
       }
 
       // ── 消息完成（整轮结束信号）──────────────────────────────────────────
       // finishRun 内部已处理：有 streaming 内容则 commit，无则仅更新状态
+      // dispatch ep:audit-refresh → PipelineTimeline 监听后自动刷新 trace 列表
       case 'message.completed': {
         finishRun()
+        if (typeof window !== 'undefined') {
+          window.dispatchEvent(new CustomEvent('ep:audit-refresh'))
+        }
         break
       }
 
@@ -577,28 +728,8 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
           }
           addMessage(toolMsg)
 
-          // 文件操作工具成功完成时刷新文件树
+          // 文件操作工具成功完成时刷新文件树（FILE_OP_TOOLS 定义在模块顶部）
           if (p.status === 'succeeded' && typeof window !== 'undefined') {
-            const FILE_OP_TOOLS = new Set([
-              // 旧工具名（兼容）
-              'write_workspace_file', 'delete_workspace_file',
-              'rename_workspace_file', 'copy_workspace_file',
-              'upload_workspace_file', 'save_abc_score',
-              'save_h5_file', 'create_workspace_dir',
-              // workspace_tools v2.0 实际注册名（fix70: 补全 react_executor._FILE_WRITE_TOOLS 中的所有工具）
-              'edit_workspace_file', 'move_workspace_file',
-              'run_write_tasks_in_parallel',
-              // 新工具名（去 ID 化后）
-              'write_file', 'append_file', 'delete_file',
-              'copy_file', 'rename_file', 'move_file',
-              'abc_to_midi', 'generate_h5_from_midi',
-              'generate_h5_from_abc',
-              // h5 工具（fix70: 补全 save_h5_output）
-              'save_h5_output',
-              // sovits v2.0 音频合成工具（合成后自动落盘，需刷新文件树）
-              'sovits_tts_and_save', 'sovits_clone_and_save', 'sovits_save_audio',
-              'save_score_to_workspace',
-            ])
             if (FILE_OP_TOOLS.has(p.tool)) {
               window.dispatchEvent(new CustomEvent('ep:workspace-refresh'))
             }
@@ -709,6 +840,17 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
         break
       }
 
+      // ── 用户主动中断 ──────────────────────────────────────────────────────
+      case 'run.aborted': {
+        // 后端中断成功后推送此事件。
+        // abortRun() 已提前将 status 置 idle，此处不再检查 status，
+        // 而是无条件幂等处理：commit 残余流式内容 + 确保 finishRun。
+        // 这样无论 abortRun 与 SSE 事件的到达顺序如何，结果都一致。
+        commitStreamMessage()
+        finishRun()
+        break
+      }
+
       // ── 错误 ──────────────────────────────────────────────────────────────
       case 'error': {
         const msg = (event.payload as { message?: string }).message ?? '未知错误'
@@ -724,6 +866,10 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
         })
         break
       }
+    }
+    } catch (err) {
+      // FE-1: 单个事件处理异常不中断后续事件，仅打印错误
+      console.error('[chat.store] handleSSEEvent 异常', event.type, err)
     }
   },
 }))

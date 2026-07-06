@@ -135,21 +135,31 @@ class VoiceCloneAgent:
             "message":     summary,
             "provider":    provider,
             "abc_updated": False,
+            "_persisted":  result.get("_persisted", False),  # 透传 ReactExecutor 落库标记，防 service.py 重复写入
             **result.get("extra", {}),
         }
 
     # ── 内部方法 ──────────────────────────────────────────────────────
 
     async def _check_sovits_online(self) -> bool:
-        """快速检查 GPT-SoVITS 服务是否在线（超时 3 秒）。"""
+        """快速检查 GPT-SoVITS 服务是否在线（超时 3 秒）。
+        用 POST /tts 发不完整参数探测：返回 4xx = 服务在线（参数错误但服务正常），
+        5xx 或连接失败 = 服务异常。不能用 GET / 因为 GPT-SoVITS 返回 404。
+        """
         try:
             from app.config import config as _cfg
-            base_url = getattr(_cfg, "SOVITS_BASE_URL", "")
+            import os as _os
+            base_url = _os.getenv("SOVITS_BASE_URL") or getattr(_cfg, "SOVITS_BASE_URL", "")
             if not base_url:
                 return False
             import httpx
             async with httpx.AsyncClient(timeout=3) as client:
-                resp = await client.get(base_url.rstrip("/") + "/")
+                resp = await client.post(
+                    base_url.rstrip("/") + "/tts",
+                    json={"text": "ping", "text_lang": "zh"},
+                    headers={"Content-Type": "application/json"},
+                )
+                # 2xx / 4xx 均视为在线（4xx = 参数不全但服务正常）
                 return resp.status_code < 500
         except Exception:
             return False
@@ -227,21 +237,25 @@ class VoiceCloneAgent:
 # ── 降级 system prompt（agent 文件不存在时使用）────────────────────────────
 _FALLBACK_SYSTEM = """你是 EP-Agent 的音色克隆专家，专注于 GPT-SoVITS 语音合成。
 
-铁律（v2.0）：
+铁律（v3.0）：
 1. 系统已在调用前确认服务状态，**直接执行任务，无需先调用** sovits_health_check
-2. **路径不确定时必须先查**：若不清楚参考音频的确切路径，先调 sovits_list_audio_files() 获取可用文件列表
-3. **GPT-SoVITS 强制要求参考音频**：不支持无参考音频的纯 TTS，必须提供 ref_audio_workspace_path
-4. 参考音频通过 ref_audio_workspace_path 传递工作区路径（如 shared/ref.wav）
+2. **路径必须先查**：无论用户消息是否有胶囊，都先调 sovits_list_audio_files() 获取真实 workspace_path
+   - 原因：用户消息的 [@xxx] 胶囊路径可能是旧路径，不可直接使用
+   - sovits_list_audio_files() 返回的 workspace_path 才是当前真实路径
+3. **GPT-SoVITS 强制要求参考音频**：必须提供 ref_audio_workspace_path，否则报错
+4. ref_audio_workspace_path 必须使用 sovits_list_audio_files() 返回的 workspace_path 字段原值
+   - ✅ 正确示例：ref_audio_workspace_path="vo_furina.wav"（list 返回的原值）
+   - ❌ 错误示例：ref_audio_workspace_path="shared/vo_furina.wav"（不要加任何前缀）
 5. 合成后自动落盘，无需单独调用保存工具
 6. 最终必须调用 finish_task
 
-工具使用顺序（v2.0）：
-1. [若路径不确定] sovits_list_audio_files()  ← 先查可用文件，确认 workspace_path
-2. sovits_clone_and_save(target_text=..., ref_audio_workspace_path="shared/xxx.wav")
+工具使用顺序（v3.0，必须严格遵守）：
+1. sovits_list_audio_files()  ← 【必须第一步】获取项目内真实音频路径列表
+2. sovits_clone_and_save(target_text=..., ref_audio_workspace_path=<list返回的workspace_path>)
 3. finish_task(summary=...)
 
-参考音频路径查找流程：
-- 用户消息有 [@路径] 胶囊 → 直接用胶囊中的路径
-- 用户只说了文件名 → 先调 sovits_list_audio_files() 找完整路径
-- 工具返回「文件不存在」→ 立即调 sovits_list_audio_files() 查实际可用文件，不得猜测路径
+路径规则（重要）：
+- ref_audio_workspace_path 只接受相对于项目根目录的路径
+- 系统内部会自动将相对路径转换为 GPT-SoVITS 所需的服务器绝对路径
+- 你只需传 workspace_path 字段的原值，不要拼接任何前缀或绝对路径
 """

@@ -252,44 +252,40 @@ class ConvertAgent:
             "arguments": {"file_name": file_name, "size": len(abc)},
         })
 
-        # 解析 ABC 元数据
-        meta = {"title": file_name.replace(".abc", ""), "key": "C",
-                "bpm": 120, "note_count": 0, "time_sig": "4/4"}
-        try:
-            for line in abc.splitlines():
-                if line.startswith("T:"):
-                    meta["title"] = line[2:].strip()
-                elif line.startswith("K:"):
-                    meta["key"] = line[2:].strip()
-                elif line.startswith("Q:"):
-                    m = re.search(r"=(\d+)", line)
-                    if m:
-                        meta["bpm"] = int(m.group(1))
-                elif line.startswith("M:"):
-                    meta["time_sig"] = line[2:].strip()
-            in_body = False
-            for line in abc.splitlines():
-                if line.startswith("K:"):
-                    in_body = True
-                    continue
-                if in_body and not re.match(r"^[A-Za-z]:", line):
-                    meta["note_count"] += len(re.findall(r"[A-Ga-g]", line))
-        except Exception:
-            pass
+        # BUG-02 修复：使用 parse_abc_header() 代替手写解析
+        # 手写解析缺少 time_sig_num/time_sig_den，note_count 计数方式也不一致
+        from app.agentcore.abc_utils import parse_abc_header, count_notes
+        _header = parse_abc_header(abc)
+        meta = {
+            "title":        _header.get("title") or file_name.replace(".abc", ""),
+            "key":          _header.get("key") or "C",
+            "bpm":          _header.get("bpm") or 120,
+            "note_count":   count_notes(abc),
+            "time_sig":     f"{_header.get('time_sig_num', 4)}/{_header.get('time_sig_den', 4)}",
+            "time_sig_num": _header.get("time_sig_num", 4),
+            "time_sig_den": _header.get("time_sig_den", 4),
+        }
 
         # 写入 session score（让后续 edit/create 可以感知）
+        # BUG-01 修复：统一使用 Score + ScoreMeta，与 create_agent/edit_agent 一致
         try:
             sess = session_getter(session_id)
             if sess is not None:
-                from app.pipeline.service import ScoreData
-                sess.score = ScoreData(
-                    abc_notation=abc,
+                from app.pipeline.domain import Score, ScoreMeta
+                # BUG-C1 修复：补充 time_sig_num/den，避免后续 edit 时拍号信息丢失
+                sess.score = Score(
                     title=meta["title"],
-                    key=meta["key"],
-                    bpm=float(meta["bpm"]),
-                    note_count=meta["note_count"],
+                    abc_notation=abc,
+                    meta=ScoreMeta(
+                        title=meta["title"],
+                        key=meta["key"],
+                        bpm=float(meta["bpm"]),
+                        note_count=meta["note_count"],
+                        time_sig_num=meta.get("time_sig_num", 4),
+                        time_sig_den=meta.get("time_sig_den", 4),
+                    ),
                 )
-                session_saver(sess)  # v4.0: save_session(sess) 只需1参数
+                session_saver(sess)
         except Exception:
             pass
 
@@ -323,10 +319,12 @@ class ConvertAgent:
         if ids:
             await todo_mgr.complete_one(ids[0], publish)
 
+        # NEW-13 修复：BPM 可能是 float（如 120.0），格式化为整数显示更友好
+        _bpm_display = f"{float(meta['bpm']):.0f}" if meta.get("bpm") is not None else "120"
         load_reply = (
             f"✅ 已成功加载谱子《{meta['title']}》\n\n"
             f"- 调号：{meta['key']}\n"
-            f"- BPM：{meta['bpm']}\n"
+            f"- BPM：{_bpm_display}\n"
             f"- 音符数：{meta['note_count']}\n\n"
             "你可以继续说「转为 MIDI」「升高八度」「加快节奏」或「生成 H5」等。"
         )
@@ -347,12 +345,11 @@ class ConvertAgent:
         }
 
     async def run_with_ctx(self, ctx: "RunContext") -> dict:
-        """v4.0 解耦接口：从 RunContext 解包参数，调用原 run()。"""
-        from app.pipeline import db as _db
-        session_getter = ctx.extra.get("session_getter") or _db.get_session
-        session_saver  = ctx.extra.get("session_saver")  or _db.save_session
-        convert_fn     = ctx.extra.get("convert_fn") or (lambda *a, **kw: {})
-        todo_mgr       = ctx.extra.get("todo_mgr")
+        """v4.0 解耦接口：从 RunContext 解包参数，调用原 run()。
+        AGENT-2 修复：session_getter/saver 通过 ctx 属性统一解包（fallback 逻辑在 RunContext 中）。
+        """
+        convert_fn = ctx.extra.get("convert_fn") or (lambda *a, **kw: {})
+        todo_mgr   = ctx.extra.get("todo_mgr")
         if todo_mgr is None:
             from app.agentcore.todo_manager import TodoManager as _TM
             todo_mgr = _TM()
@@ -365,7 +362,7 @@ class ConvertAgent:
             publish=ctx.publish,
             convert_fn=convert_fn,
             todo_mgr=todo_mgr,
-            session_getter=session_getter,
-            session_saver=session_saver,
+            session_getter=ctx.session_getter,
+            session_saver=ctx.session_saver,
         )
 

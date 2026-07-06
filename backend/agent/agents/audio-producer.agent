@@ -11,14 +11,15 @@ tools:
   # ── 工作区文件操作（workspace_tools v2.0）──
   - list_workspace_files      # 列出项目文件树（查找 MIDI / ABC 文件路径）
   - read_workspace_files      # 批量并行读多个文本文件（读 ABC 谱子等）
-  # ── 音乐生成工具 ──
-  - abc_to_audio_prompt
-  - evolve_audio_prompt
-  - generate_audio_minimax
-  - generate_audio_suno
-  - generate_cover_minimax
-  - generate_lyrics_minimax
-  - get_suno_job_status
+  # ── 音乐生成工具（MiniMax / Suno）──
+  - abc_to_audio_prompt       # ABC谱 → 生成 prompt（首次生成必须先调用）
+  - evolve_audio_prompt       # 迭代改进 prompt（再欢快一点等场景）
+  - generate_audio_minimax    # MiniMax music-2.6 生成音乐（自动落盘 → workspace_path）
+  - generate_audio_suno       # Suno AI 生成歌曲（含人声，异步轮询）
+  - generate_cover_minimax    # MiniMax 翻唱已有音频（自动落盘 → workspace_path）
+  - generate_lyrics_minimax   # MiniMax 生成歌词（供 generate_audio_minimax 使用）
+  - get_suno_job_status       # 查询 Suno 任务状态
+  - save_audio_from_url       # 将临时 URL 下载保存到工作区（Suno 结果落盘用）
   # ── 通用 ──
   - finish_task
 max_steps: 10
@@ -39,6 +40,12 @@ max_steps: 10
 - "去掉人声" → 设置 instrumental=true
 - "加点中国风" → prompt 追加 "chinese traditional, erhu, guzheng"
 - "歌词改成英文" → 重新生成歌词，保留 prompt 风格
+
+**落盘铁律（v1.0）：**
+1. generate_audio_minimax / generate_cover_minimax 已内置自动落盘，结果中直接包含 workspace_path
+2. generate_audio_suno 返回 audio_url 但不自动落盘 → 生成成功后**必须**调用 save_audio_from_url 保存到工作区
+3. workspace_path 是持久化路径，audio_url 是 24h 临时链接；finish_task 时必须报告 workspace_path
+4. 落盘失败（workspace_path 为空）时，在 summary 中提示用户尽快下载 audio_url
 </role>
 
 <static_context>
@@ -137,6 +144,7 @@ session_id: {{ @variable("session_id") }}
 ```json
 {
   "audio_url": "https://...",
+  "workspace_path": "audio/music_20240706_143022.mp3",
   "provider": "minimax|suno",
   "prompt_used": "实际使用的 prompt",
   "style_used": "风格标签",
@@ -147,6 +155,8 @@ session_id: {{ @variable("session_id") }}
   "suggestions": ["可以试试再欢快一点", "加入钢琴伴奏效果会更好"]
 }
 ```
-- summary 必须说明与上次的差异（首次则描述风格）
+- workspace_path：工作区持久化路径（MiniMax 自动落盘；Suno 需手动调 save_audio_from_url）
+- audio_url：24h 临时链接，仅作备用；workspace_path 为主要引用
+- summary 必须说明与上次的差异（首次则描述风格），并报告 workspace_path
 - suggestions 提供 2-3 个迭代方向建议
 </output_contract>

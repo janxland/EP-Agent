@@ -48,9 +48,13 @@ _ROUTER_SYSTEM = """你是音频生成意图路由器。分析用户消息，输
 
 意图域：
 - audio_generate：首次生成音频（无上次记录，或用户明确要"重新生成"）
+  ✅ 触发词：「生成一首歌」「帮我生成音乐」「用 MiniMax/Suno 生成」「生成配乐」「参考旋律生成」
+  ✅ 消息含 ABC 旋律符号（如 z8|[DA_g]4 等）且要求「生成音乐/歌曲」→ 必须是 audio_generate！
+  ⚠️ 【MINIMAX】前缀 + 「生成一首歌」= audio_generate，不是 voice_clone！
 - audio_iterate：在上次基础上改进（有上次记录，用户说"再X一点"/"换成X风格"等）
 - audio_cover：翻唱（用户提供了音频 URL 或说"翻唱"）
-- voice_clone：音色克隆（用户说"克隆声音"/"用我的声音"/"上传音色"/"复刻音色"/"用这个声音合成"/"查看音色"等）
+- voice_clone：音色克隆，仅限用户明确说「克隆声音/音色」「用我的声音」「上传音色」「复刻音色」「查看音色列表」
+  ⚠️ 「生成一首歌」「生成音乐」绝对不是 voice_clone！ABC 旋律内容不是「参考音频」！
 
 输出 JSON：
 {
@@ -112,6 +116,7 @@ class AudioChatRunner:
         current_abc: str,
         publish: Publisher,
         audio_b64: str = "",
+        session_id: str = "",   # 传入后自动落库 assistant/tool 消息（刷新恢复）
     ) -> dict:
         """
         返回：
@@ -175,19 +180,43 @@ class AudioChatRunner:
         })
 
         # ── Step 4: Tool-Calling Loop ───────────────────────────────────────
+        import uuid as _uuid
+        from app.pipeline import db as _db
+        import logging as _log
+        _audio_logger = _log.getLogger("ep_agent.audio_runner")
+
         latest_result: dict = {}
 
         for _round in range(MAX_TOOL_ROUNDS):
             response = await complete_with_tools(messages, tools, temperature=0.3)
+            content_this_round = response["content"] or ""
+            tool_calls_this_round = response["tool_calls"] or []
+
             messages.append({
                 "role": "assistant",
-                "content": response["content"],
-                "tool_calls": response["tool_calls"] or [],
+                "content": content_this_round,
+                "tool_calls": tool_calls_this_round,
             })
 
-            if response["finish_reason"] == "stop" or not response["tool_calls"]:
+            # ── 落库本轮 assistant 消息（含 tool_calls，刷新后 SSE replay 恢复工具卡片）──
+            if session_id:
+                try:
+                    _db.insert_message(
+                        msg_id=f"asst_{_uuid.uuid4().hex[:12]}",
+                        session_id=session_id,
+                        role="assistant",
+                        content=content_this_round,
+                        tool_calls=tool_calls_this_round if tool_calls_this_round else None,
+                    )
+                except Exception as _e:
+                    _audio_logger.warning(
+                        "[AudioRunner] assistant 消息落库失败 session=%s round=%d: %s",
+                        session_id, _round, _e
+                    )
+
+            if response["finish_reason"] == "stop" or not tool_calls_this_round:
                 # LLM 给出最终文本结果
-                raw = response["content"] or ""
+                raw = content_this_round
                 try:
                     start = raw.find("{")
                     end = raw.rfind("}") + 1
@@ -198,7 +227,7 @@ class AudioChatRunner:
                 break
 
             # 执行工具调用
-            for tc in response["tool_calls"]:
+            for tc in tool_calls_this_round:
                 tool_name = tc["function"]["name"]
                 try:
                     arguments = json.loads(tc["function"]["arguments"])
@@ -222,7 +251,7 @@ class AudioChatRunner:
 
                     # 捕获生成结果
                     if tool_name in ("generate_audio_minimax", "generate_audio_suno",
-                                     "generate_cover_minimax"):
+                                     "generate_cover_minimax", "save_audio_from_url"):
                         if isinstance(result, dict):
                             latest_result = result
 
@@ -240,6 +269,7 @@ class AudioChatRunner:
                         "tool": tool_name,
                         "status": "succeeded",
                         "result_preview": result_str[:80] + "..." if len(result_str) > 80 else result_str,
+                        "full_result": result_str[:4096],
                     })
 
                     messages.append({
@@ -247,6 +277,23 @@ class AudioChatRunner:
                         "tool_call_id": tc["id"],
                         "content": result_str,
                     })
+
+                    # ── 落库 tool 结果消息 ──────────────────────────────────────
+                    if session_id:
+                        try:
+                            _db.insert_message(
+                                msg_id=f"tool_{tc['id']}_{_uuid.uuid4().hex[:8]}",
+                                session_id=session_id,
+                                role="tool",
+                                content=result_str[:4096],
+                                tool_call_id=tc["id"],
+                                tool_name=tool_name,
+                            )
+                        except Exception as _e:
+                            _audio_logger.warning(
+                                "[AudioRunner] tool 消息落库失败 session=%s tool=%s: %s",
+                                session_id, tool_name, _e
+                            )
 
                 except Exception as e:
                     tool_call_records.append({
@@ -262,6 +309,22 @@ class AudioChatRunner:
                         "tool_call_id": tc["id"],
                         "content": f"工具执行失败: {e}",
                     })
+                    # ── 落库 tool 失败消息 ──────────────────────────────────────
+                    if session_id:
+                        try:
+                            _db.insert_message(
+                                msg_id=f"tool_{tc['id']}_{_uuid.uuid4().hex[:8]}",
+                                session_id=session_id,
+                                role="tool",
+                                content=f"工具执行失败: {e}",
+                                tool_call_id=tc["id"],
+                                tool_name=tool_name,
+                            )
+                        except Exception as _e:
+                            _audio_logger.warning(
+                                "[AudioRunner] tool 失败消息落库失败 session=%s tool=%s: %s",
+                                session_id, tool_name, _e
+                            )
 
         # ── Step 5: 构造本轮记录 ────────────────────────────────────────────
         audio_record = {
@@ -276,6 +339,7 @@ class AudioChatRunner:
             "model":        latest_result.get("model", ""),
             "audio_url":    latest_result.get("audio_url", ""),
             "audio_b64":    latest_result.get("audio_b64", ""),
+            "workspace_path": latest_result.get("workspace_path", ""),
             "duration_ms":  latest_result.get("duration_ms", 0),
             "summary":      latest_result.get("summary", ""),
             "suggestions":  latest_result.get("suggestions", []),

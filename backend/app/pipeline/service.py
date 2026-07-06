@@ -74,7 +74,10 @@ def create_session(
     创建 Session，一次性写入 workspace_id + project_id，消灭两步写入竞态。
     project_id 是文件隔离边界，必须在创建时就写入，不能依赖后续 upsert 补写。
     """
-    sess = Session()
+    sess = Session(
+        workspace_id=workspace_id or "",
+        project_id=project_id or "",
+    )
     save_session(sess)
     try:
         _db.upsert_session(
@@ -343,68 +346,131 @@ async def universal_chat(
       3. 同步更新 session 的 abc_notation（供刷新后 SSE replay）
     """
     from app.agentcore.universal_runner import universal_runner
+    from app.agentcore.trace_collector import TraceCollector
 
     if publish is None:
         async def _noop(evt_type: str, payload: dict):
             pass
         publish = _noop
 
-    # ── 1. 落库用户消息 ──────────────────────────────────────────────────────
+    # ── 审计链路：创建 TraceCollector，零侵入挂载到 publish ──────────────────────
+    # 从 session 读取 workspace_id / project_id，供重播引擎恢复上下文
+    _sess_for_trace = get_session(session_id)
+    _tracer = TraceCollector(
+        session_id=session_id,
+        message=message,
+        role_id=role_id or "",
+        attachment_name=attachment_name,
+        workspace_id=getattr(_sess_for_trace, 'workspace_id', '') or '',
+        project_id=getattr(_sess_for_trace, 'project_id', '') or '',
+    )
+    publish = _tracer.wrap_publish(publish)
+
+    # ── 1. 最优先：注入 session_id 到 ContextVar（必须在任何 DB 操作前完成）────
+    # 这样 insert_message → _ensure_session_exists → get_current_project_id()
+    # 链路中的 ContextVar 推断也能正确工作
+    from app.agentcore.session_context import set_session_context, set_current_session_id
+    set_session_context(get_session, save_session)
+    set_current_session_id(session_id)
+    print(f"[EP-Agent] service.universal_chat: 已注入 session_id={session_id!r}", flush=True)
+
+    # ── 2. 落库用户消息 ──────────────────────────────────────────────────────
     user_msg_id = new_id("msg")
     # 前端 RichInput.getPlainText() 已将 mention 节点序列化为 [@文件名] 格式，
     # ChatPanel.handleRichSend 传来的 message 已是含 chip 的 displayText，
     # 此处直接落库，SSE replay 时能正确还原橙色 chip，不再做任何拼接。
     user_content = message.strip() if message else ""
+    # Fix: 落库时携带 project_id，确保 _ensure_session_exists 骨架记录不写入 NULL
+    # 先从 DB 查出当前 session 的 ws/proj（_ensure_project_binding 已确保写入）
+    _msg_ws, _msg_proj = "", project_id or ""
+    try:
+        _si = _db.get_session_info(session_id)
+        _msg_ws   = (_si or {}).get("workspace_id") or ""
+        _msg_proj = _msg_proj or (_si or {}).get("project_id") or ""
+    except Exception:
+        pass
     try:
         _db.insert_message(
             msg_id=user_msg_id,
             session_id=session_id,
             role="user",
             content=user_content,
+            workspace_id=_msg_ws,
+            project_id=_msg_proj,
         )
     except Exception as e:
         _logger.warning("[service] 用户消息落库失败 session=%s: %s", session_id, e)
 
-    # ── 2. 注入 session_id 到 ContextVar（必须在任何工具调用前完成）────────────
-    # 无论如何都要执行，不能被 try/except 吞掉
-    from app.agentcore.session_context import set_session_context, set_current_session_id
-    set_session_context(get_session, save_session)
-    set_current_session_id(session_id)
-    print(f"[EP-Agent] service.universal_chat: 已注入 session_id={session_id!r}", flush=True)
+    # ── v5 Phase 5：注入长期记忆到 message 前缀 ──────────────────────────────────
+    _ltm_context = ""
+    try:
+        from app.agentcore.long_term_memory import long_term_memory
+        _sess_info = _db.get_session_info(session_id)
+        _user_id = (_sess_info or {}).get("workspace_id") or session_id[:16]
+        _ltm_context = long_term_memory.build_memory_context(_user_id)
+    except Exception as _ltm_err:
+        _logger.debug("[service] 长期记忆读取失败（不影响主流程）: %s", _ltm_err)
 
     # ── 3. 执行意图路由（透传 role_id，若未传则 runner 内部从 session extra 恢复）──
     # 优先使用调用方传入的 role_id；若为 None，runner 会从 DB session.extra 读取
-    result = await universal_runner.run(
-        session_id=session_id,
-        message=message,
-        attachment_content=attachment_content,
-        attachment_name=attachment_name,
-        attachment_workspace_path=attachment_workspace_path,
-        attachment_b64=attachment_b64,
-        session_getter=get_session,
-        session_saver=save_session,
-        publish=publish,
-        convert_fn=convert,
-        edit_fn=edit,
-        audio_chat_fn=audio_chat,
-        role_id=role_id,
-    )
+    _trace_status = "succeeded"
+    try:
+        result = await universal_runner.run(
+            session_id=session_id,
+            message=message,
+            attachment_content=attachment_content,
+            attachment_name=attachment_name,
+            attachment_workspace_path=attachment_workspace_path,
+            attachment_b64=attachment_b64,
+            session_getter=get_session,
+            session_saver=save_session,
+            publish=publish,
+            convert_fn=convert,
+            edit_fn=edit,
+            audio_chat_fn=audio_chat,
+            role_id=role_id,
+        )
+    except Exception as _run_err:
+        _trace_status = "failed"
+        raise
+    finally:
+        # ── 审计链路：写入 trace（无论成功/失败都落库）────────────────────────
+        try:
+            await _tracer.end_trace(status=_trace_status)
+        except Exception as _te:
+            _logger.debug("[service] trace 落库异常（不影响主流程）: %s", _te)
+
+        # ── v5 Phase 5：对话结束后提取并保存长期记忆 ────────────────────────────
+        try:
+            from app.agentcore.long_term_memory import long_term_memory, extract_and_save_memories
+            _history = _db.get_session_messages(session_id)
+            _sess_info2 = _db.get_session_info(session_id)
+            _uid = (_sess_info2 or {}).get("workspace_id") or session_id[:16]
+            await extract_and_save_memories(
+                user_id=_uid,
+                conversation=_history,
+                ltm=long_term_memory,
+            )
+        except Exception as _ltm_save_err:
+            _logger.debug("[service] 长期记忆保存失败（不影响主流程）: %s", _ltm_save_err)
 
     # ── 3. 落库 AI 最终回复（兼容各 SubAgent 返回 key 不一致：message / reply / text）──
-    # 注意：ReactExecutor 已在每轮 ReAct 中落库了 assistant 消息（含 tool_calls）。
-    # 此处仅落库最终的纯文字回复（无工具调用的 stop 轮），避免与 ReactExecutor 重复。
-    # 若 result 含 tool_call_records，说明 ReactExecutor 已落库，此处跳过重复写入。
+    # 落库策略：
+    #   - _persisted=True：ReactExecutor/AudioRunner 已在执行过程中落库所有 assistant/tool
+    #     消息，此处只需落库最终纯文字回复（若有）。
+    #   - _persisted=False（create/query 等直接 LLM 调用路径）：此处是唯一落库机会，
+    #     必须落库，不能因为 result 里有 tool_calls 字段就跳过。
+    # 注意：_has_tool_calls 不再作为跳过条件，避免 create/query 路径的 assistant 回复丢失。
     assistant_reply = (
         result.get("message")
         or result.get("reply")
         or result.get("text")
         or ""
     )
-    # _persisted=True 表示 ReactExecutor 已落库所有 assistant 消息，此处跳过避免重复
+    # _persisted=True 表示执行器（ReactExecutor/AudioRunner）已落库所有 assistant 消息
     _already_persisted = bool(result.get("_persisted"))
-    _has_tool_calls = bool(result.get("tool_calls") or result.get("tool_call_records"))
-    # 非空 且 未被 ReactExecutor 落库 且 非纯工具调用轮次时才落库
-    if assistant_reply and assistant_reply.strip() and not _already_persisted and not _has_tool_calls:
+    # 非空 且 未被执行器落库时才落库（去掉 _has_tool_calls 误判守门）
+    if assistant_reply and assistant_reply.strip() and not _already_persisted:
         try:
             _db.insert_message(
                 msg_id=new_id("msg"),
@@ -469,6 +535,7 @@ async def audio_chat(
         current_abc=sess.score.abc_notation if sess.score else "",
         audio_b64=audio_b64,
         publish=publish,
+        session_id=session_id,   # 传入后 AudioRunner 自动落库 assistant/tool 消息
     )
 
     # 保存本轮记录到 Session

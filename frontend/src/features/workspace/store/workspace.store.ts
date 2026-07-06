@@ -93,6 +93,9 @@ interface WorkspaceStoreState {
   clearPendingNavigate: () => void
 }
 
+// ─── 模块级加载锁（防止 WorkspaceSidebar + page.tsx 并发重复请求）────────────────
+let _loadingPromise: Promise<void> | null = null
+
 // ─── Store 实现 ────────────────────────────────────────────────────────────────
 
 export const useWorkspaceStore = create<WorkspaceStoreState>()(
@@ -133,38 +136,38 @@ export const useWorkspaceStore = create<WorkspaceStoreState>()(
       // ── 数据加载 ─────────────────────────────────────────────────────────────
 
       loadWorkspaces: async () => {
-        // 防重入：已在加载中则跳过
+        // 防重入：已在加载中则等待同一个 Promise，不发重复请求
+        if (_loadingPromise) return _loadingPromise
         if (get().loading) return
+
         set({ loading: true, error: null })
-        try {
-          const { workspaces: raw } = await listWorkspaces()
-          // 按 id 去重（防止后端或乐观更新产生重复项）
-          const seen = new Set<string>()
-          const workspaces = raw.filter((w) => {
-            if (seen.has(w.id)) return false
-            seen.add(w.id)
-            return true
-          })
-          set({ workspaces, loading: false })
-          // 若当前活跃工作区已被删除，重置
-          const { activeWorkspaceId } = get()
-          if (activeWorkspaceId && !workspaces.find((w) => w.id === activeWorkspaceId)) {
-            set({ activeWorkspaceId: workspaces[0]?.id ?? null })
+        _loadingPromise = (async () => {
+          try {
+            const { workspaces: raw } = await listWorkspaces()
+            const seen = new Set<string>()
+            const workspaces = raw.filter((w) => {
+              if (seen.has(w.id)) return false
+              seen.add(w.id)
+              return true
+            })
+            set({ workspaces, loading: false })
+            // 若当前活跃工作区已被删除，重置
+            const { activeWorkspaceId } = get()
+            if (activeWorkspaceId && !workspaces.find((w) => w.id === activeWorkspaceId)) {
+              set({ activeWorkspaceId: workspaces[0]?.id ?? null })
+            }
+          } catch (e) {
+            set({ loading: false, error: String(e) })
+          } finally {
+            _loadingPromise = null
           }
-        } catch (e) {
-          set({ loading: false, error: String(e) })
-        }
+        })()
+        return _loadingPromise
       },
 
       refreshWorkspaceSessions: async (_wsId: string) => {
-        try {
-          const { workspaces: raw } = await listWorkspaces()
-          const seen = new Set<string>()
-          const workspaces = raw.filter((w) => { if (seen.has(w.id)) return false; seen.add(w.id); return true })
-          set({ workspaces })
-        } catch (e) {
-          set({ error: String(e) })
-        }
+        // 与 loadWorkspaces 合并：不再单独发请求，直接复用全量加载
+        return get().loadWorkspaces()
       },
 
       // ── 工作区操作 ───────────────────────────────────────────────────────────
@@ -430,10 +433,10 @@ export const useWorkspaceStore = create<WorkspaceStoreState>()(
         if (found) {
           // 注意：若 projId 为 null（扁平 session），不覆盖已有的 activeProjectId（可能是 URL 传入的）
           const currentProjId = get().activeProjectId
+          // 只更新 workspaceId/projectId，不重复 set activeSessionId（避免触发 ChatPanel useEffect 重跑）
           set({
             activeWorkspaceId: found.wsId,
             activeProjectId: found.projId ?? currentProjId,
-            activeSessionId: sessionId,
           })
           return
         }
@@ -447,7 +450,6 @@ export const useWorkspaceStore = create<WorkspaceStoreState>()(
             set({
               activeWorkspaceId: found2.wsId,
               activeProjectId: found2.projId ?? currentProjId2,
-              activeSessionId: sessionId,
             })
             return
           }
@@ -457,15 +459,14 @@ export const useWorkspaceStore = create<WorkspaceStoreState>()(
             set({
               activeWorkspaceId: info.workspace_id,
               activeProjectId: info.project_id ?? null,
-              activeSessionId: sessionId,
             })
           } else {
             const fallbackWsId = get().workspaces[0]?.id ?? null
-            set({ activeWorkspaceId: fallbackWsId, activeProjectId: null, activeSessionId: sessionId })
+            set({ activeWorkspaceId: fallbackWsId, activeProjectId: null })
           }
         } catch {
           const fallbackWsId = get().workspaces[0]?.id ?? null
-          set({ activeWorkspaceId: fallbackWsId, activeProjectId: null, activeSessionId: sessionId })
+          set({ activeWorkspaceId: fallbackWsId, activeProjectId: null })
         }
       },
 

@@ -176,7 +176,17 @@ function ProjectSection({
   onDeleteProject: (projId: string) => void
 }) {
   const isActive = activeProjectId === project.id
+  // 修复：expanded 不能仅依赖初始渲染快照，需跟随 isActive 动态同步
+  // 场景：切换 project 后，新激活项目应自动展开；但用户手动折叠后不应强制展开
   const [expanded, setExpanded] = useState(isActive)
+  const prevIsActiveRef = useRef(isActive)
+  useEffect(() => {
+    // 仅在 isActive 从 false → true 时自动展开（首次激活），不干预用户手动折叠
+    if (isActive && !prevIsActiveRef.current) {
+      setExpanded(true)
+    }
+    prevIsActiveRef.current = isActive
+  }, [isActive])
   const [editing, setEditing] = useState(false)
   const [editName, setEditName] = useState(project.name)
   const [showConfirm, setShowConfirm] = useState(false)
@@ -328,29 +338,22 @@ function WorkspacePanel({
   const panelRef                      = useRef<HTMLDivElement>(null)
 
   // 点击面板外关闭
-  // 用 mousedown 捕获阶段注册，通过 openedByRef 标记忽略打开面板的那次点击，
-  // 避免 50ms 延迟导致快速点击时 handler 未注册而面板卡住的问题。
-  const outsideHandlerRef = useRef<((e: globalThis.MouseEvent) => void) | null>(null)
-  const openedByClickRef  = useRef(true)   // 面板刚打开时跳过第一次 mousedown
+  // 修复：onClose 引用变化时不重置 openedByClickRef（避免面板意外关闭）
+  // 用 onCloseRef 稳定引用，handler 只注册一次（面板挂载时），通过 ref 调用最新 onClose
+  const onCloseRef = useRef(onClose)
+  useEffect(() => { onCloseRef.current = onClose }, [onClose])
   useEffect(() => {
-    openedByClickRef.current = true
+    // 面板挂载时跳过第一次 mousedown（即打开面板的那次点击）
+    let skipFirst = true
     const handler = (e: globalThis.MouseEvent) => {
-      // 跳过打开面板的那次点击（同帧触发）
-      if (openedByClickRef.current) {
-        openedByClickRef.current = false
-        return
-      }
+      if (skipFirst) { skipFirst = false; return }
       if (panelRef.current && !panelRef.current.contains(e.target as Node)) {
-        onClose()
+        onCloseRef.current()
       }
     }
-    outsideHandlerRef.current = handler
     document.addEventListener('mousedown', handler)
-    return () => {
-      document.removeEventListener('mousedown', handler)
-      outsideHandlerRef.current = null
-    }
-  }, [onClose])
+    return () => document.removeEventListener('mousedown', handler)
+  }, []) // 空依赖：handler 只注册/注销一次，通过 ref 获取最新 onClose
 
   const submitRename = useCallback(() => {
     const name = editName.trim()
@@ -607,9 +610,12 @@ export function WorkspaceSidebar() {
   const handleSelectSession = useCallback((sessionId: string, wsId: string) => {
     setActiveWorkspaceId(wsId)
     setActiveSessionId(sessionId)
-    // 找到 session 所属的 projId
-    const ws = useWorkspaceStore.getState().workspaces.find((w) => w.id === wsId)
-    const selProjId = ws?.projects?.find((p) => p.sessions?.some((s) => s.id === sessionId))?.id ?? ''
+    // 找到 session 所属的 projId（直接从已加载的 store 中查，不发网络请求）
+    const state = useWorkspaceStore.getState()
+    const ws = state.workspaces.find((w) => w.id === wsId)
+    const selProjId = ws?.projects?.find((p) => p.sessions?.some((s) => s.id === sessionId))?.id
+      ?? state.activeProjectId
+      ?? ''
     router.push(`/pro/${selProjId}/${sessionId}`)
   }, [router, setActiveWorkspaceId, setActiveSessionId])
 
@@ -644,7 +650,13 @@ export function WorkspaceSidebar() {
       const projId = useWorkspaceStore.getState().activeProject()?.id
       const sess = await createSession(wsId, '新对话', projId)
       const targetProjId = projId || useWorkspaceStore.getState().activeProject()?.id || sess.project_id || ''
-      router.push(`/pro/${targetProjId}/${sess.id}`)
+      // 同项目内新建话题用 replace，避免堆积浏览器历史；跨工作区用 push
+      const currentProjId = useWorkspaceStore.getState().activeProjectId
+      if (targetProjId && targetProjId === currentProjId) {
+        router.replace(`/pro/${targetProjId}/${sess.id}`)
+      } else {
+        router.push(`/pro/${targetProjId}/${sess.id}`)
+      }
     } catch { /* error 已在 store 中设置 */ }
   }, [createSession, router, setActiveWorkspaceId])
 

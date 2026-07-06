@@ -292,16 +292,26 @@ export function subscribeToSession(
   let destroyed = false
   let retryTimer: ReturnType<typeof setTimeout> | null = null
   let retryCount = 0
+  // FE-4: 延迟重置 retryCount，避免 onmessage 触发后立即清零
+  // 若 5s 内没有 onerror，才认为连接稳定，重置退避计数
+  let resetTimer: ReturnType<typeof setTimeout> | null = null
   const MAX_RETRY = 10
   const RETRY_BASE_MS = 2000   // 基础重连间隔 2s
   const RETRY_MAX_MS  = 30000  // 最大重连间隔 30s
+  const STABLE_MS     = 5000   // 连接稳定判定窗口 5s
 
   function connect() {
     if (destroyed) return
     es = new EventSource(url)
 
     es.onmessage = (e) => {
-      retryCount = 0   // 收到消息说明连接正常，重置重试计数
+      // FE-4: 不在 onmessage 中立即重置 retryCount，改用延迟重置：
+      // 只有连接在 STABLE_MS 内没有触发 onerror，才认为连接真正稳定。
+      if (resetTimer) clearTimeout(resetTimer)
+      resetTimer = setTimeout(() => {
+        retryCount = 0
+        resetTimer = null
+      }, STABLE_MS)
       try {
         const event: SSEEvent = JSON.parse(e.data)
         onEvent(event)
@@ -311,6 +321,8 @@ export function subscribeToSession(
     }
 
     es.onerror = (err) => {
+      // FE-4: onerror 触发时取消待定的重置计时器，保留当前 retryCount
+      if (resetTimer) { clearTimeout(resetTimer); resetTimer = null }
       if (onError) onError(err)
       es?.close()
       es = null
@@ -345,6 +357,7 @@ export function subscribeToSession(
   return () => {
     destroyed = true
     if (retryTimer) { clearTimeout(retryTimer); retryTimer = null }
+    if (resetTimer) { clearTimeout(resetTimer); resetTimer = null }
     es?.close()
     es = null
   }
@@ -495,6 +508,31 @@ export async function getSessionTodos(sessionId: string): Promise<{ session_id: 
   return res.json()
 }
 
+// ─── Session Role（角色绑定）──────────────────────────────────────────────────
+
+/**
+ * 设置 session 绑定的角色（新建会话时继承当前角色用）
+ */
+export async function setSessionRole(
+  sessionId: string,
+  roleId: string,
+): Promise<{ role_id: string; role_name: string; icon: string; color: string; greeting: string }> {
+  const res = await fetch(`${BASE_URL}/api/sessions/${sessionId}/role`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ role_id: roleId }),
+  })
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
+}
+
+// ─── Abort（中断对话）────────────────────────────────────────────────────────
+
+export async function abortSession(sessionId: string): Promise<void> {
+  await fetch(`${BASE_URL}/api/sessions/${sessionId}/abort`, { method: 'POST' })
+  // 静默失败：即使请求失败前端也会重置状态
+}
+
 // ─── Universal Chat（统一对话接口）──────────────────────────────────────────
 
 export interface UniversalChatRequest {
@@ -534,6 +572,207 @@ export async function chatUniversal(
     const err = await res.json().catch(() => ({ detail: res.statusText }))
     throw new Error(err.detail ?? res.statusText)
   }
+  return res.json()
+}
+
+// ─── Audit & Replay（审计与重播）────────────────────────────────────────────
+
+import type {
+  ListTracesResponse,
+  GetTraceDetailResponse,
+  ListSpansResponse,
+  ListFixturesResponse,
+} from '@/shared/types/trace.types'
+
+/** 获取某 session 的 trace 列表（支持分页） */
+export async function listSessionTraces(
+  sessionId: string,
+  limit = 20,
+  offset = 0,
+): Promise<ListTracesResponse> {
+  const params = new URLSearchParams({ limit: String(limit), offset: String(offset) })
+  const res = await fetch(`${BASE_URL}/api/sessions/${sessionId}/traces?${params}`)
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
+}
+
+/** 获取单条 trace 详情（含 spans） */
+export async function getTraceDetail(traceId: string): Promise<GetTraceDetailResponse> {
+  const res = await fetch(`${BASE_URL}/api/traces/${traceId}`)
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
+}
+
+/** 获取某 trace 的所有 spans */
+export async function listTraceSpans(traceId: string): Promise<ListSpansResponse> {
+  const res = await fetch(`${BASE_URL}/api/traces/${traceId}/spans`)
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
+}
+
+/** 获取某 trace 的所有 replay fixtures */
+export async function listTraceFixtures(traceId: string): Promise<ListFixturesResponse> {
+  const res = await fetch(`${BASE_URL}/api/traces/${traceId}/fixtures`)
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
+}
+
+/** 一键重播指定 trace（Phase 2） */
+export interface ReplayResponse {
+  ok: boolean
+  replay_id: string
+  session_id: string
+  trace_id: string
+  diff_summary: string
+  diff_details: Array<{
+    step: number
+    match: boolean
+    tool?: string
+    source?: { tool: string; hash: string; status: string } | null
+    replay?: { tool: string; hash: string; status: string } | null
+  }>
+  fixture_misses: Array<{ tool_name: string; args_hash: string }>
+  /** fixture 模式：命中的工具列表 */
+  fixture_hits: Array<{ tool_name: string; args_hash: string }>
+  /** fixture 命中率（0.0 ~ 1.0） */
+  fixture_hit_rate: number
+  /** fixture 总数 */
+  total_fixtures: number
+  /** 差异步骤数 */
+  mismatch_count: number
+  /** token 对比（model span 汇总） */
+  token_diff: {
+    src_input: number
+    src_output: number
+    rep_input: number
+    rep_output: number
+    delta_input: number
+    delta_output: number
+  }
+  /** 重播模式 */
+  mode: 'fixture' | 'live'
+  status: string
+  /** 失败时的错误原因（null = 成功） */
+  error_detail?: string | null
+}
+
+/** 获取某 trace 的重放历史列表 */
+export async function listTraceReplays(traceId: string, limit = 10): Promise<{
+  ok: boolean
+  replays: Array<{
+    replay_id: string
+    mode: string
+    status: string
+    diff_summary: string
+    created_at: string
+    replay_trace_id: string
+  }>
+}> {
+  const res = await fetch(`${BASE_URL}/api/traces/${traceId}/replays?limit=${limit}`)
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
+}
+
+export async function replayTrace(
+  traceId: string,
+  mode: 'fixture' | 'live' = 'fixture',
+): Promise<ReplayResponse> {
+  const res = await fetch(`${BASE_URL}/api/traces/${traceId}/replay?mode=${mode}`, {
+    method: 'POST',
+  })
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
+}
+
+/** 重播步骤进度事件（SSE 流） */
+export interface ReplayStepEvent {
+  type: 'replay.step'
+  step: string | number
+  tool?: string
+  status?: 'running' | 'ok' | 'error'
+  text?: string
+}
+
+/**
+ * SSE 流式重播：实时推送每步工具调用进度。
+ * onStep: 每步进度回调（replay.step 事件）
+ * onDone: 完成回调（含完整 ReplayResponse）
+ * onError: 错误回调
+ * 返回 AbortController，可调用 .abort() 取消
+ */
+export function replayTraceStream(
+  traceId: string,
+  mode: 'fixture' | 'live' = 'fixture',
+  callbacks: {
+    onStep?: (event: ReplayStepEvent) => void
+    onDone?: (result: ReplayResponse) => void
+    onError?: (error: string) => void
+  },
+): AbortController {
+  const ac = new AbortController()
+
+  ;(async () => {
+    try {
+      const res = await fetch(
+        `${BASE_URL}/api/traces/${traceId}/replay/stream?mode=${mode}`,
+        { method: 'POST', signal: ac.signal },
+      )
+      if (!res.ok || !res.body) {
+        callbacks.onError?.(`HTTP ${res.status}: ${await res.text()}`)
+        return
+      }
+
+      const reader = res.body.getReader()
+      const decoder = new TextDecoder()
+      let buf = ''
+
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
+        buf += decoder.decode(value, { stream: true })
+        const lines = buf.split('\n')
+        buf = lines.pop() ?? ''
+        for (const line of lines) {
+          if (!line.startsWith('data: ')) continue
+          const raw = line.slice(6).trim()
+          if (!raw || raw === '[DONE]') continue
+          try {
+            const evt = JSON.parse(raw) as { type: string; [k: string]: unknown }
+            if (evt.type === 'replay.step') {
+              callbacks.onStep?.(evt as unknown as ReplayStepEvent)
+            } else if (evt.type === 'replay.done') {
+              callbacks.onDone?.((evt as unknown as { result: ReplayResponse }).result)
+            } else if (evt.type === 'replay.error') {
+              callbacks.onError?.((evt as unknown as { error: string }).error)
+            }
+            // type === 'done' → 流结束，忽略
+          } catch { /* 解析失败忽略 */ }
+        }
+      }
+    } catch (e: unknown) {
+      if ((e as Error)?.name !== 'AbortError') {
+        callbacks.onError?.(String(e))
+      }
+    }
+  })()
+
+  return ac
+}
+
+/** 获取某 session 的审计统计摘要（total/succeeded/failed/tokens/avg_duration） */
+export async function getSessionTraceStats(sessionId: string): Promise<{
+  ok: boolean
+  stats: import('@/features/chat/store/timeline.store').TraceStats
+}> {
+  const res = await fetch(`${BASE_URL}/api/sessions/${sessionId}/traces/stats`)
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
+}
+
+/** 删除某 session 的所有 trace/span/fixture（清空审计历史） */
+export async function deleteSessionTraces(sessionId: string): Promise<{ ok: boolean; deleted: number }> {
+  const res = await fetch(`${BASE_URL}/api/sessions/${sessionId}/traces`, { method: 'DELETE' })
+  if (!res.ok) throw new Error(await res.text())
   return res.json()
 }
 
@@ -669,5 +908,168 @@ export async function synthesizeSpeech(params: {
     const err = await res.json().catch(() => ({ error: res.statusText }))
     throw new Error(err.error ?? res.statusText)
   }
+  return res.json()
+}
+
+// ─── 工作流 API (v2.0) ────────────────────────────────────────────────────────
+
+export interface WorkflowStep {
+  step_idx: number
+  tool_name: string
+  args_template: Record<string, unknown>
+  llm_required: boolean
+  prune_reason: string
+  result_preview?: string
+  duration_ms?: number
+}
+
+export interface WorkflowVariable {
+  name: string
+  description: string
+  extract_from?: string
+}
+
+export interface WorkflowTemplate {
+  template_id: string
+  source_trace_id: string
+  name: string
+  description: string
+  domain: string
+  trigger_pattern: string
+  variables: WorkflowVariable[]
+  steps: WorkflowStep[]
+  total_steps: number
+  llm_steps: number
+  pruned_steps: number
+  status: 'draft' | 'ready' | 'deprecated'
+  created_at: string
+  updated_at: string
+}
+
+export interface WorkflowRun {
+  run_id: string
+  template_id: string
+  session_id: string
+  variables: string
+  status: 'running' | 'succeeded' | 'failed' | 'pending'
+  current_step: number
+  total_steps: number
+  result: string
+  error_msg: string
+  started_at: string
+  ended_at: string
+  duration_ms: number
+}
+
+export interface WorkflowStepLog {
+  log_id: string
+  run_id: string
+  step_idx: number
+  tool_name: string
+  args_resolved: string
+  result: string
+  status: 'ok' | 'error'
+  duration_ms: number
+  started_at: string
+  ended_at: string
+}
+
+/** 从 trace 提炼工作流模板 */
+export async function extractWorkflow(
+  traceId: string,
+  useLlm = true,
+): Promise<{ ok: boolean; template_id: string } & Partial<WorkflowTemplate>> {
+  const res = await fetch(
+    `${BASE_URL}/api/traces/${traceId}/extract-workflow?use_llm=${useLlm}`,
+    { method: 'POST' },
+  )
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: res.statusText }))
+    throw new Error(err.detail ?? res.statusText)
+  }
+  return res.json()
+}
+
+/** 列出所有工作流模板 */
+export async function listWorkflows(
+  domain = '',
+  limit = 50,
+): Promise<{ ok: boolean; templates: WorkflowTemplate[] }> {
+  const params = new URLSearchParams({ limit: String(limit) })
+  if (domain) params.set('domain', domain)
+  const res = await fetch(`${BASE_URL}/api/workflows?${params}`)
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
+}
+
+/** 获取单个工作流模板 */
+export async function getWorkflow(
+  templateId: string,
+): Promise<{ ok: boolean; template: WorkflowTemplate }> {
+  const res = await fetch(`${BASE_URL}/api/workflows/${templateId}`)
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
+}
+
+/** 列出工作流执行历史 */
+export async function listWorkflowRuns(
+  templateId: string,
+  limit = 20,
+): Promise<{ ok: boolean; runs: WorkflowRun[] }> {
+  const res = await fetch(
+    `${BASE_URL}/api/workflows/${templateId}/runs?limit=${limit}`,
+  )
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
+}
+
+/** 获取单次执行详情（含步骤日志） */
+export async function getWorkflowRunDetail(
+  runId: string,
+): Promise<{ ok: boolean; run: WorkflowRun; step_logs: WorkflowStepLog[] }> {
+  const res = await fetch(`${BASE_URL}/api/workflow-runs/${runId}`)
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
+}
+
+/**
+ * 执行工作流（SSE 流式进度）
+ * 返回原始 Response，调用方自行读取 SSE 流
+ * signal: AbortController.signal，用于取消请求
+ */
+export async function runWorkflowSSE(
+  templateId: string,
+  variables: Record<string, string> = {},
+  sessionId = '',
+  signal?: AbortSignal,
+): Promise<Response> {
+  return fetch(`${BASE_URL}/api/workflows/${templateId}/run`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ session_id: sessionId, variables }),
+    signal,
+  })
+}
+
+/** 废弃工作流模板（软删除） */
+export async function deprecateWorkflow(templateId: string): Promise<{ ok: boolean }> {
+  const res = await fetch(`${BASE_URL}/api/workflows/${templateId}/deprecate`, {
+    method: 'POST',
+  })
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
+}
+
+/** 工作流统计摘要 */
+export async function getWorkflowStats(): Promise<{
+  ok: boolean
+  total_templates: number
+  total_runs: number
+  succeeded_runs: number
+  failed_runs: number
+  avg_duration_ms: number
+}> {
+  const res = await fetch(`${BASE_URL}/api/workflows/stats/summary`)
+  if (!res.ok) throw new Error(await res.text())
   return res.json()
 }

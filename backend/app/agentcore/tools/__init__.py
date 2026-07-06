@@ -130,18 +130,31 @@ _PY_TO_JSON = {
     "list": "array",
 }
 
+# list[X] → items 类型映射（用于生成 JSON Schema 的 items 字段）
+_LIST_ITEM_TYPE: dict[str, str] = {
+    "str": "string",
+    "int": "integer",
+    "float": "number",
+    "bool": "boolean",
+    "dict": "object",
+}
 
-def _resolve_type_name(py_type) -> str:
+
+def _resolve_type_name(py_type) -> tuple[str, str | None]:
     """
-    将 Python 类型注解解析为 JSON Schema 类型字符串。
+    将 Python 类型注解解析为 (json_type, items_type) 二元组。
+    items_type 仅在 json_type == 'array' 时有意义（表示数组元素类型）。
     支持：
       - 普通类型：str, int, float, bool, dict, list
+      - list[str] / List[str] → ('array', 'string')
+      - list[int] / List[int] → ('array', 'integer')
+      - 裸 list（无元素类型）→ ('array', 'string')  ← 默认 string
       - Optional[X]  → 取 X 的类型（忽略 None）
       - Union[X, None] / X | None → 同上
       - Literal["a","b"] → 保留 enum，类型取第一个值的类型
     """
     if py_type is None:
-        return "string"
+        return "string", None
 
     # 处理 Optional[X] / Union[X, None]
     origin = getattr(py_type, "__origin__", None)
@@ -151,14 +164,24 @@ def _resolve_type_name(py_type) -> str:
             args = [a for a in py_type.__args__ if a is not type(None)]
             if args:
                 return _resolve_type_name(args[0])
-            return "string"
+            return "string", None
         # Literal
         if origin is getattr(_typing, "Literal", None):
             first = py_type.__args__[0] if py_type.__args__ else ""
-            return _PY_TO_JSON.get(type(first).__name__, "string")
-        # list / dict generics
+            return _PY_TO_JSON.get(type(first).__name__, "string"), None
+        # list[X] generics → 提取元素类型作为 items_type
         raw_origin = getattr(origin, "__name__", str(origin))
-        return _PY_TO_JSON.get(raw_origin, "string")
+        json_type = _PY_TO_JSON.get(raw_origin, "string")
+        if json_type == "array":
+            # 取第一个类型参数作为 items 元素类型
+            type_args = getattr(py_type, "__args__", None)
+            if type_args:
+                item_raw = getattr(type_args[0], "__name__", str(type_args[0]))
+                items_type = _LIST_ITEM_TYPE.get(item_raw, "string")
+            else:
+                items_type = "string"  # 裸 list[] → 默认 string
+            return json_type, items_type
+        return json_type, None
 
     # Python 3.10+ X | None 语法 → types.UnionType
     try:
@@ -167,12 +190,16 @@ def _resolve_type_name(py_type) -> str:
             args = [a for a in py_type.__args__ if a is not type(None)]
             if args:
                 return _resolve_type_name(args[0])
-            return "string"
+            return "string", None
     except AttributeError:
         pass
 
     raw = getattr(py_type, "__name__", str(py_type))
-    return _PY_TO_JSON.get(raw, "string")
+    json_type = _PY_TO_JSON.get(raw, "string")
+    # 裸 list（无泛型参数）→ 默认 items: string
+    if json_type == "array":
+        return json_type, "string"
+    return json_type, None
 
 
 def _build_parameters(fn: Callable) -> dict:
@@ -200,11 +227,15 @@ def _build_parameters(fn: Callable) -> dict:
             continue
 
         py_type = hints.get(pname, None)
-        type_name = _resolve_type_name(py_type)
+        type_name, items_type = _resolve_type_name(py_type)
 
         prop: dict = {"type": type_name}
         if pname in param_docs:
             prop["description"] = param_docs[pname]
+
+        # array 类型补充 items 字段（让 LLM 知道数组元素类型，避免传空数组）
+        if type_name == "array" and items_type:
+            prop["items"] = {"type": items_type}
 
         # Literal 枚举值
         origin = getattr(py_type, "__origin__", None)

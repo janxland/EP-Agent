@@ -85,6 +85,9 @@ class Session:
     intent_history: list[IntentRecord] = field(default_factory=list)
     audio_history: list[dict] = field(default_factory=list)   # 音频对话历史（每轮一条记录）
     extra: dict = field(default_factory=dict)                 # 扩展字段（如 role_id，与 DB extra 列对齐）
+    # 工作区/项目上下文（创建时写入，供重播引擎恢复文件隔离边界）
+    workspace_id: str = ""
+    project_id: str = ""
     created_at: datetime = field(default_factory=datetime.now)
     updated_at: datetime = field(default_factory=datetime.now)
 

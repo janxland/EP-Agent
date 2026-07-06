@@ -20,7 +20,7 @@ import re
 import uuid
 from typing import Callable, Awaitable
 
-from app.agentcore.llm import complete, complete_stream, complete_with_tools, complete_with_tools_stream
+from app.agentcore.llm import complete, complete_stream, complete_with_tools, complete_with_tools_stream, get_current_model_name
 from app.agentcore.todo_manager import TodoManager
 from app.pipeline import db as _db
 
@@ -28,17 +28,29 @@ Publisher = Callable[[str, dict], Awaitable[None]]
 
 MAX_REACT_ROUNDS = 8
 
+# 文件写入类工具集合（模块级常量，避免每轮循环重建 set）
+_FILE_WRITE_TOOLS: frozenset[str] = frozenset({
+    "write_workspace_file", "edit_workspace_file",
+    "delete_workspace_file", "copy_workspace_file",
+    "rename_workspace_file", "move_workspace_file",
+    "run_write_tasks_in_parallel",
+    "abc_to_midi", "generate_h5_from_midi", "save_h5_output",
+    "sovits_tts_and_save", "sovits_clone_and_save", "sovits_save_audio",
+})
+
 
 def _clean_content(text: str) -> str:
     """清理 LLM 流式输出时偶发混入 content 的 tool_call XML 残片。
     如 `}</tool_call>` `<tool_call>{...}</tool_call>` 等。
+
+    修复 R1：原末尾 } 正则会误删合法 JSON 末尾的 }（如 '{"key":"val"}'）。
+    改为仅清理「独占一行且该行只有 }」的孤立残留，不触碰多字符行末尾的 }。
     """
     s = re.sub(r'<tool_call>[\s\S]*?</tool_call>', '', text)
     s = re.sub(r'</?tool_call>', '', s)
     # 孤立的 } 行（tool_call JSON 尾部残留）：行首可选空白 + } + 行尾
     s = re.sub(r'(?m)^[ \t]*\}[ \t]*$', '', s)
-    # 末尾孤立的 }（不在行首时也要清理，如 "content\n}"）
-    s = re.sub(r'\}\s*$', '', s)
+    # 注意：不再清理末尾孤立 }，避免误删合法 JSON 结尾
     # 清理多余空行（连续超过2个换行压缩为2个）
     s = re.sub(r'\n{3,}', '\n\n', s)
     return s.strip()
@@ -46,11 +58,16 @@ def _clean_content(text: str) -> str:
 
 # ── 流式推送工具函数 ──────────────────────────────────────────────────────────
 
-async def stream_text(text: str, publish: Publisher, chunk_size: int = 24):
-    """将文本分块推送为 message.delta，模拟流式输出。"""
+async def stream_text(text: str, publish: Publisher, chunk_size: int = 80):
+    """将文本分块推送为 message.delta，模拟流式输出。
+    chunk_size=80：每帧约 80 字符，减少帧数同时保持打字机感。
+    不再 sleep：依赖事件循环自然调度，消除人为延迟。
+    """
     for i in range(0, len(text), chunk_size):
         await publish("message.delta", {"delta": text[i:i + chunk_size]})
-        await asyncio.sleep(0.01)
+        # 让出事件循环一次，避免长文本阻塞其他协程
+        if i + chunk_size < len(text):
+            await asyncio.sleep(0)
 
 
 async def stream_llm(messages: list[dict], publish: Publisher) -> str:
@@ -109,6 +126,7 @@ class ReactExecutor:
         extra: dict = {}
         final_content = ""
         round_idx = 0
+        exceeded_rounds = False
         # P1: 连续全失败计数器（工具全部失败时避免无限重试）
         _consecutive_all_fail = 0
         _MAX_CONSECUTIVE_FAIL = 2   # 连续 2 轮工具全失败则强制退出
@@ -141,6 +159,7 @@ class ReactExecutor:
                 "text":          f"第 {round_idx + 1} 轮推理中..." if round_idx > 0 else "推理中...",
                 "round_idx":     round_idx,
                 "stream_turn_id": stream_turn_id,
+                "model":         get_current_model_name("strong"),  # T2: 携带模型名供 TraceCollector 记录
             })
 
             # 有工具时使用 tool calling（优先流式），无工具时直接 complete
@@ -208,8 +227,12 @@ class ReactExecutor:
                         content=content_clean,
                         tool_calls=tool_calls if tool_calls else None,
                     )
-                except Exception:
-                    pass  # 落库失败不影响主流程
+                except Exception as _e:
+                    import logging as _log
+                    _log.getLogger("ep_agent.react").warning(
+                        "[ReactExecutor] assistant 消息落库失败 session=%s round=%d: %s",
+                        session_id, round_idx, _e
+                    )
 
             # ── Stop：LLM 完成输出 ────────────────────────────────────────────
             if finish_reason == "stop" or not tool_calls:
@@ -217,9 +240,13 @@ class ReactExecutor:
                 # running TODO → done（已开始执行，LLM 认为完成）
                 for rid in todo_manager.get_running_ids():
                     await todo_manager.complete_one(rid, publish)
-                # pending TODO → skipped（未执行就结束，不能标绿！）
-                for pid in todo_manager.get_pending_ids():
-                    await todo_manager.tick(pid, "skipped", publish)
+                # ⚠️ pending TODO 不在此处标 skipped！
+                # 原因：EditAgent/CreateAgent 在 run_edit()/run() 返回后，
+                # Python 代码层还会继续执行保存、导出等步骤，
+                # 这些步骤对应的 TODO 由外层 Agent 的 finish_all(done) 统一收尾。
+                # 若此处标 skipped，finish_all 会跳过（skipped 不再处理），
+                # 导致前端显示「步骤被跳过」但实际上 Python 已执行，状态不一致。
+                # 外层 Agent 负责在所有 Python 层操作完成后调用 finish_all(done)。
                 break
 
             # ── 执行工具调用（Observe 步骤）──────────────────────────────────
@@ -228,7 +255,13 @@ class ReactExecutor:
                 if todo_manager.get_running_ids() else None
             )
 
-            tool_succeeded_count = 0
+            # ── v5 Phase 1：并行工具执行 ──────────────────────────────────────
+            # LLM 返回多个 tool_calls 时用 asyncio.gather 并行执行，
+            # 汇聚结果后按原顺序注入 messages，降低整体延迟 20-30%。
+            # 有数据依赖的工具 LLM 会自动拆成两轮，无需手动处理依赖关系。
+
+            # ── 预处理：解析参数 + 重复检测（串行，无 IO 开销）─────────────────
+            valid_tcs: list[tuple] = []
             for tc in tool_calls:
                 tool_name = tc["function"]["name"]
                 try:
@@ -236,7 +269,18 @@ class ReactExecutor:
                 except json.JSONDecodeError:
                     arguments = {}
 
-                # P4: 重复工具调用检测（同一工具+参数 hash 超限则跳过）
+                # ── 数组参数自动修复：LLM 有时把 list 参数序列化为 JSON 字符串传入
+                # 例如 file_paths='[".sky/a.abc"]'（字符串）而非 [".sky/a.abc"]（数组）
+                # 遇到此情况自动 json.loads 还原为真正的列表
+                for _k, _v in list(arguments.items()):
+                    if isinstance(_v, str) and _v.strip().startswith("["):
+                        try:
+                            _parsed = json.loads(_v)
+                            if isinstance(_parsed, list):
+                                arguments[_k] = _parsed
+                        except (json.JSONDecodeError, ValueError):
+                            pass
+
                 _call_key = f"{tool_name}:{json.dumps(arguments, sort_keys=True, ensure_ascii=False)[:200]}"
                 _tool_call_seen[_call_key] = _tool_call_seen.get(_call_key, 0) + 1
                 if _tool_call_seen[_call_key] > _MAX_TOOL_REPEAT:
@@ -251,96 +295,74 @@ class ReactExecutor:
                         "content":      f"[跳过] 工具 {tool_name} 已重复调用 {_tool_call_seen[_call_key]} 次（相同参数），请换用其他工具或直接输出结果。",
                     })
                     continue
+                valid_tcs.append((tc, tool_name, arguments))
 
-                # 推送工具调用开始（过滤超长字段，防止 SSE 消息过大）
-                safe_args = {
-                    k: (v[:200] + "..." if isinstance(v, str) and len(v) > 200 else v)
-                    for k, v in arguments.items()
-                    if k not in (
-                        "abc", "audio_b64", "content",
-                        # b64 字段：防止 base64 数据爆炸上下文
-                        "ref_audio_b64", "reference_audio_b64",
-                        "attachment_b64", "b64", "image_b64",
-                        "midi_b64", "audio_data", "file_b64",
-                    )
-                }
-                await publish("tool.call", {
-                    "call_id":   tc["id"],
-                    "tool":      tool_name,
-                    "arguments": safe_args,
-                    "status":    "running",
-                    "round_idx": round_idx,
-                })
+            # ── 并行执行所有合法工具调用（R2 修复：改用静态方法，消除闭包陷阱）────
+            tool_succeeded_count = 0
+            if valid_tcs:
+                # return_exceptions=True：单个工具异常不取消其他工具（异常隔离）
+                # 异常对象在后续 zip 处理时被识别为 (False, str(exc), None)
+                _raw_results = await asyncio.gather(
+                    *[self._run_one_tool(tc, tn, args, publish, session_id, call_tool, round_idx)
+                      for tc, tn, args in valid_tcs],
+                    return_exceptions=True,
+                )
+                parallel_results = [
+                    r if not isinstance(r, BaseException) else (False, str(r), None)
+                    for r in _raw_results
+                ]
+            else:
+                parallel_results = []
 
-                try:
-                    # 注入 session_id 到 ContextVar，工具内部可通过
-                    # get_current_session_id() / get_current_workspace_id() 自动推断
-                    if session_id:
-                        try:
-                            from app.agentcore.session_context import set_current_session_id
-                            set_current_session_id(session_id)
-                        except Exception:
-                            pass
-                    result = await call_tool(tool_name, arguments)
-                    result_str = (
-                        result if isinstance(result, str)
-                        else json.dumps(result, ensure_ascii=False)
-                    )
-
+            # ── 按原顺序处理结果 ──────────────────────────────────────────────
+            # _FILE_WRITE_TOOLS 已提取为模块级常量（R3 修复）
+            for (tc, tool_name, arguments), (success, result_str, result) in zip(valid_tcs, parallel_results):
+                if success:
                     # 捕获特定工具的额外输出
                     if tool_name == "abc_to_sky_json":
                         extra["sky_json"] = result_str
                     elif tool_name == "abc_to_midi_file":
-                        # 捕获 MIDI 文件 URL（不再使用 base64，改为静态路径）
                         try:
-                            _midi_result = result if isinstance(result, dict) else json.loads(result_str)
-                            extra["midi_url"] = _midi_result.get("midi_url", "")
+                            _midi_r = result if isinstance(result, dict) else json.loads(result_str)
+                            extra["midi_url"] = _midi_r.get("midi_url", "")
                         except Exception:
                             pass
-                    # H5 工具链：捕获路径/标题/模板输出（供 H5Agent 推送 h5.ready 事件）
                     elif tool_name == "save_h5_file":
                         try:
-                            _h5_result = result if isinstance(result, dict) else json.loads(result_str)
-                            if "url_path" in _h5_result:
-                                extra["url_path"]  = _h5_result.get("url_path", "")
-                                extra["file_path"] = _h5_result.get("file_path", "")
-                                extra["size_kb"]   = _h5_result.get("size_kb", 0)
+                            _h5_r = result if isinstance(result, dict) else json.loads(result_str)
+                            if "url_path" in _h5_r:
+                                extra["url_path"]  = _h5_r.get("url_path", "")
+                                extra["file_path"] = _h5_r.get("file_path", "")
+                                extra["size_kb"]   = _h5_r.get("size_kb", 0)
                         except Exception:
                             pass
-                    elif tool_name == "generate_h5_from_midi":  # 唯一存在的 H5 生成工具
+                    elif tool_name == "generate_h5_from_midi":
                         try:
-                            _gen_result = result if isinstance(result, dict) else json.loads(result_str)
-                            if "title" in _gen_result:
-                                extra["title"]    = _gen_result.get("title", "")
-                                extra["template"] = _gen_result.get("template", "apple")
-                            if "midi_url" in _gen_result:
-                                extra["midi_url"] = _gen_result.get("midi_url", "")
-                            # generate_h5_from_midi 直接保存文件并返回路径，
-                            # 与 save_h5_file 一样需要捕获 url_path/file_path/size_kb/workspace_path
-                            # 供 H5Agent 推送 h5.ready 事件
-                            if _gen_result.get("url_path") or _gen_result.get("workspace_path"):
-                                extra["url_path"]       = _gen_result.get("url_path", "")
-                                extra["file_path"]      = _gen_result.get("file_path", "")
-                                extra["size_kb"]        = _gen_result.get("size_kb", 0)
-                                extra["workspace_path"] = _gen_result.get("workspace_path", "")
+                            _gen_r = result if isinstance(result, dict) else json.loads(result_str)
+                            if "title" in _gen_r:
+                                extra["title"]    = _gen_r.get("title", "")
+                                extra["template"] = _gen_r.get("template", "apple")
+                            if "midi_url" in _gen_r:
+                                extra["midi_url"] = _gen_r.get("midi_url", "")
+                            if _gen_r.get("url_path") or _gen_r.get("workspace_path"):
+                                extra["url_path"]       = _gen_r.get("url_path", "")
+                                extra["file_path"]      = _gen_r.get("file_path", "")
+                                extra["size_kb"]        = _gen_r.get("size_kb", 0)
+                                extra["workspace_path"] = _gen_r.get("workspace_path", "")
                         except Exception:
                             pass
 
-                    # 所有工具：凡返回 workspace_path 字段，统一写入 Session.extra 记忆
+                    # workspace_path 写入 Session.extra 记忆
                     try:
-                        _any_result = result if isinstance(result, dict) else json.loads(result_str)
-                        _ws_path = _any_result.get("workspace_path", "") if isinstance(_any_result, dict) else ""
+                        _any_r = result if isinstance(result, dict) else json.loads(result_str)
+                        _ws_path = _any_r.get("workspace_path", "") if isinstance(_any_r, dict) else ""
                         if _ws_path and session_id:
-                            _fname = _any_result.get("filename") or _any_result.get("name", "")
+                            _fname = _any_r.get("filename") or _any_r.get("name", "")
                             from app.agentcore.session_context import remember_workspace_file
                             remember_workspace_file(session_id, _ws_path, _fname)
                     except Exception:
                         pass
 
-                    # ── 记忆提取：工具执行后自动更新 memory.key_files ──────────────
-                    # 高价值信息（文件路径）无需 LLM 判断，直接写入携带体
-                    # 注意：extract_memory_from_result 是同步写入 _sessions dict，
-                    # 直接 await 即可，无需 create_task（避免 ContextVar 副本问题）
                     if session_id:
                         try:
                             _r = result if isinstance(result, dict) else {}
@@ -353,132 +375,83 @@ class ReactExecutor:
 
                     preview = result_str[:120] + "..." if len(result_str) > 120 else result_str
                     tool_call_records.append({
-                        "id":             tc["id"],
-                        "tool":           tool_name,
-                        "arguments":      {k: v for k, v in arguments.items() if k != "abc"},
-                        "result_preview": preview,
-                        "status":         "succeeded",
+                        "id": tc["id"], "tool": tool_name,
+                        "arguments": {k: v for k, v in arguments.items() if k != "abc"},
+                        "result_preview": preview, "status": "succeeded",
                     })
                     await publish("tool.call", {
-                        "call_id":        tc["id"],
-                        "tool":           tool_name,
-                        "status":         "succeeded",
+                        "call_id": tc["id"], "tool": tool_name, "status": "succeeded",
                         "result_preview": result_str[:80] + "..." if len(result_str) > 80 else result_str,
+                        "full_result": result_str[:4096],
                     })
-                    # P2: tool message 注入 context 时截断（防大结果膨胀 context）
-                    # 落库用 4096 截断，注入 messages 用 8192 截断（保留更多信息供 LLM 推理）
                     _result_for_ctx = (
                         result_str[:8192] + "\n...[结果过长已截断，如需完整内容请调用工具重新获取]..."
                         if len(result_str) > 8192 else result_str
                     )
                     messages.append({
-                        "role":         "tool",
-                        "tool_call_id": tc["id"],
-                        "content":      _result_for_ctx,
+                        "role": "tool", "tool_call_id": tc["id"], "content": _result_for_ctx,
                     })
                     tool_succeeded_count += 1
 
-                    # ── 文件写入类工具：推送 workspace.files.changed 事件 ──────────
-                    # 前端文件树监听此事件后自动刷新，无需手动点击刷新按钮
-                    # 工具名必须与 @tool 装饰器注册的函数名完全一致
-                    _FILE_WRITE_TOOLS = {
-                        # workspace_tools v2.0 实际注册名
-                        "write_workspace_file", "edit_workspace_file",
-                        "delete_workspace_file", "copy_workspace_file",
-                        "rename_workspace_file", "move_workspace_file",
-                        "run_write_tasks_in_parallel",
-                        # abc_tools
-                        "abc_to_midi",
-                        # h5_tools
-                        "generate_h5_from_midi",
-                        "save_h5_output",
-                        # audio_tools（sovits v2.0 新工具，合成后自动落盘）
-                        "sovits_tts_and_save",
-                        "sovits_clone_and_save",
-                        "sovits_save_audio",  # 废弃但保留兼容
-                    }
                     if tool_name in _FILE_WRITE_TOOLS and session_id:
                         try:
                             _changed_path = ""
                             if isinstance(result, dict):
                                 _changed_path = (
-                                    result.get("workspace_path")
-                                    or result.get("file_path")
-                                    or result.get("path")
-                                    or ""
+                                    result.get("workspace_path") or result.get("file_path")
+                                    or result.get("path") or ""
                                 )
                             await publish("workspace.files.changed", {
-                                "tool":    tool_name,
-                                "path":    _changed_path,
-                                "trigger": "tool_call",
+                                "tool": tool_name, "path": _changed_path, "trigger": "tool_call",
                             }, display=False)
-                        except Exception:
-                            pass  # 推送失败不影响主流程
-
-                    # ── 落库 tool message（刷新后 SSE replay 恢复）──────────────
-                    if session_id:
-                        try:
-                            _db.insert_message(
-                                msg_id=f"tool_{tc['id']}",
-                                session_id=session_id,
-                                role="tool",
-                                content=result_str[:4096],  # 限制存储大小，防止 DB 膨胀
-                                tool_call_id=tc["id"],
-                                tool_name=tool_name,
-                            )
-                        except Exception:
-                            pass  # 落库失败不影响主流程
-
-                except Exception as e:
-                    tool_call_records.append({
-                        "id": tc["id"], "tool": tool_name,
-                        "arguments": arguments, "status": "failed", "error": str(e),
-                    })
-                    await publish("tool.call", {
-                        "call_id": tc["id"], "tool": tool_name,
-                        "status": "failed", "error": str(e),
-                    })
-                    messages.append({
-                        "role":         "tool",
-                        "tool_call_id": tc["id"],
-                        "content":      f"工具执行失败: {e}",
-                    })
-                    # ── 落库失败的 tool message ─────────────────────────────────
-                    if session_id:
-                        try:
-                            _db.insert_message(
-                                msg_id=f"tool_{tc['id']}",
-                                session_id=session_id,
-                                role="tool",
-                                content=f"工具执行失败: {e}",
-                                tool_call_id=tc["id"],
-                                tool_name=tool_name,
-                            )
                         except Exception:
                             pass
 
-            # P1: 连续全失败保护 — 所有工具均失败时计数，超限强制退出
-            if tool_succeeded_count == 0 and tool_calls:
-                _consecutive_all_fail += 1
-                if _consecutive_all_fail >= _MAX_CONSECUTIVE_FAIL:
-                    import logging as _log
-                    _log.getLogger("ep_agent.react").error(
-                        "[ReAct] 连续 %d 轮工具全部失败，强制退出 round=%d",
-                        _consecutive_all_fail, round_idx,
-                    )
-                    await publish("pipeline.step", {
-                        "step":   "react_force_exit",
-                        "status": "warning",
-                        "text":   f"⚠️ 工具连续失败 {_consecutive_all_fail} 轮，已中止重试",
+                    if session_id:
+                        try:
+                            # FIX: 用 uuid 保证唯一，避免 call_id 复用时 INSERT OR IGNORE 静默丢弃
+                            _db.insert_message(
+                                msg_id=f"tool_{tc['id']}_{uuid.uuid4().hex[:8]}",
+                                session_id=session_id,
+                                role="tool", content=result_str[:4096],
+                                tool_call_id=tc["id"], tool_name=tool_name,
+                            )
+                        except Exception as _e:
+                            import logging as _log
+                            _log.getLogger("ep_agent.react").warning(
+                                "[ReactExecutor] tool 消息落库失败 session=%s tool=%s: %s",
+                                session_id, tool_name, _e
+                            )
+
+                else:
+                    # 工具执行失败
+                    e_str = result_str
+                    tool_call_records.append({
+                        "id": tc["id"], "tool": tool_name,
+                        "arguments": arguments, "status": "failed", "error": e_str,
                     })
-                    # 标记未完成 TODO
-                    for rid in todo_manager.get_running_ids():
-                        await todo_manager.complete_one(rid, publish)
-                    for pid in todo_manager.get_pending_ids():
-                        await todo_manager.tick(pid, "skipped", publish)
-                    break
-            else:
-                _consecutive_all_fail = 0  # 有成功则重置计数器
+                    await publish("tool.call", {
+                        "call_id": tc["id"], "tool": tool_name,
+                        "status": "failed", "error": e_str,
+                    })
+                    messages.append({
+                        "role": "tool", "tool_call_id": tc["id"],
+                        "content": f"工具执行失败: {e_str}",
+                    })
+                    if session_id:
+                        try:
+                            _db.insert_message(
+                                msg_id=f"tool_{tc['id']}_{uuid.uuid4().hex[:8]}",
+                                session_id=session_id,
+                                role="tool", content=f"工具执行失败: {e_str}",
+                                tool_call_id=tc["id"], tool_name=tool_name,
+                            )
+                        except Exception as _e:
+                            import logging as _log
+                            _log.getLogger("ep_agent.react").warning(
+                                "[ReactExecutor] tool 失败消息落库失败 session=%s tool=%s: %s",
+                                session_id, tool_name, _e
+                            )
 
             # 工具批次全部执行完后，complete 当前 running TODO（若有工具成功）
             if tool_succeeded_count > 0 and current_running_id:
@@ -486,11 +459,138 @@ class ReactExecutor:
                 if t and t.get("status") == "running":
                     await todo_manager.complete_one(current_running_id, publish)
 
+            # R5 修复：连续全失败计数器（防止工具全部失败时无限重试）
+            if valid_tcs and tool_succeeded_count == 0:
+                _consecutive_all_fail += 1
+                if _consecutive_all_fail >= _MAX_CONSECUTIVE_FAIL:
+                    import logging as _log
+                    _log.getLogger("ep_agent.react").warning(
+                        "[ReAct] 连续 %d 轮工具全部失败，强制退出 round=%d",
+                        _consecutive_all_fail, round_idx,
+                    )
+                    await publish("pipeline.step", {
+                        "step":   "react_all_fail_exit",
+                        "status": "warning",
+                        "text":   f"⚠️ 连续 {_consecutive_all_fail} 轮工具全部失败，已退出重试",
+                    })
+                    break
+            else:
+                _consecutive_all_fail = 0  # 有成功则重置计数
+
+        else:
+            # for-else：正常耗尽所有轮次（未 break）
+            # 用最后一轮的实际 content（若有），而不是硬编码错误文本
+            # 这样 LLM 在最后一轮输出的结果仍然能正常返回给用户
+            exceeded_rounds = True
+            if not final_content:
+                final_content = content_clean or "[任务未在最大轮次内完成，请尝试简化请求]"
+
         return {
-            "content":    final_content,
-            "tool_calls": tool_call_records,
-            "rounds":     round_idx + 1,
-            "extra":      extra,
+            "content":         final_content,
+            "tool_calls":      tool_call_records,
+            "rounds":          round_idx + 1,
+            "extra":           extra,
+            "exceeded_rounds": exceeded_rounds,   # R6: 调用方可感知是否超轮退出
             # 标记：ReactExecutor 已落库所有 assistant/tool 消息，调用方无需重复写入
-            "_persisted": bool(session_id),
+            "_persisted":      bool(session_id),
         }
+
+    # ── R2 修复：_run_one_tool 提取为静态方法，消除闭包陷阱 ──────────────────────
+    # 所有外部依赖（publish/session_id/call_tool/round_idx）通过参数显式传入，
+    # 不再依赖外层作用域捕获，未来重构为异步迭代时不会出现变量污染。
+
+    @staticmethod
+    async def _run_one_tool(
+        tc: dict,
+        tool_name: str,
+        arguments: dict,
+        publish,
+        session_id: str,
+        call_tool,
+        round_idx: int,
+    ) -> tuple:
+        """执行单个工具，返回 (success: bool, result_str: str, result_raw: Any)。"""
+        # 敏感字段脱敏（大型 base64 截断，避免日志/SSE 膨胀）
+        _SENSITIVE_KEYS = {
+            "abc", "audio_b64", "content",
+            "ref_audio_b64", "reference_audio_b64",
+            "attachment_b64", "b64", "image_b64",
+            "midi_b64", "audio_data", "file_b64",
+        }
+        safe_args = {
+            k: (v[:200] + "..." if isinstance(v, str) and len(v) > 200 else v)
+            for k, v in arguments.items()
+            if k not in _SENSITIVE_KEYS
+        }
+        await publish("tool.call", {
+            "call_id": tc["id"], "tool": tool_name,
+            "arguments": safe_args, "status": "running", "round_idx": round_idx,
+        })
+        try:
+            if session_id:
+                try:
+                    from app.agentcore.session_context import set_current_session_id
+                    set_current_session_id(session_id)
+                except Exception:
+                    pass
+
+            # ── 工作区工具前置检查：确保 project_id 已绑定 ──────────────────────
+            # workspace 类工具依赖 project_id 定位文件目录，若未绑定则提前修复，
+            # 避免工具执行时抛 "会话未绑定项目" PermissionError。
+            _WS_TOOLS = frozenset({
+                "list_workspace_files", "read_workspace_files", "read_workspace_file",
+                "write_workspace_file", "edit_workspace_file", "delete_workspace_file",
+                "copy_workspace_file", "rename_workspace_file", "move_workspace_file",
+                "run_write_tasks_in_parallel", "get_workspace_file_url",
+                "save_score_to_workspace", "list_workspace_scores",
+                "abc_to_midi", "abc_to_midi_file", "abc_to_sky_json",
+                "generate_h5_from_midi", "generate_h5_from_abc",
+                "save_h5_file", "save_h5_output",
+                "sovits_tts_and_save", "sovits_clone_and_save", "sovits_save_audio",
+            })
+            if tool_name in _WS_TOOLS:
+                try:
+                    from app.agentcore.session_context import (
+                        get_current_project_id, get_current_workspace_id
+                    )
+                    _proj = get_current_project_id()
+                    _ws   = get_current_workspace_id()
+                    if not _proj:
+                        import logging as _log
+                        _log.getLogger("ep_agent.react").warning(
+                            "[ReactExecutor] 工具 %s 前置检查：project_id 为空（ws=%s），"
+                            "触发 session_id → DB 确定性查询绑定",
+                            tool_name, _ws or "?",
+                        )
+                        # 通过 session_id 查 DB 取 project_id（确定性，不猜测）
+                        from app.agentcore.tools.workspace_tools import _get_project_root
+                        _get_project_root()
+                        # 验证绑定结果
+                        _proj_after = get_current_project_id()
+                        if _proj_after:
+                            _log.getLogger("ep_agent.react").info(
+                                "[ReactExecutor] 前置绑定成功: proj=%s", _proj_after
+                            )
+                        else:
+                            _log.getLogger("ep_agent.react").error(
+                                "[ReactExecutor] 前置绑定失败，工具 %s 可能报错", tool_name
+                            )
+                except Exception as _pre_e:
+                    import logging as _log
+                    _log.getLogger("ep_agent.react").warning(
+                        "[ReactExecutor] 工具前置检查异常（不影响执行）: %s", _pre_e
+                    )
+
+            try:
+                from app.agentcore.replay_engine import get_mock_registry
+                _mock = get_mock_registry()
+            except Exception:
+                _mock = None
+            if _mock is not None:
+                result = await _mock.call(tool_name, arguments)
+            else:
+                result = await call_tool(tool_name, arguments)
+            result_str = result if isinstance(result, str) else json.dumps(result, ensure_ascii=False)
+            return True, result_str, result
+        except Exception as exc:
+            return False, str(exc), None

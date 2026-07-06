@@ -629,6 +629,7 @@ export function WorkspaceFileTree() {
   // load 始终从 ref 读取最新的 wsId/projId，不依赖闭包捕获的旧值
   // 这样无论是 fileTreeRefreshToken、ep:workspace-refresh 还是手动刷新，
   // 都能用到 restoreFromSessionId 异步完成后的最新 project_id
+  const loadTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const load = useCallback(async () => {
     const wsId   = wsIdRef.current
     const projId = projIdRef.current
@@ -648,25 +649,43 @@ export function WorkspaceFileTree() {
     finally   { setLoading(false) }
   }, []) // 空依赖：load 自身稳定，通过 ref 获取最新值
 
+  // 防抖加载：多个触发源（路径1/2/3）在同一帧内合并为一次请求
+  const debouncedLoad = useCallback(() => {
+    if (loadTimerRef.current) clearTimeout(loadTimerRef.current)
+    loadTimerRef.current = setTimeout(() => {
+      loadTimerRef.current = null
+      void load()
+    }, 80)
+  }, [load])
+
   // ── 触发加载的三条路径 ────────────────────────────────────────────────────────
 
-  // 路径 1：wsId 或 projId 变化时重新加载
-  // 用独立 effect 监听，确保 restoreFromSessionId 异步完成后能触发
+  // 路径 1：wsId 或 projId 真正变化时重新加载
+  // 加 prevRef guard：同一 projId 下新建话题时 router.replace 会导致 page 重挂载，
+  // 进而重复调用 setActiveProjectId，此处 guard 确保 projId 没变就不重复发请求。
+  const prevLoadKeyRef = useRef('')
   useEffect(() => {
-    if (activeWorkspaceId) void load()
-  }, [activeWorkspaceId, resolvedProjectId, load])
+    if (!activeWorkspaceId) return
+    const key = `${activeWorkspaceId}::${resolvedProjectId}`
+    if (key === prevLoadKeyRef.current) return   // 同 wsId+projId，跳过重复加载
+    prevLoadKeyRef.current = key
+    debouncedLoad()
+  }, [activeWorkspaceId, resolvedProjectId, debouncedLoad])
 
   // 路径 2：fileTreeRefreshToken 递增（文件上传/工具写文件后触发）
-  useEffect(() => { if (fileTreeRefreshToken > 0) void load() }, [fileTreeRefreshToken, load])
+  useEffect(() => { if (fileTreeRefreshToken > 0) debouncedLoad() }, [fileTreeRefreshToken, debouncedLoad])
 
   // 路径 3：ep:workspace-refresh 全局事件（SSE tool.call 成功后触发）
   useEffect(() => {
-    window.addEventListener('ep:workspace-refresh', load as EventListener)
-    return () => window.removeEventListener('ep:workspace-refresh', load as EventListener)
-  }, [load])
+    window.addEventListener('ep:workspace-refresh', debouncedLoad as EventListener)
+    return () => window.removeEventListener('ep:workspace-refresh', debouncedLoad as EventListener)
+  }, [debouncedLoad])
 
-  // 切换工作区或项目时重置展开状态（保证新项目展开第一层）
-  useEffect(() => { setExpanded(new Set()) }, [activeWorkspaceId, activeProjectId])
+  // 切换工作区或项目时重置展开状态 + 选中态（保证新项目展开第一层，清除旧选中残留）
+  useEffect(() => {
+    setExpanded(new Set())
+    setSelectedPath(null)
+  }, [activeWorkspaceId, activeProjectId])
 
   const withOp = useCallback(async (op: () => Promise<void>, errMsg: string) => {
     try   { await op(); await load() }

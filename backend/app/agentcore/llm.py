@@ -20,6 +20,8 @@ fix40 新增：
 from __future__ import annotations
 import asyncio
 import logging
+import json as _json
+import re as _re
 from typing import AsyncIterator, Literal
 from openai import AsyncOpenAI
 from app.config import config
@@ -47,6 +49,65 @@ _MAX_RETRIES = 2
 # 切换模型只需在 .env 中设置 LLM_MODEL / LLM_MODEL_LITE，无需改代码
 ModelTier = Literal["lite", "strong"]
 
+# ── 模型上下文窗口注册表（单位：tokens） ──────────────────────────────────────
+# 数据来源：硅基流动官方模型页 siliconflow.cn/models（2025-07 更新）
+# 未登记的模型回退到 _DEFAULT_CONTEXT_LIMIT
+_DEFAULT_CONTEXT_LIMIT = 128_000  # 保守兜底值（128K）
+
+_MODEL_CONTEXT_LIMITS: dict[str, int] = {
+    # ── 硅基流动 DeepSeek 系列 ──
+    "deepseek-ai/DeepSeek-V4-Pro":        1_049_000,
+    "deepseek-ai/DeepSeek-V4-Flash":      1_049_000,
+    "deepseek-ai/DeepSeek-V3.2":            164_000,
+    "deepseek-ai/DeepSeek-V3.1-Terminus":   164_000,
+    "deepseek-ai/DeepSeek-R1":              164_000,
+    "deepseek-ai/DeepSeek-R1-0528":         164_000,
+    # ── 硅基流动 Qwen 系列 ──
+    "Qwen/Qwen3.6-27B":                     262_000,
+    "Qwen/Qwen3.6-35B-A3B":                 262_000,
+    "Qwen/Qwen3.5-397B-A17B":               262_000,
+    "Qwen/Qwen2.5-72B-Instruct":            131_000,
+    "Qwen/QwQ-32B":                         131_000,
+    # ── 硅基流动 MiniMax ──
+    "MiniMax/MiniMax-M2.5":                 197_000,
+    # ── 硅基流动 GLM ──
+    "THUDM/GLM-5.1":                        205_000,
+    "THUDM/GLM-5.2":                      1_049_000,
+    "THUDM/glm-4-9b-chat":                   32_000,
+    # ── 硅基流动 Kimi ──
+    "moonshotai/Kimi-K2.5":                 262_000,
+    "moonshotai/Kimi-K2.6":                 262_000,
+    "moonshotai/Kimi-K2.7":                 262_000,
+    # ── 硅基流动 Step ──
+    "stepfun-ai/Step-3.5-Flash":            262_000,
+    # ── OpenAI / Anthropic（非硅基流动，作为兜底） ──
+    "gpt-4o":                               128_000,
+    "gpt-4o-mini":                          128_000,
+    "o3-mini":                              200_000,
+    "claude-opus-4-5":                      200_000,
+    "claude-sonnet-4-5":                    200_000,
+}
+
+
+def get_model_context_limit(model_id: str) -> int:
+    """
+    返回指定模型的上下文窗口大小（tokens）。
+    匹配顺序：精确匹配 → 短名称匹配（去掉 vendor/ 前缀）→ 兜底 _DEFAULT_CONTEXT_LIMIT。
+    """
+    if not model_id:
+        return _DEFAULT_CONTEXT_LIMIT
+    # 1. 精确匹配
+    if model_id in _MODEL_CONTEXT_LIMITS:
+        return _MODEL_CONTEXT_LIMITS[model_id]
+    # 2. 短名称匹配（如 "DeepSeek-V3.2" 匹配 "deepseek-ai/DeepSeek-V3.2"）
+    short = model_id.split("/")[-1].lower()
+    for key, limit in _MODEL_CONTEXT_LIMITS.items():
+        if key.split("/")[-1].lower() == short:
+            return limit
+    # 3. 兜底
+    _logger.debug("未找到模型 %s 的上下文窗口配置，使用默认值 %d", model_id, _DEFAULT_CONTEXT_LIMIT)
+    return _DEFAULT_CONTEXT_LIMIT
+
 
 def _resolve_model(tier: ModelTier = "strong") -> str:
     """根据 tier 返回实际模型名称。lite 回退逻辑：无配置则用 strong。"""
@@ -54,6 +115,11 @@ def _resolve_model(tier: ModelTier = "strong") -> str:
         lite = getattr(config, "LLM_MODEL_LITE", "") or ""
         return lite if lite else config.LLM_MODEL
     return config.LLM_MODEL
+
+
+def get_current_model_name(tier: ModelTier = "strong") -> str:
+    """公开接口：返回当前生效的模型名称（供 TraceCollector / pipeline.step 携带）。"""
+    return _resolve_model(tier)
 
 
 def get_llm_client() -> AsyncOpenAI:
@@ -178,8 +244,6 @@ async def complete_with_tools_stream(
     返回格式与 complete_with_tools 一致：
       {content, tool_calls, finish_reason}
     """
-    import json as _json
-
     model = _resolve_model("strong")  # Tool Calling 始终用 strong 模型
     stream = await _call_with_retry(
         lambda: get_llm_client().chat.completions.create(
@@ -204,6 +268,25 @@ async def complete_with_tools_stream(
     _in_tool_fragment = False  # 是否已进入 tool_call 残片区域（停止推送直到下一轮）
     _BUF_MAX = 16              # 缓冲区最大长度（足够检测 `<tool_call>` 前缀）
 
+    # ── 批量推送缓冲：积攒多个 token 后一次性推送，减少 SSE 帧数 ──────────────
+    # FLUSH_CHARS：积攒字符数阈值（约 3-5 个中文词 / 10-15 个英文词）
+    # FLUSH_INTERVAL：最大积攒时间（秒），超时强制推送，保证响应感
+    _FLUSH_CHARS    = 8       # 积攒 8 个字符后推送
+    _FLUSH_INTERVAL = 0.05   # 最多等待 50ms 强制推送
+    _pending_delta: list[str] = []
+    _pending_reasoning: list[str] = []
+    _last_flush = asyncio.get_event_loop().time()
+
+    async def _flush_pending():
+        nonlocal _last_flush
+        if _pending_delta:
+            await publish("message.delta", {"delta": "".join(_pending_delta)})
+            _pending_delta.clear()
+        if _pending_reasoning:
+            await publish("message.delta", {"delta": "", "reasoning_delta": "".join(_pending_reasoning)})
+            _pending_reasoning.clear()
+        _last_flush = asyncio.get_event_loop().time()
+
     async for chunk in stream:
         choice = chunk.choices[0] if chunk.choices else None
         if not choice:
@@ -212,49 +295,46 @@ async def complete_with_tools_stream(
         finish_reason = choice.finish_reason or finish_reason
         delta = choice.delta
 
-        # 推送 reasoning content（思考链，部分模型支持）
+        # 推送 reasoning content（思考链，部分模型支持）— 批量缓冲
         reasoning = getattr(delta, "reasoning_content", None)
         if reasoning:
-            await publish("message.delta", {"delta": "", "reasoning_delta": reasoning})
+            _pending_reasoning.append(reasoning)
 
-        # 推送普通 content（实时过滤 tool_call 残片）
+        # 推送普通 content（实时过滤 tool_call 残片）— 批量缓冲
         if delta.content:
             content_parts.append(delta.content)
             raw = delta.content
 
             # 若已进入残片区域，跳过推送（等待下一个 chunk 判断是否恢复）
             if _in_tool_fragment:
-                # 残片区域：只要 delta 里没有正常文字（仅有 `}` 或空白），继续跳过
-                import re as _re
                 if _re.fullmatch(r'[\s\}]*', raw):
                     continue
                 else:
-                    # 出现了正常文字，退出残片区域
                     _in_tool_fragment = False
 
             # 检测是否是孤立的 `}` 残片（最常见的脏 delta）
-            import re as _re
             if _re.fullmatch(r'[\s\}]+', raw):
-                # 纯 `}` / 空白：先缓冲，不立即推送
                 _delta_buf += raw
                 if len(_delta_buf) > _BUF_MAX:
                     _delta_buf = _delta_buf[-_BUF_MAX:]
-                # 判断是否是 tool_call JSON 尾部残片：
-                # 若缓冲区全是 `}` / 空白 且 tc_accum 非空（说明有工具调用在流中），则标记为残片
                 if tc_accum and _re.fullmatch(r'[\s\}]+', _delta_buf):
                     _in_tool_fragment = True
                     continue
-                # 否则（tc_accum 为空，说明是正常文字的 `}`，如 JSON 输出），正常推送
-                await publish("message.delta", {"delta": raw})
+                # 正常 `}` 字符加入缓冲
+                _pending_delta.append(raw)
             elif "<tool_call>" in raw or "</tool_call>" in raw:
-                # 明确的 tool_call XML 标记，直接跳过
                 _in_tool_fragment = True
                 continue
             else:
-                # 正常文字 delta，重置缓冲区并推送
                 _delta_buf = raw[-_BUF_MAX:]
                 _in_tool_fragment = False
-                await publish("message.delta", {"delta": raw})
+                _pending_delta.append(raw)
+
+        # 批量推送判断：字符数超阈值 OR 超时，立即 flush
+        _now = asyncio.get_event_loop().time()
+        _pending_len = sum(len(s) for s in _pending_delta) + sum(len(s) for s in _pending_reasoning)
+        if _pending_len >= _FLUSH_CHARS or (_pending_len > 0 and _now - _last_flush >= _FLUSH_INTERVAL):
+            await _flush_pending()
 
         # 累积 tool_calls（流式下分片到达）
         if delta.tool_calls:
@@ -274,6 +354,9 @@ async def complete_with_tools_stream(
                     if tc_delta.function.arguments:
                         tc_accum[idx]["arguments_parts"].append(tc_delta.function.arguments)
 
+    # 流结束后 flush 剩余缓冲
+    await _flush_pending()
+
     # 汇总 tool_calls
     tool_calls = [
         {
@@ -291,6 +374,7 @@ async def complete_with_tools_stream(
         "content": "".join(content_parts),
         "tool_calls": tool_calls,
         "finish_reason": finish_reason,
+        "model": model,   # T2: 携带模型名，供 TraceCollector message.completed 回填
     }
 
 
@@ -334,4 +418,5 @@ async def complete_with_tools(
             for tc in (msg.tool_calls or [])
         ],
         "finish_reason": resp.choices[0].finish_reason,
+        "model": model,   # T2: 携带模型名，供 TraceCollector message.completed 回填
     }

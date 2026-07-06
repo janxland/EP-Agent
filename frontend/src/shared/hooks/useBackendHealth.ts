@@ -35,7 +35,7 @@ const INITIAL_HEALTH: BackendHealth = {
   lastChecked: null,
 }
 
-export function useBackendHealth(intervalMs = 30_000): BackendHealth {
+export function useBackendHealth(intervalMs = 60_000): BackendHealth {
   const [health, setHealth] = useState<BackendHealth>(INITIAL_HEALTH)
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
@@ -65,10 +65,11 @@ export function useBackendHealth(intervalMs = 30_000): BackendHealth {
   useEffect(() => {
     // 立即检查一次
     check()
-    // 定期轮询
+    // 低频轮询（仅用于感知后端恢复，正常情况不需要频繁检查）
     timerRef.current = setInterval(check, intervalMs)
     return () => {
       if (timerRef.current) clearInterval(timerRef.current)
+      timerRef.current = null
     }
   }, [check, intervalMs])
 

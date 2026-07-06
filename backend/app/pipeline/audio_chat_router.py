@@ -14,7 +14,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
 from app.pipeline import service
-from app.pipeline.router import _make_publisher
+from app.pipeline.routers.hub import _make_publisher
 
 router = APIRouter(prefix="/api/sessions", tags=["audio-chat"])
 

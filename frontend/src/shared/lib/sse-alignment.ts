@@ -77,10 +77,14 @@ export class SequenceGuard {
   private lastSeq = -1
   private seenIds = new Set<string>()
 
-  check(event: { id?: string; sequence?: number }): SequenceCheckResult {
+  check(event: { id?: string; sequence?: number; payload?: { _replay?: boolean } }): SequenceCheckResult {
     // 去重：同一 id 不处理两次
     if (event.id && this.seenIds.has(event.id)) return 'duplicate'
     if (event.id) this.seenIds.add(event.id)
+
+    // FE-5: replay 事件携带 _replay=true，序列号从历史基准继续递增，
+    // 但重连时前端 lastSeq 已重置为 -1，直接接受即可，无需校验乱序。
+    if (event.payload?._replay) return 'ok'
 
     // 序号检查（sequence 字段存在且 > 0 时才检查）
     if (event.sequence !== undefined && event.sequence > 0) {
