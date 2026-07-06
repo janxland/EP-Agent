@@ -776,6 +776,20 @@ export async function deleteSessionTraces(sessionId: string): Promise<{ ok: bool
   return res.json()
 }
 
+/** 导出 session 最近 N 条 trace 的完整审计链路 JSON（后端返回 application/json 字节流） */
+export async function exportSessionTraces(sessionId: string, limit = 10): Promise<Blob> {
+  const res = await fetch(`${BASE_URL}/api/sessions/${sessionId}/traces/export?limit=${limit}`)
+  if (!res.ok) throw new Error(`HTTP ${res.status}: ${await res.text()}`)
+  return res.blob()
+}
+
+/** 导出单条 trace 的完整审计链路 JSON（含 raw_spans，适合精确分析单次执行） */
+export async function exportSingleTrace(traceId: string): Promise<Blob> {
+  const res = await fetch(`${BASE_URL}/api/traces/${traceId}/export`)
+  if (!res.ok) throw new Error(`HTTP ${res.status}: ${await res.text()}`)
+  return res.blob()
+}
+
 // ─── Voice Clone（音色克隆）──────────────────────────────────────────────────
 
 export interface VoiceUploadResult {

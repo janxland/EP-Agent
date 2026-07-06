@@ -18,7 +18,8 @@ import { useTimelineStore } from '@/features/chat/store/timeline.store'
 import type { SpanDto, TraceDto } from '@/shared/types/trace.types'
 import { DOMAIN_LABEL } from '@/shared/types/trace.types'
 import type { ReplayResponse } from '@/shared/lib/api'
-import { extractWorkflow, deleteSessionTraces, listTraceReplays, getTraceDetail } from '@/shared/lib/api'
+import { extractWorkflow, deleteSessionTraces, listTraceReplays, getTraceDetail, exportSingleTrace } from '@/shared/lib/api'
+import { downloadBlob } from '@/shared/lib/utils'
 import { WorkflowPanel } from './WorkflowPanel'
 
 // ─── 常量 ─────────────────────────────────────────────────────────────────────
@@ -1083,6 +1084,26 @@ export function PipelineTimeline({ sessionId }: PipelineTimelineProps) {
                       <span className={`text-[10px] font-medium shrink-0 ${TRACE_STATUS_COLOR[activeTrace.status] ?? 'text-gray-400'}`}>
                         {activeTrace.status}
                       </span>
+                      <button
+                        onClick={async () => {
+                          try {
+                            const blob = await exportSingleTrace(activeTrace.trace_id)
+                            const ts = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19)
+                            downloadBlob(blob, `trace_${activeTrace.trace_id.slice(0, 8)}_${ts}.json`)
+                          } catch (e) {
+                            console.error('[exportTrace]', e)
+                            alert(`导出失败：${e instanceof Error ? e.message : String(e)}`)
+                          }
+                        }}
+                        title="导出当前 trace 的完整审计 JSON（含 raw_spans）"
+                        className="shrink-0 flex items-center gap-1 text-[10px] text-gray-400 hover:text-blue-500 hover:bg-blue-50 rounded px-1.5 py-0.5 transition-colors"
+                      >
+                        <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+                            d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+                        </svg>
+                        导出
+                      </button>
                     </div>
                   )}
 

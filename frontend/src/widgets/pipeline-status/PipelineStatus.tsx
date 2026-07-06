@@ -2,6 +2,8 @@
 
 import { useState } from 'react'
 import { useScoreStore, type PipelineLog } from '@/entities/session/store'
+import { exportSessionTraces, exportSingleTrace } from '@/shared/lib/api'
+import { downloadBlob } from '@/shared/lib/utils'
 
 // 工具名称 → 可读标签（与后端 tools/ 注册工具一一对应）
 const TOOL_LABELS: Record<string, string> = {
@@ -39,20 +41,6 @@ const TOOL_LABELS: Record<string, string> = {
 }
 
 /**
- * 下载 JSON blob 到本地
- */
-function _downloadBlob(blob: Blob, filename: string) {
-  const url = URL.createObjectURL(blob)
-  const a   = document.createElement('a')
-  a.href     = url
-  a.download = filename
-  document.body.appendChild(a)
-  a.click()
-  document.body.removeChild(a)
-  URL.revokeObjectURL(url)
-}
-
-/**
  * 导出 session 最近 N 条 trace 的完整审计链路 JSON
  * 调用后端 GET /api/sessions/{session_id}/traces/export?limit=N
  * 返回大模型友好格式：每条 trace 含完整 react_chain（入参/出参不截断）
@@ -60,11 +48,9 @@ function _downloadBlob(blob: Blob, filename: string) {
 async function exportSessionTracesJson(sessionId: string, limit = 10): Promise<void> {
   if (!sessionId) return
   try {
-    const res = await fetch(`/api/sessions/${sessionId}/traces/export?limit=${limit}`)
-    if (!res.ok) throw new Error(`HTTP ${res.status}: ${await res.text()}`)
-    const blob = await res.blob()
+    const blob = await exportSessionTraces(sessionId, limit)
     const ts   = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19)
-    _downloadBlob(blob, `session_${sessionId.slice(0, 8)}_traces_${ts}.json`)
+    downloadBlob(blob, `session_${sessionId.slice(0, 8)}_traces_${ts}.json`)
   } catch (e) {
     console.error('[exportSessionTracesJson]', e)
     alert(`导出失败：${e instanceof Error ? e.message : String(e)}`)
@@ -79,11 +65,9 @@ async function exportSessionTracesJson(sessionId: string, limit = 10): Promise<v
 async function exportSingleTraceJson(traceId: string): Promise<void> {
   if (!traceId) return
   try {
-    const res = await fetch(`/api/traces/${traceId}/export`)
-    if (!res.ok) throw new Error(`HTTP ${res.status}: ${await res.text()}`)
-    const blob = await res.blob()
+    const blob = await exportSingleTrace(traceId)
     const ts   = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19)
-    _downloadBlob(blob, `trace_${traceId.slice(0, 8)}_${ts}.json`)
+    downloadBlob(blob, `trace_${traceId.slice(0, 8)}_${ts}.json`)
   } catch (e) {
     console.error('[exportSingleTraceJson]', e)
     alert(`导出失败：${e instanceof Error ? e.message : String(e)}`)
