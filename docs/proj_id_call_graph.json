@@ -1,0 +1,209 @@
+{
+  "title": "EP-Agent proj_id 注入调用链图 v1.1",
+  "generated_at": "2026-07-06",
+  "description": "追踪 workspace_id / project_id 从 HTTP 入口到 workspace_tool 文件系统操作的完整注入链路，记录每个节点的入参/出参/风险/修复状态",
+
+  "call_chain": "POST /chat → service.universal_chat → universal_runner.run → _dispatch → RunContext.__init__ → ReactExecutor._run_one_tool → workspace_tool → _get_project_root → session_context.get_current_project_id → DB.get_session_info",
+
+  "injection_timeline": {
+    "T1": {
+      "where": "pipeline/service.py L373-374",
+      "when": "进入 universal_runner.run() 之前",
+      "ops": ["set_session_context(get_session, save_session)", "set_current_session_id(session_id)"],
+      "coverage": "insert_message / get_session_info / universal_runner 全链路"
+    },
+    "T2": {
+      "where": "agentcore/universal_runner.py L411-412",
+      "when": "sovits 附件落盘前（冗余防御）",
+      "ops": ["set_current_session_id(session_id)"],
+      "coverage": "sovits 域附件落盘"
+    },
+    "T3": {
+      "where": "agentcore/run_context.py L81",
+      "when": "RunContext 对象构造时",
+      "ops": ["set_current_session_id(self.session_id)"],
+      "coverage": "每个 Agent 分发前"
+    },
+    "T4": {
+      "where": "agentcore/react_executor.py L514",
+      "when": "每次工具调用前（最细粒度）",
+      "ops": ["set_current_session_id(session_id)"],
+      "coverage": "所有 workspace_tool 调用，防异步上下文漂移"
+    }
+  },
+
+  "nodes": [
+    {
+      "id": "N1",
+      "label": "POST /sessions/{id}/chat",
+      "file": "pipeline/routers/session.py",
+      "in": {
+        "session_id": "str",
+        "workspace_id": "str? (可选，前端传入)",
+        "project_id": "str? (可选，前端传入)",
+        "message": "str"
+      },
+      "out": {
+        "final_ws": "str (非空)",
+        "final_proj": "str (非空)"
+      },
+      "key_ops": [
+        "① _ensure_project_binding(session_id, req_ws_id, req_proj_id)",
+        "   → final_ws/final_proj 写入 DB（upsert_session + ensure_project）",
+        "   → ws_id 缺失时从 projects 表反查 workspace_id",
+        "② service.universal_chat(session_id, workspace_id=final_ws, project_id=final_proj)"
+      ],
+      "risk": "NONE",
+      "verdict": "✅ 守门完整。final_proj 必非空才能进入 service，DB 中 project_id 已确保写入"
+    },
+    {
+      "id": "N2",
+      "label": "service.universal_chat()",
+      "file": "pipeline/service.py L330~",
+      "in": {
+        "session_id": "str",
+        "workspace_id": "str",
+        "project_id": "str"
+      },
+      "out": "SSE stream (AsyncGenerator)",
+      "key_ops": [
+        "① [T1] set_session_context(get_session, save_session)",
+        "② [T1] set_current_session_id(session_id)  ← ContextVar 最早注入点",
+        "③ _db.get_session_info(session_id) → _msg_ws, _msg_proj",
+        "④ _db.insert_message(workspace_id=_msg_ws, project_id=_msg_proj)",
+        "⑤ universal_runner.run(session_id, session_getter, session_saver, ...)"
+      ],
+      "risk": "NONE",
+      "verdict": "✅ ContextVar 在 insert_message 之前注入，全链路 DB 操作均可读到正确 session_id"
+    },
+    {
+      "id": "N3",
+      "label": "universal_runner.run()",
+      "file": "agentcore/universal_runner.py L95~",
+      "in": {
+        "session_id": "str",
+        "session_getter": "Callable",
+        "session_saver": "Callable",
+        "attachment_b64": "str?",
+        "attachment_name": "str?"
+      },
+      "out": {
+        "domain": "str",
+        "result": "dict"
+      },
+      "key_ops": [
+        "① L126: _db.get_session_info() → workspace_id, project_id (局部变量)",
+        "② L357-360: h5 附件落盘 → _save_attachment_to_workspace(b64, name, workspace_id, project_id) ✅已修复",
+        "③ L389-392: h5_edit 附件落盘 → _save_attachment_to_workspace(b64, name, workspace_id, project_id) ✅已修复",
+        "④ [T2] L412: set_current_session_id(session_id)  ← sovits 分支冗余防御",
+        "⑤ L425-428: sovits 附件落盘 → _save_attachment_to_workspace(b64, name, workspace_id, _sov_proj_id) ✅已正确",
+        "⑥ _dispatch(domain, ctx, workspace_id=workspace_id)"
+      ],
+      "risk": "RISK-4 已修复",
+      "verdict": "✅ L359/L391 已从 project_id='' 修正为 project_id=project_id（局部变量）",
+      "fix_applied": "2026-07-06: L359, L391 传入 project_id 局部变量替换空字符串"
+    },
+    {
+      "id": "N4",
+      "label": "_dispatch() / _dispatch_v5()",
+      "file": "agentcore/universal_runner.py L220~",
+      "in": {
+        "domain": "str",
+        "session_id": "str",
+        "workspace_id": "str",
+        "project_id": "str",
+        "ctx": "RunContext"
+      },
+      "out": "dict",
+      "key_ops": [
+        "① RunContext(session_id, workspace_id, project_id) 构造",
+        "② [T3] RunContext.__init__ → set_current_session_id(self.session_id)",
+        "③ agent.run_with_ctx(ctx)"
+      ],
+      "risk": "NONE",
+      "verdict": "✅ RunContext 构造时第三次注入 session_id，workspace_id/project_id 作为字段保存"
+    },
+    {
+      "id": "N5",
+      "label": "ReactExecutor._run_one_tool()",
+      "file": "agentcore/react_executor.py L500~",
+      "in": {
+        "tool_name": "str",
+        "tool_args": "dict",
+        "session_id": "str"
+      },
+      "out": "tool_result: Any",
+      "key_ops": [
+        "① [T4] L514: set_current_session_id(session_id)  ← 每次工具调用前重新注入",
+        "② L537: _proj = get_current_project_id()  ← 前置检查",
+        "③ L539: if not _proj → _get_project_root()  ← 触发 DB 查询兜底绑定",
+        "④ L550: _proj_after = get_current_project_id()  ← 验证绑定结果",
+        "⑤ tool_fn(**tool_args)  ← 实际工具执行"
+      ],
+      "risk": "NONE",
+      "verdict": "✅ 四重注入（T1~T4）保障，每次工具调用前均重新注入，防止 asyncio 上下文漂移"
+    },
+    {
+      "id": "N6",
+      "label": "_get_project_root()",
+      "file": "agentcore/tools/workspace_tools.py L99~",
+      "in": {},
+      "out": "Path | None",
+      "key_ops": [
+        "Step1: get_current_project_id() → DB查询(sid) → project_id",
+        "        get_current_workspace_id() → DB查询(sid) → workspace_id",
+        "        若 proj_id & ws_id 均非空 → mkdir + return Path  ✅",
+        "Step2: get_current_session_id() → _db.get_session_info(sid) → ws/proj",
+        "        若 db_proj & db_ws 非空 → mkdir + return Path  ✅",
+        "Step3: 均为空 → log.error + return None → 调用方抛 PermissionError"
+      ],
+      "risk": "RISK-2 (已知，守门覆盖)",
+      "verdict": "⚠️ Step3 触发条件：session 未经 _ensure_project_binding 写入 project_id。\n正常 /chat /convert /edit 路由均有守门，files.py 直接用路径参数不走此函数。\n非标准入口（脚本/测试）需手动确保 DB 中 project_id 非空。"
+    },
+    {
+      "id": "N7",
+      "label": "get_current_project_id() / get_current_workspace_id()",
+      "file": "agentcore/session_context.py L91~ / L75~",
+      "in": {},
+      "out": "str",
+      "key_ops": [
+        "① sid = _current_session_id_var.get()  ← ContextVar（线程/协程隔离）",
+        "② if not sid: return ''  ← 安全降级",
+        "③ _db.get_session_info(sid).get('project_id'/'workspace_id') or ''"
+      ],
+      "risk": "LOW",
+      "verdict": "✅ 每次查 DB 确保最新值，不依赖内存缓存。ContextVar 为空时安全返回空字符串。"
+    }
+  ],
+
+  "risks_final": [
+    {
+      "id": "RISK-1", "severity": "LOW", "status": "✅ 已确认无问题",
+      "location": "universal_runner.py L126~L412",
+      "desc": "局部变量 workspace_id/project_id 已从 DB 读取，ContextVar 依赖 service.py T1 注入。asyncio ContextVar 不因 await 丢失，T1 注入覆盖整个请求生命周期。"
+    },
+    {
+      "id": "RISK-2", "severity": "MEDIUM", "status": "✅ 守门覆盖所有写操作入口",
+      "location": "_get_project_root() Step3",
+      "desc": "session 未绑定 project_id 时工具报 PermissionError。",
+      "guarded_routes": ["POST /chat ✅", "POST /convert ✅", "POST /edit ✅"],
+      "unguarded_routes": ["files.py — 直接路径操作，不走 _get_project_root，无需守门 ✅"]
+    },
+    {
+      "id": "RISK-3", "severity": "LOW", "status": "✅ 有兜底",
+      "location": "session_context.py get_current_project_id()",
+      "desc": "ContextVar session_id 为空时返回空字符串。T4 每次工具调用前注入，正常路径不触发。"
+    },
+    {
+      "id": "RISK-4", "severity": "MEDIUM", "status": "✅ 已修复 (2026-07-06)",
+      "location": "universal_runner.py L359, L391",
+      "desc": "h5 域附件落盘调用 _save_attachment_to_workspace(project_id='') 传入空字符串，导致 write_workspace_file 走 _get_project_root() DB 查询兜底路径，而非直接使用已知的 project_id。",
+      "fix": "L359, L391: project_id='' → project_id=project_id（传入局部变量）"
+    }
+  ],
+
+  "files_router_note": {
+    "desc": "files.py 的 8 个路由（/workspaces/{ws_id}/files）直接用路径参数构造文件系统路径，不走 _get_project_root() 和 ContextVar，无需守门。这是正确的设计：文件管理 API 通过 URL 参数显式传入 workspace_id/project_id，与 Agent 工具链的 ContextVar 机制相互独立。",
+    "verdict": "✅ 无问题"
+  }
+}

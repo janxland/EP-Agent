@@ -1,0 +1,362 @@
+{
+  "project": "EP-Agent v5.2 全模块审计优化",
+  "updated": "2026-07-05",
+  "legend": {
+    "status": [
+      "todo",
+      "in_progress",
+      "done",
+      "skipped"
+    ],
+    "severity": [
+      "critical",
+      "high",
+      "medium",
+      "low"
+    ]
+  },
+  "tasks": [
+    {
+      "id": "R5",
+      "module": "react_executor",
+      "severity": "critical",
+      "status": "done",
+      "title": "_consecutive_all_fail 死代码：全工具失败无退出保护",
+      "fix": "添加递增逻辑 + for-else 超轮退出 + exceeded_rounds 标志"
+    },
+    {
+      "id": "R1",
+      "module": "react_executor",
+      "severity": "high",
+      "status": "done",
+      "title": "_clean_content 末尾 } 正则误删合法 JSON",
+      "fix": "改为仅清理独占整行的孤立 }"
+    },
+    {
+      "id": "R3",
+      "module": "react_executor",
+      "severity": "low",
+      "status": "done",
+      "title": "_FILE_WRITE_TOOLS 在循环内每轮重建 set",
+      "fix": "提取为模块级 frozenset 常量"
+    },
+    {
+      "id": "R6",
+      "module": "react_executor",
+      "severity": "medium",
+      "status": "done",
+      "title": "超轮退出时 final_content 为空，调用方无法感知",
+      "fix": "增加 exceeded_rounds 标志位"
+    },
+    {
+      "id": "R2",
+      "module": "react_executor",
+      "severity": "medium",
+      "status": "todo",
+      "title": "_run_one_tool 是 for 循环内闭包，round_idx 通过闭包捕获",
+      "fix": "提取为 ReactExecutor 静态方法，round_idx 通过参数传入"
+    },
+    {
+      "id": "P1",
+      "module": "replay_engine",
+      "severity": "low",
+      "status": "done",
+      "title": "_hash_args 与 trace_collector 完全重复定义",
+      "fix": "改为从 trace_collector 导入"
+    },
+    {
+      "id": "P2",
+      "module": "replay_engine+agent_nodes",
+      "severity": "low",
+      "status": "done",
+      "title": "_noop_publish 在 replay_engine 和 agent_nodes 各定义一次",
+      "fix": "提取到 graph_engine.py 导出"
+    },
+    {
+      "id": "P3",
+      "module": "replay_engine",
+      "severity": "medium",
+      "status": "done",
+      "title": "source_trace['user_message'] 直接下标访问，可能 KeyError",
+      "fix": "改为 .get('user_message', '')"
+    },
+    {
+      "id": "T1",
+      "module": "trace_collector",
+      "severity": "low",
+      "status": "done",
+      "title": "_calc_duration_ms 只支持 UTC 时区格式",
+      "fix": "改用 datetime.fromisoformat() 或 dateutil.parser.parse()"
+    },
+    {
+      "id": "T2",
+      "module": "trace_collector",
+      "severity": "low",
+      "status": "done",
+      "title": "model span 的 model 字段始终为空（pipeline.step 不携带 model）",
+      "fix": "llm.py 新增 get_current_model_name() 公开接口；react_executor pipeline.step 推送时携带 model 字段；complete_with_tools_stream/complete_with_tools 返回 dict 补充 model 字段供 message.completed 回填"
+    },
+    {
+      "id": "RC2",
+      "module": "role_config",
+      "severity": "high",
+      "status": "done",
+      "title": "agent_file 字段声明但从未加载，专属角色 Prompt 完全失效",
+      "fix": "新增 load_agent_prompt() 函数"
+    },
+    {
+      "id": "RC6",
+      "module": "role_config",
+      "severity": "medium",
+      "status": "done",
+      "title": "to_frontend_list 未过滤 enabled=False 的角色",
+      "fix": "添加 if r.enabled 过滤"
+    },
+    {
+      "id": "RC3",
+      "module": "role_config",
+      "severity": "low",
+      "status": "skipped",
+      "title": "music_producer/voice_cloner 没有对应 .agent 文件",
+      "fix": "已确认 audio-producer.agent / voice-clone-expert.agent 文件存在（backend/agent/agents/），RC2 的 load_agent_prompt() 已可加载；system_prompt_extra 已足够，无需额外操作"
+    },
+    {
+      "id": "CROSS-1",
+      "module": "supervisor+reflect",
+      "severity": "high",
+      "status": "done",
+      "title": "_find_last_real_node 在两个文件完全重复定义",
+      "fix": "reflect_agent 改为从 supervisor_agent 导入"
+    },
+    {
+      "id": "CROSS-2",
+      "module": "agent_nodes+replay",
+      "severity": "low",
+      "status": "done",
+      "title": "_noop_publish 重复定义",
+      "fix": "提取到 graph_engine.py 统一导出"
+    },
+    {
+      "id": "CROSS-3",
+      "module": "supervisor_agent",
+      "severity": "medium",
+      "status": "done",
+      "title": "_heuristic_fallback 中 h5 关键词硬编码",
+      "fix": "改为复用 _match_keywords()"
+    },
+    {
+      "id": "AGENT-1",
+      "module": "base_agent",
+      "severity": "low",
+      "status": "done",
+      "title": "7 个 Agent 各自实现 run_with_ctx 的 TodoManager 初始化样板（35行重复）",
+      "fix": "提升到 BaseAgent.run_with_ctx() 基类默认实现"
+    },
+    {
+      "id": "AGENT-2",
+      "module": "all_agents",
+      "severity": "medium",
+      "status": "done",
+      "title": "各 Agent 的 run_with_ctx 中 session_getter/saver/convert_fn 仍各自解包，未统一",
+      "fix": "RunContext 新增 session_getter/session_saver @property（fallback 到 db.get_session/save_session）；convert/create/edit/query 4 个 Agent 的 run_with_ctx 改用 ctx.session_getter/ctx.session_saver，消除各自 3 行重复解包样板"
+    },
+    {
+      "id": "AGENT-3",
+      "module": "all_agents",
+      "severity": "medium",
+      "status": "todo",
+      "title": "各 Agent run() 方法仍接收散参数（13+个），未完全迁移到 RunContext 接口",
+      "fix": "Phase 2 迁移：各 Agent run(self, ctx) 直接使用 ctx 字段，删除 run_with_ctx 适配层"
+    },
+    {
+      "id": "AGENT-4",
+      "module": "h5_agent",
+      "severity": "medium",
+      "status": "done",
+      "title": "h5_agent run_with_ctx 未传入 attachment_b64/attachment_content，H5 Agent 无法处理内联附件",
+      "fix": "补充 attachment_b64=ctx.attachment_b64, attachment_content=ctx.attachment_content"
+    },
+    {
+      "id": "AGENT-5",
+      "module": "audio_agent",
+      "severity": "medium",
+      "status": "done",
+      "title": "audio_agent run_with_ctx 中 audio_chat_fn fallback 为 lambda 返回 {}，静默失败",
+      "fix": "改为抛出明确错误或记录警告，让调用方感知 audio_chat_fn 未注入"
+    },
+    {
+      "id": "GRAPH-1",
+      "module": "graph_engine",
+      "severity": "low",
+      "status": "done",
+      "title": "graph.node_enter/exit 事件携带 visited 列表，大图时 SSE 载荷随步数线性增长",
+      "fix": "只传递 visited[-3:] 最近3步，或改为传递 step_count"
+    },
+    {
+      "id": "GRAPH-2",
+      "module": "agent_nodes",
+      "severity": "low",
+      "status": "done",
+      "title": "注释示例中残留 'new_domain' 占位文字",
+      "fix": "清理注释示例"
+    },
+    {
+      "id": "SUPER-1",
+      "module": "supervisor_agent",
+      "severity": "low",
+      "status": "done",
+      "title": "supervisor LLM 调用使用 tier='lite'，但 lite 模型 JSON 解析能力弱，决策准确率有风险",
+      "fix": "已在上一阶段修复：tier 改为 'standard'，增加 JSON 解析重试循环 ×2"
+    },
+    {
+      "id": "REPLAY-1",
+      "module": "replay_engine",
+      "severity": "low",
+      "status": "skipped",
+      "title": "fixture miss 时只记录内存，不推送 SSE，前端无法实时感知哪些工具缺失 fixture",
+      "fix": "debug-only 功能，影响范围仅限开发调试，不影响生产链路；低优先级，暂不处理"
+    }
+  ],
+  "frontend_tasks": [
+    {
+      "id": "FE-1",
+      "module": "chat.store.ts",
+      "severity": "high",
+      "status": "done",
+      "title": "handleSSEEvent 无 try/catch，单个事件异常中断整个 SSE 处理循环",
+      "fix": "在 handleSSEEvent switch 外层包裹 try/catch，异常时 console.error 并继续处理后续事件"
+    },
+    {
+      "id": "FE-2",
+      "module": "chat.store.ts + react_executor.py",
+      "severity": "high",
+      "status": "done",
+      "title": "FILE_OP_TOOLS 前后端各维护一份（chat.store 内联 Set + react_executor 模块级 frozenset），新增工具必须两处同步",
+      "fix": "chat.store 中将内联 new Set([...]) 提取为模块级常量 FILE_OP_TOOLS，加注释指向后端同步点，降低漂移风险"
+    },
+    {
+      "id": "FE-3",
+      "module": "chat.store.ts",
+      "severity": "medium",
+      "status": "done",
+      "title": "run.aborted SSE 事件检查 status === 'running'，但 abortRun() 已提前将 status 置 idle，导致 SSE 事件永远不匹配",
+      "fix": "run.aborted 改为无条件幂等处理：commitStreamMessage() + finishRun()，不再检查 status"
+    },
+    {
+      "id": "FE-4",
+      "module": "api.ts subscribeToSession",
+      "severity": "medium",
+      "status": "done",
+      "title": "onmessage 触发后立即将 retryCount 重置为 0，若紧接着 onerror 触发，下次重连退避间隔被错误重置为 2s",
+      "fix": "retryCount 重置移至 onerror 内：仅在连接稳定（无 onerror）超过 5s 后才重置，改用 resetTimer 延迟重置"
+    },
+    {
+      "id": "FE-5",
+      "module": "router.py SSE replay + sse-alignment.ts SequenceGuard",
+      "severity": "medium",
+      "status": "done",
+      "title": "SSE replay 推送序列号从 0 重置，而 _sequences[session_id] 已增长，重连后 SequenceGuard 产生大量虚假乱序告警",
+      "fix": "sse_stream replay 阶段推送事件时，序列号从 _sequences[session_id] 当前值继续递增（而非从 0 重置）；前端 SequenceGuard 对 _replay=true 事件跳过序列校验"
+    },
+    {
+      "id": "FE-6",
+      "module": "trace.types.ts DOMAIN_LABEL",
+      "severity": "low",
+      "status": "done",
+      "title": "DOMAIN_LABEL 前端硬编码 domain→中文标签，与后端 domain_config.py 各自维护，已有 /api/health/domains 接口但未使用",
+      "fix": "DOMAIN_LABEL 保留为静态兜底，新增 getDomainLabel(domain) 函数：优先从 tool-registry.ts fetchDomainRegistry() 缓存读取，缺失时降级到硬编码 DOMAIN_LABEL"
+    }
+  ],
+  "render_tasks": [
+    {
+      "id": "RENDER-1",
+      "module": "ChatPanel.tsx",
+      "severity": "critical",
+      "status": "done",
+      "title": "HTTP 历史拉取直接 setState 覆盖，绕过 setMessages 合并逻辑，导致 SSE replay 消息被覆盖",
+      "root_cause": "ChatPanel.tsx 第200行用 useChatStore.setState({ messages: chatMsgs }) 直接覆盖 store，而 SSE replay（message.history 事件）可能已先到并追加了消息。HTTP 返回后直接覆盖导致 SSE 已注入的消息丢失（竞态场景）。",
+      "fix": "改为 useChatStore.getState().setMessages(chatMsgs)，触发 setMessages 内部的合并去重逻辑：以 HTTP 历史为基础，追加 SSE 已注入但 HTTP 未包含的消息，并按 createdAt 排序。",
+      "files_changed": ["EP-Agent/frontend/src/widgets/chat-panel/ChatPanel.tsx"],
+      "completed_at": "2026-07-05"
+    },
+    {
+      "id": "RENDER-2",
+      "module": "ChatPanel.tsx",
+      "severity": "critical",
+      "status": "done",
+      "title": "HTTP 路径 tool_calls 解析结果为 unknown[]，缺少 ToolCall[] 类型断言，刷新后工具卡片渲染报 TypeScript 类型错误",
+      "root_cause": "ChatPanel.tsx 历史消息映射中 toolCalls 声明为 unknown[]，spread 到 assistant 消息对象时与 ChatAssistantMessage.tool_calls: ToolCall[] 类型不匹配，运行时访问 tc.function.name 可能报错。",
+      "fix": "toolCalls 声明改为 ToolCall[] | undefined，JSON.parse 和 Array.isArray 分支均加 as ToolCall[] 断言。顶部新增 import type { ToolCall } from '@/features/chat/types/chat.types'。",
+      "files_changed": ["EP-Agent/frontend/src/widgets/chat-panel/ChatPanel.tsx"],
+      "completed_at": "2026-07-05"
+    },
+    {
+      "id": "RENDER-3",
+      "module": "ChatPanel.tsx",
+      "severity": "high",
+      "status": "done",
+      "title": "tool 消息 tool_call_id 为空时仍保留，buildToolResultMap 无法关联，工具卡片孤立显示",
+      "root_cause": "原过滤条件 .filter(m => m.role === 'tool' || m.content?.trim()) 对 tool 消息只检查 content 非空，未检查 tool_call_id。空 tool_call_id 的 tool 消息无法被 buildToolResultMap 通过 map.set(t.tool_call_id, t) 关联到 assistant，导致工具卡片孤立或重复显示。",
+      "fix": "过滤条件改为：tool 消息必须 tool_call_id?.trim() 非空；assistant 消息允许 content 为空但必须有 tool_calls；user 消息必须 content 非空。",
+      "files_changed": ["EP-Agent/frontend/src/widgets/chat-panel/ChatPanel.tsx"],
+      "completed_at": "2026-07-05"
+    },
+    {
+      "id": "RENDER-4",
+      "module": "ChatPanel.tsx",
+      "severity": "high",
+      "status": "done",
+      "title": "assistant 纯工具调用消息（content='' 但有 tool_calls）在 HTTP 路径被过滤掉，刷新后工具卡片消失",
+      "root_cause": "原过滤条件 .filter(m => m.role === 'tool' || m.content?.trim()) 对 assistant 消息只检查 content 非空，纯工具调用轮次（content='' 但有 tool_calls）被过滤掉，刷新后该轮次的工具卡片全部消失。",
+      "fix": "assistant 过滤条件改为：content 非空 OR tool_calls 非空，与 SSE replay 路径（chat.store.ts 第578行）的逻辑保持一致。",
+      "files_changed": ["EP-Agent/frontend/src/widgets/chat-panel/ChatPanel.tsx"],
+      "completed_at": "2026-07-05"
+    }
+  ],
+  "db_tasks": [
+    {
+      "id": "DB-1",
+      "module": "db.py insert_message",
+      "severity": "critical",
+      "status": "done",
+      "title": "INSERT OR IGNORE + PRAGMA foreign_keys=ON 导致消息静默丢失",
+      "root_cause": "messages 表有 FOREIGN KEY(session_id) REFERENCES sessions(id)，且 PRAGMA foreign_keys=ON。当 sessions 记录不存在时（create_session 落库失败、内存重建但 DB 未写入等场景），INSERT OR IGNORE 遇到外键约束违反会静默忽略，不抛异常，导致 assistant/tool 消息全部丢失。之前的 except Exception: pass 甚至捕获不到，因为根本没有异常抛出。",
+      "fix": "db.py 新增 _ensure_session_exists(db, session_id)：insert_message 调用前先检查 sessions 表是否存在该 session_id，不存在则插入最简骨架记录（project_id=NULL 避免触发 projects FK）并输出 warning 日志。此后 INSERT OR IGNORE 外键约束不再触发，消息正常落库。",
+      "files_changed": ["EP-Agent/backend/app/pipeline/db.py"],
+      "completed_at": "2026-07-05"
+    }
+  ],
+  "abc_tasks": [
+    {
+      "id": "ABC-1",
+      "module": "score-creator.agent / score-editor.agent / abc_tools.py / workspace_tools.py",
+      "severity": "high",
+      "status": "done",
+      "title": "ABC 输出空行导致解析器截断谱子",
+      "root_cause": "LLM 在生成 ABC 时可能在 K: 行之后、正文行之间插入空行。ABC 解析器（abcjs 等）遇到空行会立即截断，导致谱子只有 Header 而无正文，或正文被截断，无法识别为完整乐谱。",
+      "fix": "四层防御：\n1. score-creator.agent static_context 新增「禁令5」：明确空行=致命错误，附正确/错误示范，输出前自检清单。\n2. score-editor.agent static_context 修正 Header 示例（原为错误的单行写法），新增空行禁令区块和自检清单；output_contract 新增第8条。\n3. abc_tools.py validate_abc()：新增空行检测——K: 后紧跟空行计入 out_of_range（致命），正文中空行计入 warnings（警告）。\n4. workspace_tools.py write_workspace_file()：写入 .abc 文件时自动 strip 空行（保底兜底，即使 LLM 输出了空行也能自动清理）。",
+      "files_changed": [
+        "EP-Agent/backend/agent/agents/score-creator.agent",
+        "EP-Agent/backend/agent/agents/score-editor.agent",
+        "EP-Agent/backend/app/agentcore/tools/abc_tools.py",
+        "EP-Agent/backend/app/agentcore/tools/workspace_tools.py"
+      ],
+      "completed_at": "2026-07-05"
+    }
+  ],
+  "summary": {
+    "total": 38,
+    "done": 35,
+    "skipped": 3,
+    "todo": 0,
+    "critical_done": 4,
+    "high_done": 8,
+    "medium_done": 11,
+    "low_done": 11,
+    "frontend_phase_completed_at": "2026-07-05",
+    "db_phase_completed_at": "2026-07-05",
+    "render_phase_completed_at": "2026-07-05",
+    "abc_phase_completed_at": "2026-07-05",
+    "completed_at": "2026-07-05"
+  }
+}

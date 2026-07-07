@@ -1,0 +1,587 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>EP-Agent LangGraph 节点图</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/echarts/5.6.0/echarts.min.js"></script>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: #0d1117;
+    color: #e6edf3;
+    font-family: 'SF Pro Display', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    min-height: 100vh;
+    overflow-x: hidden;
+  }
+
+  /* ── 顶部标题栏 ── */
+  .header {
+    padding: 28px 40px 20px;
+    border-bottom: 1px solid #21262d;
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    background: linear-gradient(180deg, #161b22 0%, #0d1117 100%);
+  }
+  .header-icon {
+    width: 42px; height: 42px;
+    background: linear-gradient(135deg, #7c3aed, #2563eb);
+    border-radius: 10px;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 20px;
+  }
+  .header h1 { font-size: 22px; font-weight: 700; color: #f0f6fc; }
+  .header p  { font-size: 13px; color: #8b949e; margin-top: 2px; }
+  .badge {
+    margin-left: auto;
+    background: #1f2937;
+    border: 1px solid #374151;
+    border-radius: 20px;
+    padding: 4px 14px;
+    font-size: 12px;
+    color: #9ca3af;
+  }
+  .badge span { color: #60a5fa; font-weight: 600; }
+
+  /* ── 主内容区 ── */
+  .main {
+    display: flex;
+    gap: 0;
+    height: calc(100vh - 95px);
+  }
+
+  /* ── 左侧图例面板 ── */
+  .legend-panel {
+    width: 240px;
+    flex-shrink: 0;
+    background: #161b22;
+    border-right: 1px solid #21262d;
+    padding: 24px 16px;
+    overflow-y: auto;
+  }
+  .legend-title {
+    font-size: 11px;
+    font-weight: 600;
+    color: #6e7681;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    margin-bottom: 14px;
+  }
+  .legend-item {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 8px 10px;
+    border-radius: 8px;
+    margin-bottom: 4px;
+    cursor: pointer;
+    transition: background 0.15s;
+  }
+  .legend-item:hover { background: #21262d; }
+  .legend-dot {
+    width: 12px; height: 12px;
+    border-radius: 50%;
+    flex-shrink: 0;
+  }
+  .legend-label { font-size: 13px; color: #c9d1d9; }
+  .legend-sub   { font-size: 11px; color: #6e7681; }
+
+  .legend-sep {
+    height: 1px;
+    background: #21262d;
+    margin: 16px 0;
+  }
+
+  /* 边类型图例 */
+  .edge-legend {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 6px 10px;
+    margin-bottom: 4px;
+  }
+  .edge-line {
+    width: 32px; height: 2px;
+    flex-shrink: 0;
+    border-radius: 1px;
+  }
+  .edge-dashed {
+    border-top: 2px dashed;
+    background: transparent !important;
+    height: 0;
+  }
+
+  /* ── 图表容器 ── */
+  .chart-wrap {
+    flex: 1;
+    position: relative;
+  }
+  #graph { width: 100%; height: 100%; }
+
+  /* ── 右侧详情面板 ── */
+  .detail-panel {
+    width: 260px;
+    flex-shrink: 0;
+    background: #161b22;
+    border-left: 1px solid #21262d;
+    padding: 24px 16px;
+    overflow-y: auto;
+    transition: all 0.2s;
+  }
+  .detail-title {
+    font-size: 11px;
+    font-weight: 600;
+    color: #6e7681;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    margin-bottom: 16px;
+  }
+  .node-card {
+    background: #0d1117;
+    border: 1px solid #21262d;
+    border-radius: 10px;
+    padding: 14px;
+    margin-bottom: 12px;
+  }
+  .node-card-title {
+    font-size: 14px;
+    font-weight: 600;
+    color: #f0f6fc;
+    margin-bottom: 6px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .node-card-dot {
+    width: 8px; height: 8px;
+    border-radius: 50%;
+    flex-shrink: 0;
+  }
+  .node-card p { font-size: 12px; color: #8b949e; line-height: 1.6; }
+  .tag {
+    display: inline-block;
+    background: #1f2937;
+    border: 1px solid #374151;
+    border-radius: 4px;
+    padding: 1px 7px;
+    font-size: 11px;
+    color: #9ca3af;
+    margin: 2px 2px 0 0;
+  }
+  .tag.green  { background: #0d2818; border-color: #166534; color: #4ade80; }
+  .tag.blue   { background: #0c1e3d; border-color: #1d4ed8; color: #60a5fa; }
+  .tag.purple { background: #1e0d3d; border-color: #7c3aed; color: #a78bfa; }
+  .tag.orange { background: #2d1b00; border-color: #92400e; color: #fbbf24; }
+  .tag.red    { background: #2d0d0d; border-color: #991b1b; color: #f87171; }
+  .tag.pink   { background: #2d0d1e; border-color: #9d174d; color: #f472b6; }
+
+  /* ── 底部工具条 ── */
+  .toolbar {
+    position: absolute;
+    bottom: 20px;
+    left: 50%;
+    transform: translateX(-50%);
+    background: #161b22;
+    border: 1px solid #30363d;
+    border-radius: 12px;
+    padding: 8px 16px;
+    display: flex;
+    gap: 16px;
+    align-items: center;
+    font-size: 12px;
+    color: #8b949e;
+    pointer-events: none;
+    z-index: 10;
+  }
+  .toolbar span { display: flex; align-items: center; gap: 6px; }
+  .toolbar kbd {
+    background: #21262d;
+    border: 1px solid #30363d;
+    border-radius: 4px;
+    padding: 1px 6px;
+    font-size: 11px;
+    color: #c9d1d9;
+  }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <div class="header-icon">🎵</div>
+  <div>
+    <h1>EP-Agent — LangGraph 节点图</h1>
+    <p>意图路由 → SubAgent 调度 → 工具执行 全链路可视化</p>
+  </div>
+  <div class="badge">节点 <span>18</span> · 边 <span>34</span> · SubAgent <span>8</span></div>
+</div>
+
+<div class="main">
+
+  <!-- 左侧图例 -->
+  <div class="legend-panel">
+    <div class="legend-title">节点类型</div>
+
+    <div class="legend-item">
+      <div class="legend-dot" style="background:#f59e0b;box-shadow:0 0 6px #f59e0b80"></div>
+      <div><div class="legend-label">入口 / 出口</div><div class="legend-sub">START · END</div></div>
+    </div>
+    <div class="legend-item">
+      <div class="legend-dot" style="background:#3b82f6;box-shadow:0 0 6px #3b82f680"></div>
+      <div><div class="legend-label">编排层</div><div class="legend-sub">UniversalRunner</div></div>
+    </div>
+    <div class="legend-item">
+      <div class="legend-dot" style="background:#8b5cf6;box-shadow:0 0 6px #8b5cf680"></div>
+      <div><div class="legend-label">路由 / 规划</div><div class="legend-sub">IntentRouter · TodoMgr</div></div>
+    </div>
+    <div class="legend-item">
+      <div class="legend-dot" style="background:#10b981;box-shadow:0 0 6px #10b98180"></div>
+      <div><div class="legend-label">SubAgent</div><div class="legend-sub">8个专业 Agent</div></div>
+    </div>
+    <div class="legend-item">
+      <div class="legend-dot" style="background:#f43f5e;box-shadow:0 0 6px #f43f5e80"></div>
+      <div><div class="legend-label">工具执行层</div><div class="legend-sub">ReactExecutor</div></div>
+    </div>
+    <div class="legend-item">
+      <div class="legend-dot" style="background:#06b6d4;box-shadow:0 0 6px #06b6d480"></div>
+      <div><div class="legend-label">工具组</div><div class="legend-sub">abc/h5/audio/sovits</div></div>
+    </div>
+
+    <div class="legend-sep"></div>
+    <div class="legend-title">边类型</div>
+
+    <div class="edge-legend">
+      <div class="edge-line" style="background:#60a5fa"></div>
+      <div class="legend-label" style="font-size:12px">主流程</div>
+    </div>
+    <div class="edge-legend">
+      <div class="edge-line" style="background:#a78bfa"></div>
+      <div class="legend-label" style="font-size:12px">条件路由</div>
+    </div>
+    <div class="edge-legend">
+      <div class="edge-line edge-dashed" style="border-color:#6b7280"></div>
+      <div class="legend-label" style="font-size:12px">降级 / 链式</div>
+    </div>
+    <div class="edge-legend">
+      <div class="edge-line" style="background:#f59e0b"></div>
+      <div class="legend-label" style="font-size:12px">工具调用</div>
+    </div>
+
+    <div class="legend-sep"></div>
+    <div class="legend-title">说明</div>
+    <p style="font-size:11px;color:#6e7681;line-height:1.7;padding:0 4px">
+      EP-Agent 采用 <strong style="color:#9ca3af">ReAct Loop</strong> 架构，
+      非标准 LangGraph，但执行拓扑与其完全对应。
+      <br><br>
+      滚轮缩放 · 拖拽平移 · 点击节点查看详情
+    </p>
+  </div>
+
+  <!-- 图表区 -->
+  <div class="chart-wrap">
+    <div id="graph"></div>
+    <div class="toolbar">
+      <span>🖱️ 滚轮缩放</span>
+      <span>✋ 拖拽平移</span>
+      <span>👆 点击查看详情</span>
+    </div>
+  </div>
+
+  <!-- 右侧详情 -->
+  <div class="detail-panel" id="detailPanel">
+    <div class="detail-title">节点详情</div>
+    <div id="detailContent">
+      <div style="color:#6e7681;font-size:13px;text-align:center;margin-top:40px">
+        点击节点查看详情
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<script>
+window.onload = function () {
+
+// ── 节点详情数据 ──────────────────────────────────────────────────────────────
+const NODE_DETAILS = {
+  'START': {
+    color: '#f59e0b',
+    desc: '用户请求入口。前端通过 POST /api/sessions/{id}/chat 发起请求，携带 message、attachment_content、attachment_name、attachment_b64 等参数。',
+    tags: [['HTTP POST', 'blue'], ['SSE 推流', 'green'], ['/api/sessions/{id}/chat', '']],
+  },
+  'UniversalRunner': {
+    color: '#3b82f6',
+    desc: '核心编排层（universal_runner.py）。负责整个请求生命周期：注入 session_id ContextVar → 意图路由 → TODO规划 → SubAgent调度 → 结果落库。',
+    tags: [['universal_runner.py', 'blue'], ['service.universal_chat', ''], ['TraceCollector', 'purple']],
+  },
+  'IntentRouter': {
+    color: '#8b5cf6',
+    desc: '意图路由器（intent_router.py）。调用轻量 LLM（tier=lite）识别 domain，支持 convert/edit/create/audio/voice/sovits/h5_create/h5_edit/query 共9个域。含关键词快速匹配，检测链式意图。',
+    tags: [['lite LLM', 'purple'], ['9个意图域', 'blue'], ['链式意图检测', 'orange'], ['domain_config.py', '']],
+  },
+  'TodoManager': {
+    color: '#8b5cf6',
+    desc: 'TODO 规划器（todo_manager.py）。同步 await 规划，消灭并发竞态。为每个 domain 生成 2-4 个 TODO 任务，通过 SSE 推送 todo.list 事件到前端展示进度。',
+    tags: [['todo_manager.py', 'purple'], ['同步规划', 'green'], ['SSE todo.list', 'blue']],
+  },
+  'ConvertAgent': {
+    color: '#10b981',
+    desc: 'Sky JSON / ABC 转换 Agent。先尝试提取 Sky JSON（含 songNotes），再尝试识别 ABC 谱，两者都不是则返回 valid=false 触发降级到 CreateAgent。',
+    tags: [['convert_agent.py', 'green'], ['Sky JSON', 'blue'], ['ABC 直接加载', ''], ['降级→create', 'orange']],
+  },
+  'EditAgent': {
+    color: '#10b981',
+    desc: '谱子编辑 Agent（edit_agent.py）。通过 ReactExecutor 执行 abc_edit 工具组：transpose_abc / change_tempo / change_style / add_ornament / abc_to_midi 等。无谱子时自动降级为 CreateAgent。',
+    tags: [['edit_agent.py', 'green'], ['abc_edit 工具组', 'blue'], ['无谱降级→create', 'orange'], ['ReactExecutor', 'red']],
+  },
+  'CreateAgent': {
+    color: '#10b981',
+    desc: '谱子创作 Agent（create_agent.py）。从零创作 ABC 谱子，支持风格/情感/时长描述。使用 abc_edit 工具组，通过 ReactExecutor 执行多轮创作迭代。',
+    tags: [['create_agent.py', 'green'], ['abc_edit 工具组', 'blue'], ['ReactExecutor', 'red']],
+  },
+  'H5Agent': {
+    color: '#10b981',
+    desc: 'H5 海报生成 Agent（h5_agent.py）。支持 MIDI/ABC/Sky JSON 三种输入。MIDI → generate_h5_from_midi；ABC/JSON → list_h5_templates → get_h5_template → 修改HTML → save_h5_output。推送 h5.ready SSE 事件。',
+    tags: [['h5_agent.py', 'green'], ['h5 工具组', 'blue'], ['h5_create + h5_edit', ''], ['5种模板', 'purple']],
+  },
+  'AudioAgent': {
+    color: '#10b981',
+    desc: '音频生成 Agent（audio_agent.py）。支持 Suno/MiniMax 多提供商，含音频迭代（"再欢快一点"）历史。voice 域也路由到此 Agent（MiniMax 云端音色路径）。',
+    tags: [['audio_agent.py', 'green'], ['Suno / MiniMax', 'orange'], ['音频迭代', 'blue'], ['audio_runner.py', '']],
+  },
+  'VoiceCloneAgent': {
+    color: '#10b981',
+    desc: 'GPT-SoVITS 音色克隆 Agent（voice_clone_agent.py）。本地 GPT-SoVITS 优先，不可用时降级 MiniMax。音频附件先落盘到项目目录，支持 sovits + audio 链式意图。',
+    tags: [['voice_clone_agent.py', 'green'], ['GPT-SoVITS 本地', 'purple'], ['MiniMax 降级', 'orange'], ['链式→audio', 'blue']],
+  },
+  'QueryAgent': {
+    color: '#10b981',
+    desc: '查询分析 Agent（query_agent.py）。回答谱子信息类问题（调号/BPM/音符数等）。也作为兜底 Agent，处理未知 domain 的请求。',
+    tags: [['query_agent.py', 'green'], ['兜底路由', 'orange']],
+  },
+  'ReactExecutor': {
+    color: '#f43f5e',
+    desc: 'ReAct Loop 执行引擎（react_executor.py）。所有 SubAgent 共用。执行 Think→Act→Observe 循环，最多 MAX_REACT_ROUNDS=8 轮。支持流式 Tool Calling，自动落库 assistant/tool 消息，通过 on_tool_result 回调感知工具结果。',
+    tags: [['react_executor.py', 'red'], ['ReAct Loop', ''], ['max_rounds=8', 'orange'], ['流式 Tool Calling', 'blue'], ['自动落库', 'green']],
+  },
+  'abc_edit工具组': {
+    color: '#06b6d4',
+    desc: '谱子编辑工具集（abc_tools.py）。包含：transpose_abc / change_tempo / change_style / add_ornament / simplify_abc / validate_abc / abc_to_midi / abc_to_sky_json / finish_task 等。',
+    tags: [['abc_tools.py', 'blue'], ['transpose_abc', ''], ['change_tempo', ''], ['abc_to_midi', 'green'], ['validate_abc', '']],
+  },
+  'h5工具组': {
+    color: '#06b6d4',
+    desc: 'H5 专属工具集（h5_tools.py）。包含：parse_abc_to_json / parse_sky_json_to_json / list_h5_templates / get_h5_template / generate_h5_from_midi / save_h5_output 共6个工具。',
+    tags: [['h5_tools.py', 'blue'], ['6个专属工具', ''], ['双写保存', 'green'], ['模板注册表', 'purple']],
+  },
+  'audio工具组': {
+    color: '#06b6d4',
+    desc: '音频生成工具集（audio_tools.py）。包含：generate_audio_suno / generate_audio_minimax / list_audio_history / get_audio_status 等，支持多提供商切换。',
+    tags: [['audio_tools.py', 'blue'], ['Suno API', ''], ['MiniMax API', 'orange']],
+  },
+  'sovits工具组': {
+    color: '#06b6d4',
+    desc: 'GPT-SoVITS 工具集（sovits_tools.py）。包含：sovits_clone_voice / sovits_tts / sovits_list_models / sovits_list_audio_files 等，本地服务调用。',
+    tags: [['sovits_tools.py', 'blue'], ['本地 GPT-SoVITS', 'purple'], ['MiniMax 降级', 'orange']],
+  },
+  'workspace工具组': {
+    color: '#06b6d4',
+    desc: '工作区文件工具集（workspace_tools.py）。包含：list_workspace_files / read_workspace_files / write_workspace_file / list_workspace_scores 等，所有 Agent 共用的文件操作基础设施。',
+    tags: [['workspace_tools.py', 'blue'], ['文件读写', ''], ['谱子库扫描', 'green']],
+  },
+  'END': {
+    color: '#f59e0b',
+    desc: '响应出口。UniversalRunner 返回 result dict，service 层落库 AI 回复、同步 abc_notation，SSE 推送 message.completed 事件通知前端请求完成。',
+    tags: [['message.completed', 'green'], ['落库 AI 回复', 'blue'], ['abc_notation 同步', '']],
+  },
+};
+
+// ── 图谱数据 ─────────────────────────────────────────────────────────────────
+const nodes = [
+  // 入口/出口
+  { id: 'START',        name: 'START',          x: 0,    y: 0,    symbolSize: 44, itemStyle: { color: '#f59e0b', borderColor: '#fbbf24', borderWidth: 2, shadowBlur: 16, shadowColor: '#f59e0b60' }, label: { color: '#fbbf24', fontWeight: 700 } },
+  { id: 'END',          name: 'END',            x: 0,    y: 1400, symbolSize: 44, itemStyle: { color: '#f59e0b', borderColor: '#fbbf24', borderWidth: 2, shadowBlur: 16, shadowColor: '#f59e0b60' }, label: { color: '#fbbf24', fontWeight: 700 } },
+
+  // 编排层
+  { id: 'UniversalRunner', name: 'Universal\nRunner', x: 0, y: 160, symbolSize: 56, itemStyle: { color: '#2563eb', borderColor: '#3b82f6', borderWidth: 2, shadowBlur: 20, shadowColor: '#3b82f660' }, label: { color: '#93c5fd', fontWeight: 700, fontSize: 13 } },
+
+  // 路由/规划
+  { id: 'IntentRouter', name: 'Intent\nRouter',  x: -260, y: 340, symbolSize: 48, itemStyle: { color: '#7c3aed', borderColor: '#8b5cf6', borderWidth: 2, shadowBlur: 14, shadowColor: '#8b5cf660' }, label: { color: '#c4b5fd', fontWeight: 600 } },
+  { id: 'TodoManager',  name: 'Todo\nManager',   x:  260, y: 340, symbolSize: 48, itemStyle: { color: '#7c3aed', borderColor: '#8b5cf6', borderWidth: 2, shadowBlur: 14, shadowColor: '#8b5cf660' }, label: { color: '#c4b5fd', fontWeight: 600 } },
+
+  // SubAgents
+  { id: 'ConvertAgent',    name: '🎮 Convert\nAgent',    x: -700, y: 580, symbolSize: 52, itemStyle: { color: '#065f46', borderColor: '#10b981', borderWidth: 2, shadowBlur: 12, shadowColor: '#10b98150' }, label: { color: '#6ee7b7', fontWeight: 600 } },
+  { id: 'EditAgent',       name: '✏️ Edit\nAgent',       x: -420, y: 580, symbolSize: 52, itemStyle: { color: '#065f46', borderColor: '#10b981', borderWidth: 2, shadowBlur: 12, shadowColor: '#10b98150' }, label: { color: '#6ee7b7', fontWeight: 600 } },
+  { id: 'CreateAgent',     name: '🎵 Create\nAgent',     x: -140, y: 580, symbolSize: 52, itemStyle: { color: '#065f46', borderColor: '#10b981', borderWidth: 2, shadowBlur: 12, shadowColor: '#10b98150' }, label: { color: '#6ee7b7', fontWeight: 600 } },
+  { id: 'H5Agent',         name: '🎨 H5\nAgent',         x:  140, y: 580, symbolSize: 52, itemStyle: { color: '#065f46', borderColor: '#10b981', borderWidth: 2, shadowBlur: 12, shadowColor: '#10b98150' }, label: { color: '#6ee7b7', fontWeight: 600 } },
+  { id: 'AudioAgent',      name: '🎧 Audio\nAgent',      x:  420, y: 580, symbolSize: 52, itemStyle: { color: '#065f46', borderColor: '#10b981', borderWidth: 2, shadowBlur: 12, shadowColor: '#10b98150' }, label: { color: '#6ee7b7', fontWeight: 600 } },
+  { id: 'VoiceCloneAgent', name: '🎙️ VoiceClone\nAgent', x:  700, y: 580, symbolSize: 52, itemStyle: { color: '#065f46', borderColor: '#10b981', borderWidth: 2, shadowBlur: 12, shadowColor: '#10b98150' }, label: { color: '#6ee7b7', fontWeight: 600 } },
+  { id: 'QueryAgent',      name: '🔍 Query\nAgent',      x:  980, y: 580, symbolSize: 48, itemStyle: { color: '#065f46', borderColor: '#10b981', borderWidth: 2, shadowBlur: 12, shadowColor: '#10b98150' }, label: { color: '#6ee7b7', fontWeight: 600 } },
+
+  // 执行引擎
+  { id: 'ReactExecutor', name: '⚡ React\nExecutor', x: 0, y: 860, symbolSize: 56, itemStyle: { color: '#9f1239', borderColor: '#f43f5e', borderWidth: 2, shadowBlur: 20, shadowColor: '#f43f5e60' }, label: { color: '#fda4af', fontWeight: 700, fontSize: 13 } },
+
+  // 工具组
+  { id: 'abc_edit工具组',   name: '🎼 abc_edit\n工具组',   x: -560, y: 1100, symbolSize: 44, itemStyle: { color: '#164e63', borderColor: '#06b6d4', borderWidth: 2, shadowBlur: 10, shadowColor: '#06b6d440' }, label: { color: '#67e8f9', fontWeight: 600 } },
+  { id: 'h5工具组',         name: '🌐 h5\n工具组',         x: -200, y: 1100, symbolSize: 44, itemStyle: { color: '#164e63', borderColor: '#06b6d4', borderWidth: 2, shadowBlur: 10, shadowColor: '#06b6d440' }, label: { color: '#67e8f9', fontWeight: 600 } },
+  { id: 'audio工具组',      name: '🎵 audio\n工具组',      x:  200, y: 1100, symbolSize: 44, itemStyle: { color: '#164e63', borderColor: '#06b6d4', borderWidth: 2, shadowBlur: 10, shadowColor: '#06b6d440' }, label: { color: '#67e8f9', fontWeight: 600 } },
+  { id: 'sovits工具组',     name: '🔊 sovits\n工具组',     x:  560, y: 1100, symbolSize: 44, itemStyle: { color: '#164e63', borderColor: '#06b6d4', borderWidth: 2, shadowBlur: 10, shadowColor: '#06b6d440' }, label: { color: '#67e8f9', fontWeight: 600 } },
+  { id: 'workspace工具组',  name: '📁 workspace\n工具组',  x:  920, y: 1100, symbolSize: 44, itemStyle: { color: '#164e63', borderColor: '#06b6d4', borderWidth: 2, shadowBlur: 10, shadowColor: '#06b6d440' }, label: { color: '#67e8f9', fontWeight: 600 } },
+];
+
+const edges = [
+  // ── 主流程 ──
+  { source: 'START',        target: 'UniversalRunner', lineStyle: { color: '#60a5fa', width: 2.5 }, label: { show: true, formatter: 'POST /chat', color: '#60a5fa', fontSize: 11 } },
+  { source: 'UniversalRunner', target: 'IntentRouter', lineStyle: { color: '#60a5fa', width: 2 }, label: { show: true, formatter: '路由识别', color: '#a78bfa', fontSize: 11 } },
+  { source: 'UniversalRunner', target: 'TodoManager',  lineStyle: { color: '#60a5fa', width: 2 }, label: { show: true, formatter: 'await 规划', color: '#a78bfa', fontSize: 11 } },
+
+  // ── 条件路由：IntentRouter → SubAgents ──
+  { source: 'IntentRouter', target: 'ConvertAgent',    lineStyle: { color: '#a78bfa', width: 1.8 }, label: { show: true, formatter: 'convert', color: '#a78bfa', fontSize: 10 } },
+  { source: 'IntentRouter', target: 'EditAgent',       lineStyle: { color: '#a78bfa', width: 1.8 }, label: { show: true, formatter: 'edit', color: '#a78bfa', fontSize: 10 } },
+  { source: 'IntentRouter', target: 'CreateAgent',     lineStyle: { color: '#a78bfa', width: 1.8 }, label: { show: true, formatter: 'create', color: '#a78bfa', fontSize: 10 } },
+  { source: 'IntentRouter', target: 'H5Agent',         lineStyle: { color: '#a78bfa', width: 1.8 }, label: { show: true, formatter: 'h5_create\nh5_edit', color: '#a78bfa', fontSize: 10 } },
+  { source: 'IntentRouter', target: 'AudioAgent',      lineStyle: { color: '#a78bfa', width: 1.8 }, label: { show: true, formatter: 'audio/voice', color: '#a78bfa', fontSize: 10 } },
+  { source: 'IntentRouter', target: 'VoiceCloneAgent', lineStyle: { color: '#a78bfa', width: 1.8 }, label: { show: true, formatter: 'sovits', color: '#a78bfa', fontSize: 10 } },
+  { source: 'IntentRouter', target: 'QueryAgent',      lineStyle: { color: '#a78bfa', width: 1.8 }, label: { show: true, formatter: 'query/兜底', color: '#a78bfa', fontSize: 10 } },
+
+  // ── 降级边（虚线）──
+  { source: 'ConvertAgent', target: 'CreateAgent',  lineStyle: { color: '#6b7280', width: 1.5, type: 'dashed' }, label: { show: true, formatter: '降级', color: '#9ca3af', fontSize: 10 } },
+  { source: 'EditAgent',    target: 'CreateAgent',  lineStyle: { color: '#6b7280', width: 1.5, type: 'dashed' }, label: { show: true, formatter: '无谱降级', color: '#9ca3af', fontSize: 10 } },
+  { source: 'VoiceCloneAgent', target: 'AudioAgent', lineStyle: { color: '#6b7280', width: 1.5, type: 'dashed' }, label: { show: true, formatter: '链式→audio', color: '#9ca3af', fontSize: 10 } },
+
+  // ── SubAgents → ReactExecutor ──
+  { source: 'EditAgent',       target: 'ReactExecutor', lineStyle: { color: '#f43f5e', width: 1.8 } },
+  { source: 'CreateAgent',     target: 'ReactExecutor', lineStyle: { color: '#f43f5e', width: 1.8 } },
+  { source: 'H5Agent',         target: 'ReactExecutor', lineStyle: { color: '#f43f5e', width: 1.8 } },
+  { source: 'AudioAgent',      target: 'ReactExecutor', lineStyle: { color: '#f43f5e', width: 1.8 } },
+  { source: 'VoiceCloneAgent', target: 'ReactExecutor', lineStyle: { color: '#f43f5e', width: 1.8 } },
+  { source: 'QueryAgent',      target: 'ReactExecutor', lineStyle: { color: '#f43f5e', width: 1.8 } },
+
+  // ── ReactExecutor → 工具组 ──
+  { source: 'ReactExecutor', target: 'abc_edit工具组',  lineStyle: { color: '#f59e0b', width: 1.8 }, label: { show: true, formatter: 'edit/create', color: '#fbbf24', fontSize: 10 } },
+  { source: 'ReactExecutor', target: 'h5工具组',        lineStyle: { color: '#f59e0b', width: 1.8 }, label: { show: true, formatter: 'h5', color: '#fbbf24', fontSize: 10 } },
+  { source: 'ReactExecutor', target: 'audio工具组',     lineStyle: { color: '#f59e0b', width: 1.8 }, label: { show: true, formatter: 'audio', color: '#fbbf24', fontSize: 10 } },
+  { source: 'ReactExecutor', target: 'sovits工具组',    lineStyle: { color: '#f59e0b', width: 1.8 }, label: { show: true, formatter: 'sovits', color: '#fbbf24', fontSize: 10 } },
+  { source: 'ReactExecutor', target: 'workspace工具组', lineStyle: { color: '#f59e0b', width: 1.8 }, label: { show: true, formatter: '全Agent共用', color: '#fbbf24', fontSize: 10 } },
+
+  // ── 工具组 → END（汇聚）──
+  { source: 'abc_edit工具组',  target: 'END', lineStyle: { color: '#374151', width: 1.2 } },
+  { source: 'h5工具组',        target: 'END', lineStyle: { color: '#374151', width: 1.2 } },
+  { source: 'audio工具组',     target: 'END', lineStyle: { color: '#374151', width: 1.2 } },
+  { source: 'sovits工具组',    target: 'END', lineStyle: { color: '#374151', width: 1.2 } },
+  { source: 'workspace工具组', target: 'END', lineStyle: { color: '#374151', width: 1.2 } },
+
+  // ── ConvertAgent 直接到 END（无 ReactExecutor）──
+  { source: 'ConvertAgent', target: 'END', lineStyle: { color: '#374151', width: 1.2, type: 'dashed' }, label: { show: true, formatter: '直接返回', color: '#6b7280', fontSize: 10 } },
+];
+
+// ── ECharts 初始化 ────────────────────────────────────────────────────────────
+const chart = echarts.init(document.getElementById('graph'), null, { renderer: 'canvas' });
+
+const option = {
+  backgroundColor: 'transparent',
+  tooltip: {
+    trigger: 'item',
+    backgroundColor: '#161b22',
+    borderColor: '#30363d',
+    textStyle: { color: '#c9d1d9', fontSize: 12 },
+    formatter: function(params) {
+      if (params.dataType === 'node') {
+        const d = NODE_DETAILS[params.data.id];
+        if (d) return `<b style="color:#f0f6fc">${params.data.id}</b><br/><span style="color:#8b949e;font-size:11px">${d.desc.substring(0, 80)}...</span>`;
+      }
+      return params.data.id || '';
+    },
+  },
+  animationDuration: 1200,
+  animationEasingUpdate: 'quinticInOut',
+  series: [{
+    type: 'graph',
+    layout: 'none',
+    coordinateSystem: null,
+    zoom: 0.72,
+    center: ['50%', '50%'],
+    roam: true,
+    draggable: false,
+    focusNodeAdjacency: true,
+    edgeSymbol: ['none', 'arrow'],
+    edgeSymbolSize: [0, 10],
+    label: {
+      show: true,
+      position: 'inside',
+      fontSize: 12,
+      color: '#e6edf3',
+      fontWeight: 600,
+      lineHeight: 18,
+    },
+    lineStyle: {
+      opacity: 0.85,
+      curveness: 0.08,
+    },
+    edgeLabel: {
+      show: false,
+      fontSize: 10,
+      color: '#9ca3af',
+      backgroundColor: '#0d1117',
+      padding: [2, 6],
+      borderRadius: 4,
+    },
+    emphasis: {
+      focus: 'adjacency',
+      scale: true,
+      lineStyle: { width: 3, opacity: 1 },
+      label: { show: true },
+    },
+    data: nodes.map(n => ({
+      id:         n.id,
+      name:       n.name,
+      x:          n.x,
+      y:          n.y,
+      symbolSize: n.symbolSize,
+      itemStyle:  n.itemStyle,
+      label:      { ...n.label },
+    })),
+    links: edges.map(e => ({
+      source:    e.source,
+      target:    e.target,
+      lineStyle: e.lineStyle,
+      label:     e.label || { show: false },
+    })),
+  }],
+};
+
+chart.setOption(option);
+
+// ── 点击节点展示详情 ──────────────────────────────────────────────────────────
+chart.on('click', function(params) {
+  if (params.dataType !== 'node') return;
+  const id = params.data.id;
+  const d  = NODE_DETAILS[id];
+  if (!d) return;
+
+  const tagsHtml = (d.tags || []).map(([t, cls]) =>
+    `<span class="tag ${cls}">${t}</span>`
+  ).join('');
+
+  document.getElementById('detailContent').innerHTML = `
+    <div class="node-card">
+      <div class="node-card-title">
+        <div class="node-card-dot" style="background:${d.color};box-shadow:0 0 6px ${d.color}80"></div>
+        ${id}
+      </div>
+      <p style="margin-bottom:10px">${d.desc}</p>
+      <div>${tagsHtml}</div>
+    </div>
+  `;
+});
+
+// ── 响应式 resize ─────────────────────────────────────────────────────────────
+window.addEventListener('resize', () => {
+  requestAnimationFrame(() => { chart.resize(); });
+});
+setTimeout(() => { chart.resize(); }, 100);
+
+};
+</script>
+</body>
+</html>

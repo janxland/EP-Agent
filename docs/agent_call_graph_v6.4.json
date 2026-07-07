@@ -1,0 +1,519 @@
+{
+  "meta": {
+    "version": "v6.4",
+    "generated": "2026-07-06",
+    "description": "EP-Agent 乐谱专家完整调用链图（含入参/出参/异常路径/潜在BUG）",
+    "legend": {
+      "status": "ok | bug | warn",
+      "bug_severity": "HIGH | MEDIUM | LOW"
+    }
+  },
+  "entry_point": {
+    "class": "UniversalChatRunner",
+    "file": "universal_runner.py",
+    "method": "run()",
+    "inputs": {
+      "session_id": "str",
+      "message": "str",
+      "attachment_content": "str",
+      "attachment_name": "str",
+      "attachment_workspace_path": "str = ''",
+      "attachment_b64": "str = ''",
+      "session_getter": "Callable",
+      "session_saver": "Callable",
+      "publish": "Publisher",
+      "convert_fn": "Callable",
+      "edit_fn": "Callable",
+      "audio_chat_fn": "Callable",
+      "role_id": "str | None"
+    },
+    "outputs": "dict (domain-specific)"
+  },
+  "shared_steps": {
+    "S1_role_resolve": {
+      "desc": "从 session.extra 恢复 role_id，兜底 DEFAULT_ROLE_ID",
+      "status": "ok",
+      "note": "role_id 优先级：参数传入 > session.extra.role_id > DEFAULT_ROLE_ID"
+    },
+    "S2_get_project_ids": {
+      "desc": "db.get_session_info(session_id) 获取 workspace_id + project_id",
+      "status": "ok",
+      "note": "异常时静默兜底为空字符串"
+    },
+    "S3_workspace_scores": {
+      "desc": "list_workspace_scores_impl() 查询项目 .sky/ 目录谱子库",
+      "status": "ok",
+      "note": "结果追加到 context_summary 供路由感知"
+    },
+    "S4_route_intent": {
+      "desc": "route_intent(message, attachment_name, attachment_preview, has_score, context_summary, role_id)",
+      "file": "intent_router.py",
+      "status": "ok",
+      "inputs": {
+        "message": "str",
+        "attachment_name": "str",
+        "attachment_preview": "str (前500字)",
+        "has_score": "bool",
+        "context_summary": "str",
+        "role_id": "str | None"
+      },
+      "outputs": {
+        "domain": "str",
+        "confidence": "float",
+        "chain_intents": "list[str]",
+        "summary": "str"
+      },
+      "llm_tier": "lite",
+      "fallback": "edit(has_score) | create | allowed[0] | query"
+    },
+    "S5_todo_plan": {
+      "desc": "TodoManager.plan(message, domain, has_score, publish, session_id)",
+      "file": "todo_manager.py",
+      "status": "ok",
+      "note": "v4.0 同步 await，消灭并发竞态；max_steps=8"
+    },
+    "S6_dispatch": {
+      "desc": "_dispatch(domain, chain_intents, ...) 按 domain 调度 SubAgent",
+      "file": "universal_runner.py",
+      "status": "ok"
+    }
+  },
+  "flows": {
+    "F1_convert_sky_json": {
+      "title": "Sky JSON 转换流程（.txt/.json 附件含 songNotes）",
+      "trigger": "附件含 songNotes 字段 OR 扩展名 .txt/.json 且内容为 Sky JSON",
+      "domain": "convert",
+      "steps": [
+        {
+          "id": "F1.1",
+          "call": "ConvertAgent.run()",
+          "file": "agents/convert_agent.py",
+          "inputs": {
+            "session_id": "str",
+            "message": "str",
+            "attachment_content": "str",
+            "attachment_name": "str",
+            "publish": "Publisher",
+            "convert_fn": "Callable",
+            "todo_mgr": "TodoManager",
+            "session_getter": "Callable",
+            "session_saver": "Callable"
+          },
+          "status": "ok"
+        },
+        {
+          "id": "F1.2",
+          "call": "_extract_sky_json(attachment_content or message)",
+          "inputs": {"raw": "str"},
+          "outputs": {"sky_json": "str | None"},
+          "status": "ok",
+          "note": "先整体 json.loads，再 regex 提取 [...] 或 {...}"
+        },
+        {
+          "id": "F1.3",
+          "call": "_run_sky_json(sky_json, file_name, ...)",
+          "inputs": {
+            "sky_json": "str",
+            "file_name": "str",
+            "convert_fn": "Callable — 外部传入，实际是 convert_sky_json_impl"
+          },
+          "outputs": {
+            "abc_notation": "str",
+            "meta": {"title": "str", "key": "str", "bpm": "float", "note_count": "int"}
+          },
+          "status": "ok"
+        },
+        {
+          "id": "F1.4",
+          "call": "save_score_to_workspace_impl(abc_notation, title, overwrite=True)",
+          "inputs": {"abc_notation": "str", "title": "str"},
+          "outputs": {"path": "str — .sky/<title>.abc"},
+          "status": "ok"
+        },
+        {
+          "id": "F1.5",
+          "call": "detect_chain_intent(message, chain_intents)",
+          "inputs": {"message": "str", "chain_intents": "list[str]"},
+          "outputs": {"extra_domain": "edit|create|h5_create|none"},
+          "status": "ok",
+          "note": "convert 成功后检测是否有链式意图"
+        }
+      ],
+      "known_bugs": [
+        {
+          "id": "BUG-C1",
+          "severity": "MEDIUM",
+          "status": "FIXED_v6.4",
+          "location": "convert_agent.py:_run_abc_direct():283",
+          "desc": "ScoreMeta 构造缺少 time_sig_num/time_sig_den",
+          "fix": "补充 time_sig_num=meta['time_sig_num'], time_sig_den=meta['time_sig_den']"
+        }
+      ]
+    },
+    "F2_convert_abc_direct": {
+      "title": "ABC 文件直接加载流程（.abc 附件）",
+      "trigger": "attachment_name 以 .abc 结尾 OR 内容含 K: 字段",
+      "domain": "convert",
+      "steps": [
+        {
+          "id": "F2.1",
+          "call": "_extract_abc(json_content, file_name)",
+          "inputs": {"content": "str", "filename": "str"},
+          "outputs": {"abc": "str | None"},
+          "status": "ok",
+          "note": ".abc 扩展名优先；内容检测需 K: + (X:|T:) 或 K: + 音符行"
+        },
+        {
+          "id": "F2.2",
+          "call": "_run_abc_direct(abc, file_name, ...)",
+          "inputs": {"abc": "str", "file_name": "str"},
+          "outputs": {
+            "domain": "convert",
+            "valid": "True",
+            "source": "abc",
+            "abc_notation": "str",
+            "meta": "dict"
+          },
+          "status": "ok"
+        },
+        {
+          "id": "F2.3",
+          "call": "parse_abc_header(abc)",
+          "outputs": {
+            "title": "str", "key": "str", "bpm": "float",
+            "time_sig_num": "int", "time_sig_den": "int"
+          },
+          "status": "ok",
+          "note": "BUG-02 已修复：不再手写解析"
+        }
+      ],
+      "known_bugs": []
+    },
+    "F3_create": {
+      "title": "ABC 谱从零创作流程",
+      "trigger": "无附件 + 无谱子 OR 用户明确要求创作",
+      "domain": "create",
+      "steps": [
+        {
+          "id": "F3.1",
+          "call": "CreateAgent.run()",
+          "file": "agents/create_agent.py",
+          "inputs": {
+            "session_id": "str",
+            "message": "str",
+            "publish": "Publisher",
+            "session_getter": "Callable",
+            "session_saver": "Callable",
+            "todo_mgr": "TodoManager",
+            "current_abc": "str = '' — chain convert→create 时传入"
+          },
+          "status": "ok"
+        },
+        {
+          "id": "F3.2",
+          "call": "_build_prompt(message, base_abc, session_bpm, session_time_sig_num)",
+          "outputs": {"system": "str", "user_prompt": "str"},
+          "status": "ok",
+          "note": "BPM 优先级：消息指定 > 原谱 > session > 风格推断"
+        },
+        {
+          "id": "F3.3",
+          "call": "llm_complete([system, user], temperature=0.85~0.92)",
+          "outputs": {"raw": "str — 含 ABC + SUMMARY 行"},
+          "status": "ok"
+        },
+        {
+          "id": "F3.4",
+          "call": "_validate_and_fix(abc, ...) — 音符范围验证 + 自动修正",
+          "status": "ok",
+          "note": "调 validate_abc 工具；修正 temperature=0.3"
+        },
+        {
+          "id": "F3.5",
+          "call": "_fix_duplicate_lines(abc, ...) — 重复行检测 + 修正",
+          "status": "ok"
+        },
+        {
+          "id": "F3.6",
+          "call": "_fix_rhythm_monotone(abc, ...) — 节奏单调检测 + 修正",
+          "status": "ok"
+        },
+        {
+          "id": "F3.7",
+          "call": "save_score_to_workspace_impl(abc_notation, title, overwrite=True)",
+          "status": "ok"
+        },
+        {
+          "id": "F3.8",
+          "call": "按需导出：_call_tool('abc_to_midi') 或 _call_tool('abc_to_sky_json')",
+          "status": "ok",
+          "note": "NEW-09 已修复：移除裸 'midi' 误触发；BUG-12 已修复：真实完成后才 complete_one"
+        }
+      ],
+      "known_bugs": [
+        {
+          "id": "BUG-CR1",
+          "severity": "HIGH",
+          "status": "FIXED_v6.4",
+          "location": "create_agent.py:run():130-133",
+          "desc": "exec_ids fallback 到 ids（全量）时可能操作已完成的 TODO",
+          "fix": "移除 fallback：exec_ids = todo_mgr.get_pending_ids()；若为空则不操作"
+        },
+        {
+          "id": "BUG-CR2",
+          "severity": "MEDIUM",
+          "status": "FIXED_v6.4",
+          "location": "create_agent.py:_build_prompt():445+469",
+          "desc": "parse_abc_header(base_abc) 被调用两次，浪费计算",
+          "fix": "缓存第一次结果复用"
+        },
+        {
+          "id": "BUG-CR3",
+          "severity": "LOW",
+          "status": "FIXED_v6.4",
+          "location": "create_agent.py:391",
+          "desc": "abc_to_sky_json 调用未传 output_filename",
+          "fix": "传入 output_filename=f'{title}.json'"
+        }
+      ]
+    },
+    "F4_edit": {
+      "title": "ABC 谱编辑流程（ReAct Loop）",
+      "trigger": "session 已有谱子 + 用户要求编辑/转调/变速/转MIDI等",
+      "domain": "edit",
+      "steps": [
+        {
+          "id": "F4.1",
+          "call": "EditAgent.run()",
+          "file": "agents/edit_agent.py",
+          "inputs": {
+            "session_id": "str",
+            "message": "str",
+            "publish": "Publisher",
+            "edit_fn": "Callable — v3.1 不再使用，保留签名兼容",
+            "todo_mgr": "TodoManager",
+            "session_getter": "Callable",
+            "session_saver": "Callable",
+            "workspace_id": "str = ''"
+          },
+          "status": "ok"
+        },
+        {
+          "id": "F4.2",
+          "call": "session_getter(session_id) — 取当前谱子",
+          "outputs": {"current_abc": "str", "meta": "ScoreMeta"},
+          "status": "ok",
+          "note": "无谱子时直接报错返回，不降级"
+        },
+        {
+          "id": "F4.3",
+          "call": "run_edit(current_abc, intent, meta, context_summary, publish, todo_mgr, scene, session_id)",
+          "file": "edit_runner.py",
+          "inputs": {
+            "current_abc": "str",
+            "intent": "str",
+            "meta": "ScoreMeta",
+            "context_summary": "str",
+            "publish": "Publisher",
+            "todo_mgr": "TodoManager",
+            "scene": "str = 'editor'",
+            "session_id": "str"
+          },
+          "outputs": {"abc": "str", "summary": "str"},
+          "status": "ok",
+          "note": "内部走 ReactExecutor ReAct Loop，max_rounds=8"
+        },
+        {
+          "id": "F4.4",
+          "call": "ScoreMeta(title, key, bpm, note_count, time_sig_num, time_sig_den)",
+          "status": "ok",
+          "note": "NEW-05 已修复：补充拍号字段"
+        },
+        {
+          "id": "F4.5",
+          "call": "save_score_to_workspace_impl(abc_notation, title, overwrite=True)",
+          "status": "ok"
+        }
+      ],
+      "known_bugs": [
+        {
+          "id": "BUG-E1",
+          "severity": "HIGH",
+          "status": "FIXED_v6.4",
+          "location": "react_executor.py + edit_agent.py",
+          "desc": "ReactExecutor 超轮退出时，running TODO 未被 complete，edit_agent 的 finish_all(done) 掩盖超轮问题",
+          "fix": "ReactExecutor 返回值增加 timed_out 字段，edit_agent 据此 finish_all(failed)"
+        }
+      ]
+    },
+    "F5_query": {
+      "title": "谱子查询/问答流程",
+      "trigger": "用户提问 OR 无法识别意图时兜底",
+      "domain": "query",
+      "steps": [
+        {
+          "id": "F5.1",
+          "call": "QueryAgent.run()",
+          "file": "agents/query_agent.py",
+          "inputs": {
+            "session_id": "str",
+            "message": "str",
+            "publish": "Publisher",
+            "session_getter": "Callable",
+            "todo_mgr": "TodoManager",
+            "role_id": "str | None"
+          },
+          "status": "ok"
+        },
+        {
+          "id": "F5.2",
+          "call": "stream_llm([system, user], publish)",
+          "status": "ok",
+          "note": "真正流式输出，降级为分块 stream_text"
+        }
+      ],
+      "known_bugs": []
+    },
+    "F6_chain_convert_edit": {
+      "title": "链式意图：转换 + 编辑（如「加载谱子并转MIDI」）",
+      "trigger": "convert 成功 + detect_chain_intent 返回 edit",
+      "domain": "convert → edit",
+      "steps": [
+        {"id": "F6.1", "call": "ConvertAgent.run() — 同 F1/F2", "status": "ok"},
+        {
+          "id": "F6.2",
+          "call": "detect_chain_intent(message, chain_intents)",
+          "outputs": {"extra_domain": "edit"},
+          "status": "ok"
+        },
+        {
+          "id": "F6.3",
+          "call": "chain_todo_mgr.plan(message, 'edit', True, publish, session_id)",
+          "status": "ok"
+        },
+        {
+          "id": "F6.4",
+          "call": "EditAgent().run_with_ctx(chain_ctx)",
+          "inputs": {
+            "chain_ctx.extra.current_abc": "result.get('abc_notation', '') — 从 convert 结果传入"
+          },
+          "status": "FIXED_v6.4",
+          "note": "已修复：EditAgent.run_with_ctx 现在优先读 ctx.extra['current_abc']"
+        }
+      ],
+      "known_bugs": [
+        {
+          "id": "BUG-CH1",
+          "severity": "HIGH",
+          "status": "FIXED_v6.4",
+          "location": "edit_agent.py:run_with_ctx()",
+          "desc": "链式 convert→edit 时 EditAgent 忽略 ctx.extra['current_abc']，依赖 session 写入成功",
+          "fix": "run_with_ctx 优先读 ctx.extra.get('current_abc')，写入 session 失败时仍能正确编辑"
+        }
+      ]
+    },
+    "F7_chain_convert_create": {
+      "title": "链式意图：转换 + 创作（如「加载谱子并改编」）",
+      "trigger": "convert 成功 + detect_chain_intent 返回 create",
+      "domain": "convert → create",
+      "steps": [
+        {"id": "F7.1", "call": "ConvertAgent.run() — 同 F1/F2", "status": "ok"},
+        {
+          "id": "F7.2",
+          "call": "detect_chain_intent(message, chain_intents)",
+          "outputs": {"extra_domain": "create"},
+          "status": "ok"
+        },
+        {
+          "id": "F7.3",
+          "call": "CreateAgent().run_with_ctx(chain_ctx)",
+          "inputs": {
+            "chain_ctx.extra.current_abc": "result.get('abc_notation', '') — 正确传入"
+          },
+          "status": "ok",
+          "note": "CreateAgent.run_with_ctx 读取 ctx.extra.get('current_abc', '')，逻辑正确"
+        }
+      ],
+      "known_bugs": []
+    }
+  },
+  "global_issues": [
+    {
+      "id": "GLOBAL-1",
+      "severity": "HIGH",
+      "status": "FIXED_v6.4",
+      "category": "TODO管理",
+      "location": "create_agent.py:130-133",
+      "desc": "exec_ids fallback 到 ids（全量）时可能操作已完成的 TODO",
+      "fix": "移除 fallback：exec_ids = todo_mgr.get_pending_ids()；若为空则不操作"
+    },
+    {
+      "id": "GLOBAL-2",
+      "severity": "HIGH",
+      "status": "FIXED_v6.4",
+      "category": "链式意图数据传递",
+      "location": "edit_agent.py:run_with_ctx()",
+      "desc": "convert→edit 链式意图时，EditAgent 不读 ctx.extra['current_abc']",
+      "fix": "EditAgent.run_with_ctx 补充读取 current_abc 作为 session fallback"
+    },
+    {
+      "id": "GLOBAL-3",
+      "severity": "MEDIUM",
+      "status": "FIXED_v6.4",
+      "category": "ScoreMeta 完整性",
+      "location": "convert_agent.py:_run_abc_direct():283",
+      "desc": "ScoreMeta 构造缺少 time_sig_num/den，后续 edit 时拍号信息丢失",
+      "fix": "补充 time_sig_num=meta['time_sig_num'], time_sig_den=meta['time_sig_den']"
+    },
+    {
+      "id": "GLOBAL-4",
+      "severity": "MEDIUM",
+      "status": "FIXED_v6.4",
+      "category": "ReactExecutor 超轮处理",
+      "location": "react_executor.py + edit_agent.py",
+      "desc": "ReactExecutor 超轮退出时 running TODO 未被 complete，finish_all(done) 掩盖超轮问题",
+      "fix": "ReactExecutor 返回 timed_out 字段，edit_agent 据此 finish_all(failed)"
+    },
+    {
+      "id": "GLOBAL-5",
+      "severity": "LOW",
+      "status": "FIXED_v6.4",
+      "category": "导出参数缺失",
+      "location": "create_agent.py:391",
+      "desc": "abc_to_sky_json 调用未传 output_filename，使用默认文件名",
+      "fix": "传入 output_filename=f'{title}.json'"
+    },
+    {
+      "id": "GLOBAL-6",
+      "severity": "LOW",
+      "status": "FIXED_v6.4",
+      "category": "重复计算",
+      "location": "create_agent.py:_build_prompt():445+469",
+      "desc": "parse_abc_header(base_abc) 被调用两次",
+      "fix": "缓存第一次结果复用"
+    }
+  ],
+  "summary": {
+    "total_flows": 7,
+    "total_bugs_found_this_round": 6,
+    "by_severity": {"HIGH": 2, "MEDIUM": 2, "LOW": 2},
+    "all_fixed_in_v6.4": true,
+    "already_fixed_in_prior_versions": [
+      "BUG-01: ScoreData→Score+ScoreMeta",
+      "BUG-02: 手写解析→parse_abc_header()",
+      "BUG-03: MIDI关键词补充",
+      "BUG-04: getattr链简化",
+      "BUG-05: project_id 修复",
+      "BUG-06: finish_task误导说明",
+      "BUG-09: editor.agent tools越权",
+      "BUG-10: workspace组只读过滤",
+      "BUG-12: exec_ids[1]导出后才complete_one",
+      "NEW-05: ScoreMeta补充time_sig字段(create/edit)",
+      "NEW-07: _dispatch签名加project_id",
+      "NEW-09: 移除裸midi误触发",
+      "NEW-13: BPM格式化",
+      "NEW-14: RunContext传入project_id",
+      "BUG-M5/M8/M9/M12: MiniMax API参数校验"
+    ]
+  }
+}
