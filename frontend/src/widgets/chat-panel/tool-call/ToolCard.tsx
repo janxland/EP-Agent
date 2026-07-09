@@ -79,6 +79,9 @@ const TOOL_CONFIG: Record<string, ToolConfig> = {
   edit_workspace_file:       { bg: '#FFFBEB', fg: '#D97706', emoji: '✏️',  label: '精准编辑文件' },
   read_workspace_files:      { bg: '#EFF6FF', fg: '#2563EB', emoji: '📚', label: '批量读取文件' },
   run_write_tasks_in_parallel: { bg: '#FFF7ED', fg: '#EA580C', emoji: '⚡', label: '并行写入文件' },
+
+  // ── audio 保存组 ──────────────────────────────────────────────────────────────
+  save_audio_from_url:       { bg: '#F0FDF4', fg: '#15803D', emoji: '💿', label: '保存音频到工作区' },
 }
 
 const _DEFAULT_CONFIG: ToolConfig = { bg: '#F9FAFB', fg: '#6B7280', emoji: '🔧', label: '' }
@@ -127,10 +130,11 @@ function extractFileInfo(resultText: string, wsId: string, projId: string): File
     const filename = wp.split('/').pop() || wp
     const kind = getFileKind(filename)
     if (kind === 'other') return null
-    // 构造访问 URL：GET /workspaces/{ws_id}/files/content?path=xxx&project_id=xxx&encoding=raw
+    // 构造访问 URL：GET /api/workspaces/{ws_id}/files/content?path=xxx&project_id=xxx&encoding=raw
+    // 注意：必须加 /api 前缀，next.config.js 的代理规则是 /api/:path* → 后端
     const params = new URLSearchParams({ path: wp, encoding: 'raw' })
     if (projId) params.set('project_id', projId)
-    const url = `/workspaces/${encodeURIComponent(wsId)}/files/content?${params.toString()}`
+    const url = `/api/workspaces/${encodeURIComponent(wsId)}/files/content?${params.toString()}`
     return {
       workspace_path: wp,
       filename,

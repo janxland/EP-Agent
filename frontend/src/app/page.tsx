@@ -21,7 +21,7 @@ export default function ModeSelectorPage() {
       </div>
 
       {/* 模式选择卡片 */}
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-6 w-full max-w-2xl">
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-6 w-full max-w-3xl">
 
         {/* 小白模式 */}
         <Link href="/simple" className="group block">
@@ -76,9 +76,36 @@ export default function ModeSelectorPage() {
             </div>
           </div>
         </Link>
+
+        {/* 音频生成控制台 */}
+        <Link href="/audio" className="group block">
+          <div className="bg-white rounded-2xl border border-gray-100 p-6 space-y-4 shadow-sm hover:shadow-md hover:border-orange-200 transition-all group-hover:-translate-y-0.5">
+            <div className="flex items-center gap-3">
+              <div className="w-10 h-10 bg-orange-500 rounded-xl flex items-center justify-center text-xl shadow-sm shadow-orange-200">
+                🎵
+              </div>
+              <div>
+                <h2 className="font-semibold text-gray-800">音频生成控制台</h2>
+                <p className="text-xs text-gray-400">专注音频创作</p>
+              </div>
+            </div>
+            <ul className="space-y-1.5 text-xs text-gray-500">
+              <li className="flex items-center gap-2"><span className="text-orange-400">✓</span> AI 对话式配乐（中国风/流行/爵士…）</li>
+              <li className="flex items-center gap-2"><span className="text-orange-400">✓</span> 音色克隆（上传音频复刻你的声音）</li>
+              <li className="flex items-center gap-2"><span className="text-orange-400">✓</span> 多轮迭代优化生成结果</li>
+              <li className="flex items-center gap-2"><span className="text-orange-400">✓</span> MiniMax / Suno AI 多服务商</li>
+            </ul>
+            <div className="flex items-center justify-between pt-1">
+              <span className="text-xs text-gray-300">独立控制台，无需乐谱</span>
+              <span className="text-xs text-orange-500 font-medium group-hover:translate-x-0.5 transition-transform">
+                进入 →
+              </span>
+            </div>
+          </div>
+        </Link>
       </div>
 
-      <p className="mt-8 text-xs text-gray-300">两种模式共享同一后端，可随时切换</p>
+      <p className="mt-8 text-xs text-gray-300">三种模式共享同一后端，可随时切换</p>
     </div>
   )
 }

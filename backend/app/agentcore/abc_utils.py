@@ -300,3 +300,218 @@ def check_duration_requirement(abc: str, required_minutes: float) -> dict:
         "required_bars":    required_bars,
         "shortage_bars":    shortage,
     }
+
+
+def extract_abc_from_message(message: str) -> str:
+    """
+    从用户消息中提取内嵌的 ABC 谱子。
+
+    用户常常把参考 ABC 直接粘贴在消息里（而非作为附件上传），
+    原代码完全忽略了这种情况，导致 base_abc 永远为空，改编模式永远不触发。
+
+    支持两种格式：
+      A. 多行格式（标准）：每个 header 字段独占一行，X: 开头
+      B. 单行紧凑格式：X:1T:曲名M:4/4L:1/8Q:1/4=160K:C 音符... 全在一行
+         （用户从 Sky 游戏导出或直接粘贴时常见此格式）
+
+    提取策略：
+      1. 快速检测：消息必须同时含 K: 和 X: 才可能有 ABC
+      2. 找到 X: 的位置（字符级，不依赖行结构）
+      3. 从 X: 开始截取到消息末尾（或明显的非ABC文字终止）
+      4. 对紧凑单行格式，将 header 字段展开为多行（便于后续解析）
+      5. 验证结构完整性（含 K: 字段 + Body 有音符）
+
+    返回提取到的 ABC 字符串（已规范化为多行），未找到返回空字符串。
+    """
+    if not message:
+        return ""
+
+    # 快速检测：消息中必须同时含 K: 和 X: 才可能有 ABC
+    if "K:" not in message or "X:" not in message:
+        return ""
+
+    # ── 策略A：多行格式处理 ──────────────────────────────────────────────────
+    # 先尝试标准多行格式（X: 在某行行首）
+    lines = message.splitlines()
+    abc_start_line = -1
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        if re.match(r'^X:\s*\d', stripped):
+            abc_start_line = i
+            break
+
+    if abc_start_line >= 0:
+        # 找到多行 X: 起始，收集 ABC 行
+        _ABC_LINE_PAT = re.compile(
+            r'^(?:[XTMLKQCSZS]:|'       # header 字段
+            r'[A-Ga-gz\[\|\]^_,\'"!]|'  # 音符起始
+            r'\|)'                       # 小节线起始
+        )
+        abc_lines = []
+        for line in lines[abc_start_line:]:
+            stripped = line.strip()
+            if not stripped:
+                break  # ABC 规范：空行是终止符
+            if _ABC_LINE_PAT.match(stripped):
+                abc_lines.append(stripped)
+            else:
+                has_key = any(l.startswith("K:") for l in abc_lines)
+                if has_key:
+                    break
+        abc_text = "\n".join(abc_lines)
+        if is_abc_structurally_valid(abc_text):
+            return abc_text
+
+    # ── 策略B：单行紧凑格式处理 ──────────────────────────────────────────────
+    # 用户粘贴的 ABC 全在一行，如：
+    #   X:1T:晚安喵M:4/4L:1/8Q:1/4=160K:Dbz8 | z6A2 | [DA_g]4...
+    # 找到 X: 的字符位置
+    x_pos = message.find("X:")
+    if x_pos < 0:
+        return ""
+
+    raw_abc = message[x_pos:]
+
+    # 将紧凑 header 展开为多行
+    # 识别 header 字段边界：在 [A-Z]: 模式前插入换行
+    # 但要避免把音符行中的大写字母误判为 header（音符行在 K: 之后）
+    # 策略：先找到 K: 的位置，K: 之前的部分做 header 展开，之后保留原样
+
+    k_pos = raw_abc.find("K:")
+    if k_pos < 0:
+        return ""
+
+    # K: 之后找到调号结束（字母+可选b/#）
+    # K: 调号格式：K:Db / K:C / K:Am / K:F#m 等
+    # 只匹配调号本身，不能把后面的音符（z/c/d等小写字母）吃进去
+    # 调号结构：根音字母(A-G) + 可选升降(b/#) + 可选调式(m/min/maj/dor等，但不是单独小写音符)
+    k_end_m = re.match(r'K:[A-G][b#]?(?:m(?:in)?|maj|dor|phr|lyd|mix|aeo|loc)?', raw_abc[k_pos:])
+    if not k_end_m:
+        return ""
+    k_end = k_pos + k_end_m.end()
+
+    header_raw = raw_abc[:k_end]   # 从 X: 到 K:Xx 结束
+    body_raw   = raw_abc[k_end:]   # K: 之后的音符内容
+
+    # 展开 header：在每个 [A-Z]: 前插入换行（X: 本身不需要前置换行）
+    header_expanded = re.sub(r'(?<!\n)([A-Z]:)', r'\n\1', header_raw).strip()
+
+    # body 清理：去掉前导非ABC字符（如空格），保留音符和小节线
+    body_clean = body_raw.strip()
+
+    abc_text = header_expanded + "\n" + body_clean
+
+    # 验证结构完整性
+    if is_abc_structurally_valid(abc_text):
+        return abc_text
+
+    return ""
+
+
+def extract_motif_bars(abc: str, bar_count: int = 8) -> str:
+    """
+    从 ABC 谱中提取前 N 个小节作为「核心动机段落」。
+
+    用途：改编模式下，Python 层预提取核心动机注入 prompt，
+    让 LLM 明确知道哪些是核心动机，而不是自己在长谱中猜测。
+
+    参数：
+      abc       — 完整 ABC 谱字符串
+      bar_count — 提取的小节数，默认 8（约前两段）
+
+    返回：包含 header + 前 N 小节的 ABC 片段字符串。
+    """
+    if not abc:
+        return ""
+
+    k_match = re.search(r'^K:.*$', abc, re.MULTILINE)
+    if not k_match:
+        return abc[:500]  # 没有 K: 行则返回前500字符
+
+    # 提取 header（K: 行及之前）
+    header = abc[:k_match.end()].strip()
+    body   = abc[k_match.end():].strip()
+
+    # 按小节线分割，收集前 bar_count 个小节
+    # 小节线：| 但不是 || 或 |: 或 :|
+    bars_collected = 0
+    result_chars   = []
+    i = 0
+
+    while i < len(body) and bars_collected < bar_count:
+        ch = body[i]
+        result_chars.append(ch)
+        if ch == '|':
+            # 检查是否是双小节线 || 或反复记号 |: :|
+            next_ch = body[i + 1] if i + 1 < len(body) else ""
+            if next_ch not in ('|', ':'):
+                bars_collected += 1
+        i += 1
+
+    motif_body = "".join(result_chars).strip()
+    return f"{header}\n{motif_body}"
+
+
+def check_melody_quality(abc: str) -> dict:
+    """
+    检测 ABC Body 中的旋律线条质量。
+
+    问题：LLM 有时只输出和弦块堆砌（如 [DA_g]4[DA_g]2A2 反复），
+    没有真正的旋律线条。这种输出节奏单调、音乐性极差。
+
+    检测逻辑：
+      - 统计每行中「在和弦块 [] 内的音符」占该行总音符的比例
+      - 若某行 > 80% 音符都在和弦块内，判定为「纯和弦堆砌行」
+      - 全曲纯和弦堆砌行占比 > 50% 时，整体质量判定为低
+
+    返回：
+      {
+        "low_quality":        bool,   # True 表示旋律线条质量差
+        "chord_block_lines":  [(line_idx, ratio, preview), ...],  # 问题行列表
+        "total_body_lines":   int,
+        "chord_block_count":  int,    # 纯和弦堆砌行数
+        "quality_ratio":      float,  # 有旋律线条的行占比（越高越好）
+      }
+    """
+    k_match = re.search(r'^K:.*$', abc, re.MULTILINE)
+    if not k_match:
+        return {
+            "low_quality": False,
+            "chord_block_lines": [],
+            "total_body_lines": 0,
+            "chord_block_count": 0,
+            "quality_ratio": 1.0,
+        }
+
+    body = abc[k_match.end():].strip()
+    lines = [l.strip() for l in body.splitlines()
+             if l.strip() and not l.strip().startswith('%')]
+
+    chord_block_lines = []
+    for i, line in enumerate(lines):
+        # 统计和弦块内的音符数（[] 内的字母）
+        in_chord = re.findall(r'\[([^\]]+)\]', line)
+        chord_note_count = sum(
+            len(re.findall(r'[A-Ga-gz]', seg)) for seg in in_chord
+        )
+        # 统计行内所有音符数
+        total_note_count = len(re.findall(r'[A-Ga-gz]', line))
+
+        if total_note_count < 3:
+            continue  # 太短的行跳过
+
+        ratio = chord_note_count / total_note_count if total_note_count > 0 else 0.0
+        if ratio > 0.80:
+            chord_block_lines.append((i, ratio, line[:60]))
+
+    total = len(lines)
+    cb_count = len(chord_block_lines)
+    quality_ratio = (total - cb_count) / total if total > 0 else 1.0
+
+    return {
+        "low_quality":       cb_count > 0 and quality_ratio < 0.5,
+        "chord_block_lines": chord_block_lines,
+        "total_body_lines":  total,
+        "chord_block_count": cb_count,
+        "quality_ratio":     quality_ratio,
+    }

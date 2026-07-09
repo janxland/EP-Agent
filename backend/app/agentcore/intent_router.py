@@ -173,11 +173,19 @@ def detect_chain_intent(message: str, chain_intents: list[str], attachment_name:
 
     优先级：H5词 > 时长词 > 创作词 > edit词 > create词
     """
-    # FIX-BUG-4: 当 router 已返回多个 chain_intents 时，取第一个（主要意图）。
-    # 例：router 返回 ["convert","edit"] → 应从 "convert" 开始链路，而不是 "edit"。
-    # 第一个意图是用户话语的核心操作（"转化成ABC"），后续是附加请求。
+    # BUG-ROUTE-1 修复：当 router 已返回多个 chain_intents 时，
+    # 此函数在 convert 已成功执行后被调用，目的是找「convert 之后的下一步」。
+    # 因此应取 chain_intents 中第一个「非 convert」的意图，而不是 chain_intents[0]。
+    # 原来返回 chain_intents[0]（即 "convert" 自身），导致 convert→convert 死循环，
+    # 链式意图（如 convert→create、convert→edit）完全失效。
+    # 例：router 返回 ["convert","edit"] → 此处应返回 "edit"（下一步），而非 "convert"
+    # 例：router 返回 ["convert","create"] → 此处应返回 "create"（下一步），而非 "convert"
     if len(chain_intents) > 1:
-        return chain_intents[0]
+        for _intent in chain_intents:
+            if _intent != "convert":
+                return _intent
+        # 全是 convert（异常情况），返回最后一个避免死循环
+        return chain_intents[-1]
 
     # FIX-BUG-4-2: 兜底：当 router 返回空 chain_intents，但用户有 .txt 附件+创作词时，
     # 说明 router LLM 没有正确识别出 convert 意图，必须强制走 convert。

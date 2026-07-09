@@ -13,7 +13,6 @@
 import { useCallback, useEffect, useRef, useState, type MouseEvent as ReactMouseEvent } from 'react'
 import { useParams, useRouter } from 'next/navigation'
 import { useWorkspaceStore } from '@/features/workspace/store/workspace.store'
-import { AudioPanel } from '@/widgets/audio-panel/AudioPanel'
 import { ChatPanel } from '@/widgets/chat-panel/ChatPanel'
 import { WorkspaceFileTree, FILE_PREVIEW_EVENT } from '@/widgets/workspace-sidebar/WorkspaceFileTree'
 import { WorkspaceSidebar } from '@/widgets/workspace-sidebar/WorkspaceSidebar'
@@ -217,17 +216,6 @@ export default function ProSessionPage() {
         <ResizeDivider onDrag={handleResizeDrag} />
 
         <aside style={{ width: chatWidth }} className="flex flex-col overflow-hidden shrink-0 bg-white">
-          <details className="border-b border-gray-100 group shrink-0">
-            <summary className="px-3 py-2 text-xs font-semibold text-gray-400 uppercase tracking-wider cursor-pointer hover:text-gray-600 flex items-center gap-1.5 select-none list-none transition-colors hover:bg-gray-50">
-              <svg className="w-3 h-3 transition-transform group-open:rotate-90 text-gray-300 shrink-0"
-                fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
-              </svg>
-              🎵 音频生成
-              <span className="ml-auto text-[9px] text-gray-300 font-normal normal-case tracking-normal">点击展开</span>
-            </summary>
-            <div className="max-h-72 overflow-y-auto border-t border-gray-50"><AudioPanel /></div>
-          </details>
           <div className="flex-1 overflow-hidden"><ChatPanel /></div>
         </aside>
       </div>

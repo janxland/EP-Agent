@@ -27,8 +27,9 @@ if False:  # TYPE_CHECKING
     from app.agentcore.run_context import RunContext
 from app.agentcore.react_executor import stream_text
 from app.agentcore.abc_utils import (
-    extract_abc_and_summary, parse_abc_header, count_notes,
+    extract_abc_and_summary, parse_abc_header, count_notes, count_bars,
     check_duration_requirement, detect_duplicate_lines, check_rhythm_variety,
+    extract_abc_from_message, extract_motif_bars, check_melody_quality,
 )
 from app.agentcore.agent_loader import load_agent_prompt
 
@@ -54,12 +55,19 @@ def _calc_duration_hint(mins: float, bpm: float, time_sig_num: int = 4) -> str:
     """
     根据目标时长、BPM、拍号精确计算目标行数，返回注入 prompt 的说明文本。
     每行 = 4小节，每小节 = (60/BPM) × time_sig_num 拍。
+
+    行数上限动态计算（不再硬写死32）：
+      - 理论上限 = 目标时长对应的精确行数 × 1.5（允许50%余量）
+      - 绝对上限 = 48行（约6分钟@BPM120，防止 LLM 输出超长导致超时）
+      - 绝对下限 = 4行（至少16小节，保证最短片段）
     """
     seconds_per_bar  = (60.0 / bpm) * time_sig_num
     seconds_per_line = seconds_per_bar * 4          # 每行 4 小节
     target_seconds   = mins * 60.0
     target_lines     = round(target_seconds / seconds_per_line)
-    target_lines     = max(6, min(32, target_lines))  # 限制在合理范围
+    # 动态上限：理论行数的1.5倍，但不超过48行，不低于4行
+    dynamic_max      = min(48, max(int(target_lines * 1.5), target_lines + 4))
+    target_lines     = max(4, min(dynamic_max, target_lines))
     target_bars      = target_lines * 4
 
     return (
@@ -76,20 +84,106 @@ def _calc_duration_hint(mins: float, bpm: float, time_sig_num: int = 4) -> str:
 
 
 def _extract_bpm_from_message(message: str) -> float | None:
-    """从用户消息中提取 BPM，未找到返回 None。"""
+    """
+    从用户消息中提取 BPM。
+    支持两种格式：
+      1. 显式声明：「160bpm」「160 BPM」「160拍」
+      2. ABC header 内嵌：消息中含 Q:1/4=160 格式
+    优先级：显式声明 > ABC header 内嵌
+    """
+    # 1. 显式 BPM 声明
     m = re.search(r'(\d+)\s*(?:bpm|BPM|拍)', message)
     if m:
         return float(m.group(1))
+    # 2. 从内嵌 ABC header 的 Q: 字段提取（如 Q:1/4=160）
+    q = re.search(r'Q:\s*\d+/\d+=\s*(\d+)', message)
+    if q:
+        return float(q.group(1))
+    # 3. 简单 Q:=160 格式
+    q2 = re.search(r'Q:\s*(?:\d+/\d+=)?(\d+)', message)
+    if q2:
+        return float(q2.group(1))
     return None
 
 
 def _infer_bpm_from_style(message: str) -> float:
-    """根据风格关键词推断 BPM，无匹配返回 120。"""
-    if any(kw in message for kw in ['慢', '抒情', '轻柔', '安静', '悠扬']):
-        return 90.0
-    if any(kw in message for kw in ['快', '欢快', '活泼', '节拍', '激烈']):
-        return 140.0
-    return 120.0
+    """
+    根据风格关键词推断 BPM。
+    覆盖更多常见音乐风格场景，优先匹配更具体的风格词。
+    无匹配时返回 None，让 LLM 自己在 prompt 中决定 BPM。
+    """
+    # 极慢/慢摇/Ballad：60-75
+    if any(kw in message for kw in ['慢摇', '摇篮曲', 'ballad', '极慢', '很慢']):
+        return 70.0
+    # 抒情/轻柔/安静：80-95
+    if any(kw in message for kw in ['抒情', '轻柔', '安静', '悠扬', '忧郁', '伤感', '思念', '治愈']):
+        return 88.0
+    # R&B / Soul：75-90
+    if any(kw in message for kw in ['r&b', 'rnb', 'soul', '慵懒', '性感']):
+        return 82.0
+    # 爵士 Jazz：100-120
+    if any(kw in message for kw in ['爵士', 'jazz', '即兴', 'swing']):
+        return 110.0
+    # 电子 / EDM：125-135
+    if any(kw in message for kw in ['电子', 'edm', 'dance', '电音', '蹦迪']):
+        return 128.0
+    # 欢快/活泼/流行快歌：130-145
+    if any(kw in message for kw in ['欢快', '活泼', '激烈', '跑跳', '蹦蹦']):
+        return 138.0
+    # 快/动感：140+
+    if any(kw in message for kw in ['快节奏', '高能', '摇滚', 'rock', '金属', 'metal']):
+        return 148.0
+    # 中速流行（默认）
+    if any(kw in message for kw in ['流行', '华语', '情歌', '民谣', '轻快']):
+        return 116.0
+    # 无匹配：返回 None，由调用方决定是否使用默认值
+    return None
+
+
+def _extract_bars_from_offset(abc: str, skip_bars: int, take_bars: int) -> str:
+    """
+    从 ABC 谱中跳过前 skip_bars 个小节，再提取 take_bars 个小节。
+    用于提取中段动机（跳过前奏，直接取主题段落）。
+
+    参数：
+      abc       — 完整 ABC 谱字符串
+      skip_bars — 跳过的小节数
+      take_bars — 提取的小节数
+
+    返回：提取到的小节内容字符串（纯音符行，不含 header）。
+    """
+    if not abc:
+        return ""
+    k_match = re.search(r'^K:.*$', abc, re.MULTILINE)
+    if not k_match:
+        return ""
+    body = abc[k_match.end():].strip()
+
+    bars_skipped = 0
+    bars_taken   = 0
+    result_chars = []
+    i = 0
+
+    # 先跳过 skip_bars 个小节
+    while i < len(body) and bars_skipped < skip_bars:
+        ch = body[i]
+        if ch == '|':
+            next_ch = body[i + 1] if i + 1 < len(body) else ""
+            if next_ch not in ('|', ':'):
+                bars_skipped += 1
+        i += 1
+
+    # 再收集 take_bars 个小节
+    while i < len(body) and bars_taken < take_bars:
+        ch = body[i]
+        result_chars.append(ch)
+        if ch == '|':
+            next_ch = body[i + 1] if i + 1 < len(body) else ""
+            if next_ch not in ('|', ':'):
+                bars_taken += 1
+        i += 1
+
+    return "".join(result_chars).strip()
 
 
 @register("create")
@@ -123,9 +217,15 @@ class CreateAgent:
         except Exception:
             pass
 
-        # 确定本次创作的「基础 ABC」：参数传入 > session.score.abc_notation
+        # ── BUG-PROMPT-1 修复：从 message 中提取内嵌 ABC 参考谱 ─────────────────
+        # 用户常常把参考 ABC 直接粘贴在消息里（而非作为附件上传）
+        # 原代码完全忽略了这种情况，导致 base_abc 永远为空，改编模式永远不触发
+        # 修复：检测 message 是否含合法 ABC（含 K: 字段），若有则提取为 message_abc
+        message_abc = extract_abc_from_message(message)
+
+        # 确定本次创作的「基础 ABC」：参数传入 > session.score.abc_notation > message 内嵌
         # 规则：只认真正的 ABC Notation（含 K: 字段），不读 .txt/.json（Sky JSON）
-        base_abc = current_abc or session_abc
+        base_abc = current_abc or session_abc or message_abc
 
         # BUG-CR1 修复：只取 pending 状态的 TODO，不 fallback 到 ids 全量
         # 原来 pending 为空时 fallback 到 ids（含 done/failed），会重复操作已完成 TODO
@@ -159,8 +259,19 @@ class CreateAgent:
             pass
 
         # 创作场景必须用高 temperature，否则 LLM 输出极度保守、旋律平淡
-        # 改编模式（有 base_abc）用 0.85，从零创作用 0.92
-        create_temperature = 0.85 if base_abc else 0.92
+        # temperature 根据改编强度动态调整：
+        #   - 「保留原味/严格按照/风格相似」→ 偏低（0.75），保守改编
+        #   - 「自由发挥/全新创作/大胆」→ 偏高（0.95），激进创作
+        #   - 默认：改编 0.85，从零创作 0.92
+        if base_abc:
+            if any(kw in message for kw in ['保留原味', '严格按照', '风格相似', '尽量保持', '不要改太多']):
+                create_temperature = 0.75
+            elif any(kw in message for kw in ['自由发挥', '大胆', '全新', '完全不同', '随意']):
+                create_temperature = 0.95
+            else:
+                create_temperature = 0.85
+        else:
+            create_temperature = 0.92
         try:
             resp = await llm_complete(
                 [
@@ -199,6 +310,12 @@ class CreateAgent:
 
         # ── 节奏多样性检测 + 自动修正（防止全八分音符单调输出）──────────────────
         new_abc, summary = await self._fix_rhythm_monotone(
+            new_abc, summary, system, user_prompt, publish
+        )
+
+        # ── 旋律线条质量检测 + 自动修正（BUG-QP-1 修复：防止纯和弦块堆砌）────────
+        # 必须在节奏修正之后执行，避免误判节奏修正后的结果
+        new_abc, summary = await self._fix_melody_quality(
             new_abc, summary, system, user_prompt, publish
         )
 
@@ -440,12 +557,15 @@ class CreateAgent:
         """
         system = _load_system_create()
 
-        # ── 确定 BPM（优先级：消息中指定 > 原谱 BPM > 风格推断）────────────────
+        # ── 确定 BPM（优先级：消息显式声明 > 原谱Q:字段 > 原谱header > session > 风格推断 > 默认120）
+        # BUG-PROMPT-2 修复：_extract_bpm_from_message 现在也能识别 Q:1/4=160 格式
+        # _infer_bpm_from_style 返回 None 时表示无法推断，fallback 到 120
         bpm = (
             _extract_bpm_from_message(message)
             or (parse_abc_header(base_abc)["bpm"] if base_abc else None)
-            or session_bpm
+            or (session_bpm if session_bpm and session_bpm != 120.0 else None)
             or _infer_bpm_from_style(message)
+            or 120.0
         )
         # 从原谱获取拍号
         time_sig_num = session_time_sig_num
@@ -459,33 +579,69 @@ class CreateAgent:
             mins = float(dur_match.group(1))
             duration_hint = _calc_duration_hint(mins, bpm, time_sig_num)
         else:
-            # 无时长要求：默认写 10-14 行（约 1.5-2 分钟），给出参考
+            # 无时长要求：根据用户描述智能判断长度
             seconds_per_line = (60.0 / bpm) * time_sig_num * 4
-            default_lines_min = max(6, round(90 / seconds_per_line))
-            default_lines_max = max(default_lines_min + 2, round(120 / seconds_per_line))
+            # 检测是否是短片段请求（前奏/间奏/几小节/片段）
+            is_short_fragment = any(kw in message for kw in [
+                '前奏', '间奏', '尾奏', '片段', '几小节', '4小节', '8小节',
+                '一段', '短', 'intro', 'outro', 'bridge'
+            ])
+            if is_short_fragment:
+                default_lines_min = max(2, round(20 / seconds_per_line))
+                default_lines_max = max(default_lines_min + 2, round(40 / seconds_per_line))
+                fragment_hint = "（短片段模式）"
+            else:
+                # 完整曲目：1.5-2.5 分钟，根据 BPM 动态调整
+                default_lines_min = max(6, round(90 / seconds_per_line))
+                default_lines_max = max(default_lines_min + 4, round(150 / seconds_per_line))
+                fragment_hint = ""
             duration_hint = (
-                f"\n\n【时长参考】BPM={bpm:.0f}，每行（4小节）{seconds_per_line:.1f} 秒。"
-                f"无时长要求时写 {default_lines_min}-{default_lines_max} 行（约1.5-2分钟），精炼优于冗长。"
+                f"\n\n【时长参考{fragment_hint}】BPM={bpm:.0f}，每行（4小节）{seconds_per_line:.1f} 秒。"
+                f"建议写 {default_lines_min}-{default_lines_max} 行，精炼优于冗长。"
+                f"你可根据情绪弧线自主决定最终行数，在此范围内灵活调整。"
             )
 
-        # ── 改编模式：注入完整原谱 ────────────────────────────────────────────
+        # ── 改编模式：注入完整原谱 + 预提取核心动机段落 ──────────────────────
+        # BUG-PROMPT-3 修复：Python 层预提取前8小节作为「核心动机段落」单独标注
+        # 让 LLM 明确知道哪些是核心动机，而不是自己在长谱中猜测
         if base_abc:
-            # BUG-CR2 修复：复用已在第445行解析的 base_header，避免重复调用 parse_abc_header
-            base_header = parse_abc_header(base_abc) if not base_abc else parse_abc_header(base_abc)
+            base_header = parse_abc_header(base_abc)
+            # 智能提取核心动机段落：
+            # 对于有长前奏的曲子，前8小节可能是前奏而非主题
+            # 策略：提取前8小节 + 中段8小节，让LLM自己判断哪段是核心动机
+            # BUG-PROMPT-4 修复：base_abc.find('K:') 在无 K: 时返回 -1，
+            # base_abc[-1:] 只取最后1字符，导致 total_bars 永远为 0，中段动机永远不提取。
+            # 修复：用 count_bars() 直接统计（内部已用 re.search K: 安全处理）
+            total_bars = count_bars(base_abc) if base_abc else 0
+            motif_bars_head = extract_motif_bars(base_abc, bar_count=8)  # 前8小节
+            # 若谱子够长（>16小节），额外提取中段作为对比参考
+            mid_hint = ""
+            if total_bars > 16:
+                mid_start = total_bars // 3  # 约1/3处开始
+                mid_hint = f"\n\n【中段参考（第{mid_start+1}小节起）— 可能包含主题或副歌动机】\n"
+                # 用正则跳过前mid_start个小节后再提取
+                mid_hint += _extract_bars_from_offset(base_abc, mid_start, 8)
+            motif_bars = motif_bars_head
             arrange_note = (
-                f"\n\n## 改编/延伸模式\n"
+                f"\n\n## 改编/延伸模式（基于参考谱动机提取）\n"
                 f"原谱信息：调号={base_header['key']}，BPM={base_header['bpm']:.0f}，"
                 f"拍号={base_header['time_sig_num']}/{base_header['time_sig_den']}\n"
-                f"原谱是你的音乐素材库——提取其核心动机、调式、情感色彩，"
-                f"结合用户需求创作全新旋律。\n"
-                f"⚠️ 不是复制原谱，不是重复原谱的旋律行，而是基于原谱的音乐语言写出新的音乐叙事。\n"
+                f"\n【核心动机段落（前8小节）— 提取和弦骨架和节奏型】\n"
+                f"{motif_bars}\n"
+                f"{mid_hint}"
+                f"\n执行动机提取四步法（脑内完成）：\n"
+                f"① 从上方核心动机段落识别和弦骨架（根音序列）\n"
+                f"② 识别核心节奏型（最常用时值组合）\n"
+                f"③ 判断情感色彩（调式/音区/密度）\n"
+                f"④ 找出钩子片段（最有辨识度的2-4小节）\n"
+                f"然后：基于骨架写全新旋律，不复制原谱任何音符！\n"
                 f"⚠️ 每一行旋律都必须是新的，任意两行不能完全相同。"
             )
             user = (
                 f"用户需求：{message}"
                 f"{duration_hint}"
                 f"{arrange_note}"
-                f"\n\n原始 ABC 谱（完整数据，用于理解音乐结构）：\n{base_abc}"
+                f"\n\n原始 ABC 谱（完整参考数据）：\n{base_abc}"
             )
         else:
             # 从零创作
@@ -598,6 +754,83 @@ class CreateAgent:
             await publish("pipeline.step", {
                 "step": "create_rhythm_fix", "status": "failed",
                 "text": "节奏修正效果有限，保留原版",
+            })
+        except Exception:
+            pass
+        return abc, summary
+
+    async def _fix_melody_quality(
+        self,
+        abc: str,
+        summary: str,
+        system: str,
+        user_prompt: str,
+        publish: Publisher,
+    ) -> tuple[str, str]:
+        """
+        检测旋律线条质量（BUG-QP-1 修复）。
+        防止 LLM 输出「只有和弦块堆砌，没有旋律线条」的低质量谱子。
+
+        触发条件：
+          - quality_ratio < 0.5（超过50%的行是纯和弦块堆砌）
+          - 至少4行以上（太短的谱子不做质量判断）
+
+        修正策略：
+          - 告知 LLM 哪些行是纯和弦块堆砌
+          - 要求在和弦骨架上加入真正的旋律线条
+          - 保留和弦进行，但每行需有单音旋律音符
+        """
+        try:
+            result = check_melody_quality(abc)
+            quality_ratio  = result.get("quality_ratio", 1.0)
+            cb_count       = result.get("chord_block_count", 0)
+            total          = result.get("total_body_lines", 0)
+
+            if quality_ratio >= 0.5 or total < 4:
+                return abc, summary  # 旋律线条质量足够，无需修正
+
+            # 构造问题行描述
+            cb_lines = result.get("chord_block_lines", [])[:5]
+            cb_desc = "\n".join(
+                f"  - 第{i+1}行（和弦块占{ratio:.0%}）：{preview}"
+                for i, ratio, preview in cb_lines
+            )
+            await publish("pipeline.step", {
+                "step": "create_melody_fix", "status": "running",
+                "text": f"旋律线条质量差（{cb_count}/{total} 行纯和弦堆砌），正在修正...",
+            })
+            resp = await llm_complete(
+                [
+                    {"role": "system", "content": system},
+                    {"role": "user",   "content": user_prompt},
+                    {"role": "assistant", "content": abc},
+                    {"role": "user", "content": (
+                        f"你的谱子有 {cb_count} 行是纯和弦块堆砌，没有真正的旋律线条：\n"
+                        f"{cb_desc}\n\n"
+                        f"这种写法只是把和弦块反复堆砌，完全没有音乐性。\n"
+                        f"请重写这些行，在保留和弦骨架的同时加入真正的旋律线条：\n"
+                        f"- 用单音旋律音符（如 d2 e2 f2 g2）构成主旋律\n"
+                        f"- 和弦块 [] 只用于低音铺垫，不能占全行的80%以上\n"
+                        f"- 旋律应有方向感（上行/下行/波浪），不是原地踏步\n"
+                        f"- 混用至少2种时值（切分/附点/长音）\n"
+                        f"重新输出完整 ABC + SUMMARY 行。"
+                    )},
+                ],
+                temperature=0.88,
+            )
+            raw_fix = resp if isinstance(resp, str) else resp.get("content", "")
+            abc_fix, sum_fix = extract_abc_and_summary(raw_fix, abc)
+            if "K:" in abc_fix:
+                result2 = check_melody_quality(abc_fix)
+                if result2.get("quality_ratio", 0) > quality_ratio:
+                    await publish("pipeline.step", {
+                        "step": "create_melody_fix", "status": "succeeded",
+                        "text": f"旋律线条已改善（{quality_ratio:.0%}→{result2['quality_ratio']:.0%}）",
+                    })
+                    return abc_fix, sum_fix
+            await publish("pipeline.step", {
+                "step": "create_melody_fix", "status": "failed",
+                "text": "旋律修正效果有限，保留原版",
             })
         except Exception:
             pass
