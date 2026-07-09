@@ -325,6 +325,41 @@ class UniversalChatRunner:
             },
         )
 
+        # ── BUG-4 FIX: 拦截 .txt 附件+创作词但 router 未路由到 convert 的情况 ─────
+        # router LLM 可能没返回 chain_intents，导致走 create 域而跳过了 convert 步骤。
+        # 此时手动补 convert（因为 .txt 含 songNotes，必须先转 ABC）。
+        _needs_convert_first = (
+            domain != "convert"
+            and attachment_name
+            and attachment_name.lower().endswith(".txt")
+            and attachment_content
+        )
+        if _needs_convert_first:
+            # 快速检测附件内容是否含 songNotes（convert 域的判断逻辑）
+            try:
+                import json as _json, re as _re
+                _raw = attachment_content.strip()
+                _m = _re.search(r'\{.*\}', _raw, _re.DOTALL)
+                _candidate = _m.group() if _m else _raw
+                _parsed = _json.loads(_candidate)
+                _arr = _parsed if isinstance(_parsed, list) else [_parsed]
+                _is_sky = bool(_arr and isinstance(_arr[0], dict) and _arr[0].get("songNotes"))
+                if not _is_sky:
+                    # 尝试列表中的每一项
+                    for _item in (_parsed if isinstance(_parsed, list) else [_parsed]):
+                        if isinstance(_item, dict) and _item.get("songNotes"):
+                            _is_sky = True
+                            break
+            except Exception:
+                _is_sky = False
+            if _is_sky:
+                # 强制走 convert 域，不走其他域
+                domain = "convert"
+                await publish("pipeline.step", {
+                    "step": "force_convert", "status": "running",
+                    "text": f"检测到 .txt 含 Sky JSON，强制先执行 convert 步骤",
+                })
+
         # ── convert 域（含降级 + 链式意图，逻辑复杂保留内联）────────────────
         if domain == "convert":
             result = await get_agent("convert")().run_with_ctx(ctx)
@@ -342,7 +377,7 @@ class UniversalChatRunner:
                 return await get_agent("create")().run_with_ctx(fallback_ctx)
 
             # 链式意图：convert 成功后检测是否还有 edit/create/h5
-            extra_domain = detect_chain_intent(message, chain_intents)
+            extra_domain = detect_chain_intent(message, chain_intents, attachment_name)
             if extra_domain in ("edit", "create", "h5_create", "h5_edit"):
                 await publish("pipeline.step", {
                     "step": "chain_intent", "status": "running",
@@ -351,10 +386,18 @@ class UniversalChatRunner:
                 chain_todo_mgr = TodoManager()
                 chain_todo_mgr.session_id = session_id
                 await chain_todo_mgr.plan(message, extra_domain, True, publish, session_id)
-                chain_ctx = ctx.with_domain(extra_domain).with_extra(
+
+                # ── 关键：把 .txt 替换为 convert 生成的 .abc 文件路径 ─────────────
+                # ConvertAgent._run_sky_json() 已把 ABC 落盘到 .sky/<title>.abc
+                # _ws_abc_path 存在 → 后续 Agent 看到的 attachment 是 .abc 而非 .txt
+                _chain_abc_path = result.get("workspace_path", "")
+                _chain_ctx = ctx.with_domain(extra_domain).with_extra(
                     todo_mgr=chain_todo_mgr,
                     current_abc=result.get("abc_notation", ""),
                 )
+                if _chain_abc_path:
+                    _chain_ctx = _chain_ctx.with_attachment_path(_chain_abc_path)
+
                 if extra_domain in ("h5_create", "h5_edit"):
                     _att_path = attachment_workspace_path or ""
                     # BUG-05+NEW-07 修复：project_id 已作为参数传入 _dispatch
@@ -363,10 +406,10 @@ class UniversalChatRunner:
                         _att_path = await _save_attachment_to_workspace(
                             attachment_b64, attachment_name, workspace_id, _chain_proj_id
                         )
-                    chain_ctx = chain_ctx.with_attachment_path(_att_path)
+                    _chain_ctx = _chain_ctx.with_attachment_path(_att_path)
                 ChainCls = get_agent(extra_domain)
                 if ChainCls:
-                    return await ChainCls().run_with_ctx(chain_ctx)
+                    return await ChainCls().run_with_ctx(_chain_ctx)
             return result
 
         # ── edit 域（无谱子时降级为 create）──────────────────────────────────

@@ -194,6 +194,28 @@ class ConvertAgent:
             "meta":    meta,
         })
 
+        # 写入 session score（让后续 edit/create 可以感知）
+        # 关键：必须与 _run_abc_direct 保持一致，否则链式 create/edit 拿不到 ABC 数据
+        try:
+            sess = session_getter(session_id)
+            if sess is not None:
+                from app.pipeline.domain import Score, ScoreMeta
+                sess.score = Score(
+                    title=meta.get("title") or "score",
+                    abc_notation=result.get("abc_notation") or "",
+                    meta=ScoreMeta(
+                        title=meta.get("title") or "score",
+                        key=meta.get("key") or "C",
+                        bpm=float(meta.get("bpm") or 120),
+                        note_count=int(meta.get("note_count") or 0),
+                        time_sig_num=int(meta.get("time_sig_num", 4)),
+                        time_sig_den=int(meta.get("time_sig_den", 4)),
+                    ),
+                )
+                session_saver(sess)
+        except Exception:
+            pass
+
         # 落盘到项目 .sky/ 目录（通过 ContextVar 推断路径，无需查 DB）
         _ws_abc_path = ""
         try:
@@ -229,6 +251,7 @@ class ConvertAgent:
             "valid":       True,
             "message":     load_reply,
             "abc_updated": True,
+            "workspace_path": _ws_abc_path,
             **result,
         }
 

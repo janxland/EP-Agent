@@ -88,6 +88,9 @@ def _build_router_system(role_id: str | None = None) -> str:
 }}
 
 chain_intents：若用户一句话包含多个意图，按执行顺序列出，如 ["convert","edit"]。
+⚠️ 特别注意：用户上传了 .txt 附件并要求创作/改编时，必须返回 chain_intents=["convert","create"]！
+  例：「晚安喵.txt 转化成ABC然后改写成1分钟抒情流行」→ 先 convert，再 create
+  例：「上传谱子，转成MIDI」→ 先 convert，再 edit
 """
 
 # 链式意图关键词（确定性匹配，不调 LLM）
@@ -104,6 +107,8 @@ _DURATION_KWS = ["分钟", "秒钟", "秒长", "一分钟", "两分钟", "三分
 _CREATIVE_KWS = ["写一首", "创作", "重写", "改编成", "新旋律", "新谱子", "写旋律"]
 _EDIT_KWS     = ["转调", "升调", "降调", "加快", "放慢", "加花", "简化", "BPM", "拍号"]
 _CREATE_KWS   = ["写", "创作", "生成", "流行", "爵士", "古典", "中国风"]
+# FIX-BUG-4-2: 兜底：当 router 返回空 chain_intents，但用户有 .txt 附件+创作词时，补充 convert
+_SKY_ATTACH_WITH_CREATE_KWS = ["转化成", "改写", "改编成", "新旋律", "新谱子", "生成ABC", "创作旋律"]
 
 
 async def route_intent(
@@ -159,7 +164,7 @@ async def route_intent(
     }
 
 
-def detect_chain_intent(message: str, chain_intents: list[str]) -> str:
+def detect_chain_intent(message: str, chain_intents: list[str], attachment_name: str = "") -> str:
     """
     检测 convert 后是否有额外意图。
     优先使用路由 LLM 已返回的 chain_intents，
@@ -168,10 +173,28 @@ def detect_chain_intent(message: str, chain_intents: list[str]) -> str:
 
     优先级：H5词 > 时长词 > 创作词 > edit词 > create词
     """
+    # FIX-BUG-4: 当 router 已返回多个 chain_intents 时，取第一个（主要意图）。
+    # 例：router 返回 ["convert","edit"] → 应从 "convert" 开始链路，而不是 "edit"。
+    # 第一个意图是用户话语的核心操作（"转化成ABC"），后续是附加请求。
     if len(chain_intents) > 1:
-        second = chain_intents[1]
-        if second in ("edit", "create", "h5_create", "h5_edit"):
-            return second
+        return chain_intents[0]
+
+    # FIX-BUG-4-2: 兜底：当 router 返回空 chain_intents，但用户有 .txt 附件+创作词时，
+    # 说明 router LLM 没有正确识别出 convert 意图，必须强制走 convert。
+    # 关键：这里必须返回 "convert"，不能返回 "create"！
+    # - 返回 "convert" → _dispatch 进入 convert 分支 → convert 步骤执行 → abc_notation 存入 session
+    # - 返回 "create"  → _dispatch 直接 return，convert 不执行，session 里没有 abc_notation，链路彻底断裂
+    #
+    # 流程：Step 1 (convert) → detect_chain_intent 再调用 → 命中创作词 → 返回 "create" → Step 2 (create)
+    # Step 1 时 message 仍含创作词，会再次命中兜底 → 返回 "convert"（不在合法链式意图中）→ 不进入 if，return result
+    # Step 2 时 session 已有 abc_notation，CreateAgent 用它作为 base_abc → 正确注入原谱数据
+    if attachment_name and attachment_name.lower().endswith(".txt"):
+        # 检查用户是否在要求创作/改写操作
+        msg_lower = message.lower()
+        has_create_word = any(kw in msg_lower for kw in
+            _SKY_ATTACH_WITH_CREATE_KWS + _CREATIVE_KWS + _DURATION_KWS)
+        if has_create_word:
+            return "convert"
 
     msg_lower = message.lower()
     # H5/HTML/播放器词 → h5_create（优先级最高）
