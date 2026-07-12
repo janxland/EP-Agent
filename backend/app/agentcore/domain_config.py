@@ -77,7 +77,15 @@ DOMAIN_CONFIG: dict[str, DomainMeta] = {
         name="audio",
         label="生成音频",
         icon="🎧",
-        description="生成/迭代音频（「生成配乐」/「再欢快一点」/「翻唱」等）",
+        description=(
+            "生成/迭代真实音频文件（调用 Suno/MiniMax 等 AI 音乐生成服务）。\n"
+            "关键词：「生成一首歌」/「生成音乐」/「生成配乐」/「用 Suno 生成」/「用 MiniMax 生成音乐」/「再欢快一点」/「翻唱」\n"
+            "⚠️ 必须是要生成真实可播放的音频文件，才路由到此域！\n"
+            "⚠️ 以下情况绝对不路由到 audio 域：\n"
+            "  - 用户要求写/配/生成「歌词」文字 → 路由到 query 域（直接输出文字）\n"
+            "  - 用户要求创作 ABC 谱子/旋律 → 路由到 create 域\n"
+            "  - 用户要求分析谱子/回答问题 → 路由到 query 域"
+        ),
         todo_template="[1]生成音频（2个TODO即可，禁止拆分「分析」「调用」「等待」为多个TODO）",
         agent_class="AudioAgent",
         tool_groups=["audio"],
@@ -120,8 +128,16 @@ DOMAIN_CONFIG: dict[str, DomainMeta] = {
         name="query",
         label="查询分析",
         icon="🔍",
-        description="查询/分析谱子信息（「这首是什么调」/「有多少音符」等）",
-        todo_template="[1]回答用户（1个TODO即可，QueryAgent直接LLM回答，谱子上下文已自动注入，无需工具调用）",
+        description=(
+            "查询/分析谱子信息，或直接输出文字内容（不需要生成文件/音频）。\n"
+            "适用场景：\n"
+            "  - 查询谱子信息：「这首是什么调」/「有多少音符」/「BPM 是多少」\n"
+            "  - 写/配歌词：「为这首歌配歌词」/「写一段歌词」/「根据旋律写歌词」\n"
+            "  - 音乐知识问答：「什么是 Am 调」/「如何转调」\n"
+            "  - 任何只需要 LLM 直接输出文字、不需要调用工具的请求\n"
+            "⚠️ 「配歌词」/「写歌词」是文字创作，不是音频生成，必须路由到 query 域！"
+        ),
+        todo_template="[1]回答用户或输出内容（1个TODO即可，QueryAgent直接LLM输出，谱子上下文已自动注入，无需工具调用，歌词/分析/问答均在此完成）",
         agent_class="QueryAgent",
         tool_groups=[],
     ),

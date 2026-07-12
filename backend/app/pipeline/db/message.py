@@ -63,20 +63,32 @@ def _ensure_session_exists(
         return
 
     # session 不存在：插入骨架记录
+    # 修复：project_id 强制用 NULL，避免触发 FOREIGN KEY(project_id)->projects(id) 约束失败
+    # （project 记录可能尚未写入，直接传 project_id 会导致骨架插入失败，进而消息被 INSERT OR IGNORE 静默丢弃）
     now = datetime.now().isoformat()
-    _proj = project_id or None
-    _ws   = workspace_id or ""
+    _ws = workspace_id or ""
     try:
         db.execute("""
             INSERT OR IGNORE INTO sessions
                 (id, workspace_id, project_id, title, pipeline_state, extra, created_at, updated_at)
-            VALUES (?, ?, ?, '恢复对话', 'idle', '{}', ?, ?)
-        """, (session_id, _ws, _proj, now, now))
+            VALUES (?, ?, NULL, '恢复对话', 'idle', '{}', ?, ?)
+        """, (session_id, _ws, now, now))
         db.commit()
         _logger.warning(
-            "[DB] session %s 不存在，已自动创建骨架记录 ws=%s proj=%s（消息落库保底）",
-            session_id, _ws, _proj,
+            "[DB] session %s 不存在，已自动创建骨架记录 ws=%s（消息落库保底）",
+            session_id, _ws,
         )
+        # 骨架写入后，若有 project_id 再尝试补全（project 可能已存在）
+        if project_id:
+            proj_exists = db.execute(
+                "SELECT id FROM projects WHERE id=?", (project_id,)
+            ).fetchone()
+            if proj_exists:
+                db.execute(
+                    "UPDATE sessions SET project_id=? WHERE id=? AND (project_id IS NULL OR project_id='')",
+                    (project_id, session_id),
+                )
+                db.commit()
     except Exception as e:
         _logger.error("[DB] session %s 骨架记录创建失败: %s", session_id, e)
 

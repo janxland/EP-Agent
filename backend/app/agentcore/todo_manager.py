@@ -112,41 +112,83 @@ class TodoManager:
         session_id: str = "",
     ) -> list[dict]:
         """
-        调用 LLM 规划 TODO 列表并推送 todo.list 事件。
-        id 由此函数强制分配（"1","2","3"...），LLM 不控制 id。
-        规划完成后异步触发 TodoCritic 评审（不阻塞主流程）。
+        规划 TODO 列表并推送 todo.list 事件。
+
+        PERF-03：create/edit 域使用固定模板，跳过 LLM 调用（节省 1-2s）。
+        其他域（audio/sovits/h5/query）仍走 LLM 规划（需要动态判断步骤）。
         """
         self.domain = domain
-        context = (
-            f"用户意图：{message}\n"
-            f"意图域：{domain}\n"
-            f"已有谱子：{'是' if has_score else '否'}"
-        )
-        _TODO_SYSTEM = _build_todo_system()
 
-        try:
-            resp = await complete([
-                {"role": "system", "content": _TODO_SYSTEM},
-                {"role": "user",   "content": context},
-            ], tier="lite")  # M1: TODO 规划用轻量模型
-            raw = resp if isinstance(resp, str) else resp.get("content", "{}")
-            m = re.search(r'\{.*\}', raw, re.DOTALL)
-            if m:
-                data = json.loads(m.group())
-                raw_todos = data.get("todos", [])
-                self.todos = [
-                    {
-                        "id":     str(i + 1),
-                        "title":  t.get("title", f"步骤 {i+1}"),
-                        "detail": t.get("detail", ""),
-                        "status": "pending",
-                    }
-                    for i, t in enumerate(raw_todos)
-                    if isinstance(t, dict)
-                ]
-                self.summary = data.get("summary", "")
-        except Exception:
-            pass  # 规划失败时使用空列表，不影响主流程
+        logger.info("[todo_mgr] plan domain=%s has_score=%s msg=%s", domain, has_score, message[:50].replace('\n',' '))
+
+        await publish("pipeline.step", {
+            "step": "todo_plan", "status": "running",
+            "text": f"TODO 规划中 domain={domain}",
+        })
+
+        # ── 快速模板域：直接生成固定 TODO，无需 LLM ──────────────────────────
+        _FAST_TEMPLATES: dict[str, list[dict]] = {
+            "create": [
+                {"title": "AI 创作 ABC 谱", "detail": "流式生成完整 ABC Notation"},
+            ],
+            "edit": [
+                {"title": "AI 编辑 ABC 谱", "detail": "根据需求修改谱子"},
+            ],
+            "convert": [
+                {"title": "格式转换", "detail": "将输入转换为 ABC Notation"},
+            ],
+            "query": [
+                {"title": "回答问题", "detail": "分析并回答用户问题"},
+            ],
+        }
+        if domain in _FAST_TEMPLATES:
+            raw_todos = _FAST_TEMPLATES[domain]
+            self.todos = [
+                {"id": str(i + 1), "title": t["title"], "detail": t["detail"], "status": "pending"}
+                for i, t in enumerate(raw_todos)
+            ]
+            self.summary = raw_todos[0]["title"] if raw_todos else ""
+            logger.info("[todo_mgr] 快速模板 domain=%s todos=%d（跳过LLM）", domain, len(self.todos))
+        else:
+            # 其他域（audio/sovits/h5 等）走 LLM 动态规划
+            logger.info("[todo_mgr] LLM规划 domain=%s", domain)
+            context = (
+                f"用户意图：{message}\n"
+                f"意图域：{domain}\n"
+                f"已有谱子：{'是' if has_score else '否'}"
+            )
+            _TODO_SYSTEM = _build_todo_system()
+            try:
+                resp = await complete([
+                    {"role": "system", "content": _TODO_SYSTEM},
+                    {"role": "user",   "content": context},
+                ], tier="lite")
+                raw = resp if isinstance(resp, str) else resp.get("content", "{}")
+                m = re.search(r'\{.*\}', raw, re.DOTALL)
+                if m:
+                    data = json.loads(m.group())
+                    raw_todos = data.get("todos", [])
+                    self.todos = [
+                        {
+                            "id":     str(i + 1),
+                            "title":  t.get("title", f"步骤 {i+1}"),
+                            "detail": t.get("detail", ""),
+                            "status": "pending",
+                        }
+                        for i, t in enumerate(raw_todos)
+                        if isinstance(t, dict)
+                    ]
+                    self.summary = data.get("summary", "")
+            except Exception:
+                pass
+
+        # 过滤"自动完成"类 TODO：代码层自动处理的步骤不应出现在 TODO 列表
+        # 低耦合：仅在此处过滤，不修改任何 agent 代码
+        _AUTO_SKIP_KEYWORDS = ("导出", "保存", "export", "save", "落库", "写入", "存储")
+        self.todos = [
+            t for t in self.todos
+            if not any(kw in t.get("title", "").lower() for kw in _AUTO_SKIP_KEYWORDS)
+        ]
 
         if self.todos:
             await publish("todo.list", {
@@ -171,6 +213,11 @@ class TodoManager:
             asyncio.create_task(
                 self._run_critic_async(message, domain, session_id)
             )
+
+        await publish("pipeline.step", {
+            "step": "todo_plan", "status": "succeeded",
+            "text": f"TODO 规划完成 domain={domain} todos={len(self.todos)}",
+        })
 
         return self.todos
 
@@ -206,12 +253,17 @@ class TodoManager:
 
         _CRITIC_SYSTEM = """你是 TODO 结构审稿工具。只检查 TODO 清单的结构是否合理。
 
-只允许检查结构错误：
-- TODO 缺少明显必需的步骤（如 convert 域缺少"解析文件"步骤）
-- 同一条 TODO 描述与操作明显矛盾
-- 把本应单一交付的内容拆成显然无法独立落地的碎片
+只允许检查以下结构错误：
+- 同一条 TODO 描述与操作明显矛盾（如标题是"生成音频"但 detail 写的是"删除文件"）
+- 把本应单一交付的内容拆成显然无法独立落地的碎片（如把一次 API 调用拆成5个子步骤）
+- TODO 数量严重超标（超过6个）
 
-不要检查：功能是否丰富、页面是否完整、实现顺序是否合理。
+【重要】以下情况不是结构错误，不得报告：
+- convert 域只有1个TODO（告知转换结果）——转换/保存/验证均由Python代码层自动完成，LLM只需说明结果，1个TODO完全正确
+- query 域只有1个TODO——QueryAgent直接LLM输出，无需工具调用，1个TODO完全正确
+- audio/voice/sovits 域有2个TODO——符合标准模板
+- 不要检查步骤数量是否"够多"、功能是否丰富、实现顺序是否合理
+
 只要结构合理，就输出 pass=true。
 
 输出严格 JSON：

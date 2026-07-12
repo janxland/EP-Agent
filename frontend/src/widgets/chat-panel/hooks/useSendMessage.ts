@@ -17,8 +17,10 @@ import { useChatStore } from '@/features/chat/store/chat.store'
 import { chatUniversal } from '@/shared/lib/api'
 import type { Attachment } from './useAttachment'
 
-// H5 生成等复杂任务需要 3-4 轮 LLM Tool Calling，每轮最长 180s，前端给足 5 分钟
-const REQUEST_TIMEOUT_MS = 300_000
+// POST 请求本身的超时（后端接受请求前）：30s 足够
+// 注意：后端返回 202 Accepted 后立即清除此计时器，任务执行时长由 SSE 事件驱动，
+// 不再用固定超时兜底（避免长任务被误判为超时）
+const REQUEST_TIMEOUT_MS = 30_000
 
 interface UseSendMessageOptions {
   sessionId: string | null
@@ -92,7 +94,17 @@ export function useSendMessage({
       attachment_workspace_path: attachment?.workspace_path ?? '',
       attachment_content:        (!isBinary && attachment?.content) ? attachment.content : '',
       attachment_b64:            '',
+    }).then(() => {
+      // POST 成功（202 Accepted）：后端已接受任务，清除超时计时器。
+      // 任务执行时长不可预测（LLM 多轮调用可能数分钟），
+      // 结束信号由 SSE message.completed / error / graph.error 驱动，
+      // 不能再用固定超时兜底，否则长任务会被误判为"请求超时"。
+      if (timeoutRef.current) {
+        clearTimeout(timeoutRef.current)
+        timeoutRef.current = null
+      }
     }).catch((e: unknown) => {
+      // POST 本身失败（网络错误、后端 5xx 等）：立即报错
       const msg = e instanceof Error ? e.message : '请求失败'
       inflightRef.current = false
       failRun(msg)

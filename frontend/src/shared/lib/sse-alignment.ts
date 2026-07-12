@@ -39,6 +39,27 @@ export const SSE_HANDLED_EVENTS = new Set<string>([
   'h5.ready',                 // H5 海报生成完成（含 url_path/file_path/size_kb）
   'connection.reconnecting',  // SSE 断线重连通知（api.ts 发出，chat.store 清空历史）
   'error',
+  // ── LangGraph v6 图执行事件（graph_engine_v2.py 推送）──────────────────
+  'graph.node_enter',         // 节点进入（step/progress/node 字段）
+  'graph.node_exit',          // 节点退出（next_node/has_error 字段）
+  'graph.progress',           // 整体进度（progress 0-100/status/steps）
+  'graph.error',              // 图执行错误（message/current_node 字段）
+  'graph.supervisor_decision',// Supervisor LLM 决策（next_node/reasoning/confidence）
+  'graph.reflection',         // Reflect 节点质量评估（score/passed/issues）
+  'agent.call',               // Agent 调用 span（agent_name/status/duration_ms）
+  'session.renamed',          // 对话自动命名（session_id/title）
+  'workspace.file_saved',
+  'workspace.scores',
+  'workspace.files.changed',
+  'run.aborted',
+  // ── 回放专用事件（ReplayEngineV2 / audit.py 推送）──────────────────────
+  'replay.step',              // 回放进度步骤（step/status/text/tool 字段）
+  'replay.error',             // 回放执行错误（error 字段）
+  'replay.done',              // 回放完成摘要（status/mode/steps/visited 字段）
+  // ── 工作流事件（workflow_runner.py 推送，前端静默忽略）──────────────────
+  'workflow.start',           // 工作流开始（静默，不显示在聊天气泡）
+  'workflow.step',            // 工作流步骤（静默）
+  'workflow.complete',        // 工作流完成（静默）
 ])
 
 /**

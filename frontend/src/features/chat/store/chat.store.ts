@@ -45,11 +45,19 @@ export const FILE_OP_TOOLS = new Set([
 
 // ─── 流式累积状态（临时，不进 messages）──────────────────────────────────────
 
+export interface StreamToolResult {
+  content: string
+  status: 'succeeded' | 'failed'
+}
+
 export interface StreamState {
   content: string
   reasoning_content: string
   /** 累积中的工具调用（arguments 在流式过程中逐步拼接，可能不完整） */
   tool_calls: ToolCall[]
+  /** 工具调用结果缓存（call_id → result），tool.call(succeeded/failed) 时写入，
+   *  不立即 commit，让工具卡片在 streaming 浮动区持续显示直到 message.completed */
+  tool_results: Record<string, StreamToolResult>
   /** 当前 ReAct 轮次（从 0 开始，多轮时前端展示「第 N 轮」） */
   roundIdx: number
   /** 当前流式回合 ID（后端每轮 ReAct 生成，用于隔离多轮输出） */
@@ -60,6 +68,7 @@ const emptyStream = (): StreamState => ({
   content: '',
   reasoning_content: '',
   tool_calls: [],
+  tool_results: {},
   roundIdx: 0,
   streamTurnId: null,
 })
@@ -340,8 +349,23 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
         createdAt: new Date().toISOString(),
         kind: 'turn',
       }
+      // 把 streaming.tool_results 转为 ChatToolMessage 追加到 messages
+      const toolMsgs: ChatToolMessage[] = hasTools
+        ? streaming.tool_calls
+            .filter((tc) => streaming.tool_results[tc.id])
+            .map((tc) => ({
+              id: newMsgId(),
+              role: 'tool' as const,
+              tool_call_id: tc.id,
+              name: tc.function.name,
+              content: streaming.tool_results[tc.id].status === 'failed'
+                ? `失败: ${streaming.tool_results[tc.id].content}`
+                : streaming.tool_results[tc.id].content,
+              createdAt: new Date().toISOString(),
+            }))
+        : []
       return {
-        messages: [...s.messages, msg],
+        messages: [...s.messages, msg, ...toolMsgs],
         streaming: emptyStream(),
       }
     })
@@ -363,7 +387,6 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
   finishRun: () => {
     // 先 flush 缓冲区，确保最后几个 token 不丢失
     flushStreamBufNow()
-    // tool.call(succeeded) 已 commit 过；此处仅处理纯文本轮次（无工具调用）的收尾
     set((s) => {
       const { streaming } = s
       const hasContent = streaming.content.trim().length > 0
@@ -381,8 +404,23 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
         createdAt: new Date().toISOString(),
         kind: 'turn',
       }
+      // 把 streaming.tool_results 转为 ChatToolMessage 追加到 messages
+      const toolMsgs: ChatToolMessage[] = hasTools
+        ? streaming.tool_calls
+            .filter((tc) => streaming.tool_results[tc.id])
+            .map((tc) => ({
+              id: newMsgId(),
+              role: 'tool' as const,
+              tool_call_id: tc.id,
+              name: tc.function.name,
+              content: streaming.tool_results[tc.id].status === 'failed'
+                ? `失败: ${streaming.tool_results[tc.id].content}`
+                : streaming.tool_results[tc.id].content,
+              createdAt: new Date().toISOString(),
+            }))
+        : []
       return {
-        messages: [...s.messages, msg],
+        messages: [...s.messages, msg, ...toolMsgs],
         streaming: emptyStream(),
         status: 'completed' as const,
         currentStep: null,
@@ -409,8 +447,22 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
         createdAt: new Date().toISOString(),
         kind: 'turn',
       }
+      const toolMsgs: ChatToolMessage[] = hasTools
+        ? streaming.tool_calls
+            .filter((tc) => streaming.tool_results[tc.id])
+            .map((tc) => ({
+              id: newMsgId(),
+              role: 'tool' as const,
+              tool_call_id: tc.id,
+              name: tc.function.name,
+              content: streaming.tool_results[tc.id].status === 'failed'
+                ? `失败: ${streaming.tool_results[tc.id].content}`
+                : streaming.tool_results[tc.id].content,
+              createdAt: new Date().toISOString(),
+            }))
+        : []
       return {
-        messages: [...s.messages, msg],
+        messages: [...s.messages, msg, ...toolMsgs],
         streaming: emptyStream(),
         status: 'failed' as const,
         errorMessage: error,
@@ -711,22 +763,45 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
 
         } else if (p.status === 'succeeded' || p.status === 'failed') {
           // 工具完成：
-          //   1. 先 commit streaming（把包含该工具的 assistant 消息落库）
-          //   2. 再追加 tool message（通过 tool_call_id O(1) 匹配）
-          //   3. 若是文件操作工具（写/删/重命名/上传），触发文件树刷新
-          commitStreamMessage()
-
-          const toolMsg: ChatToolMessage = {
-            id: newMsgId(),
-            role: 'tool',
-            tool_call_id: p.call_id,
-            name: p.tool,
-            content: p.status === 'failed'
-              ? `失败: ${p.error ?? '未知错误'}`
-              : (p.result_preview ?? ''),
-            createdAt: new Date().toISOString(),
+          //   1. 把 result 存入 streaming.tool_results（工具卡片变为 succeeded/failed 状态）
+          //   2. 不立即 commit streaming，让工具卡片继续在浮动区显示
+          //   3. message.completed 时统一 commit（commitStreamMessage/finishRun 会处理 tool_results）
+          //   4. 若是文件操作工具，触发文件树刷新
+          //
+          // 例外：若 streaming.tool_calls 里没有这个 call_id（如 intent_router 等纯路由工具），
+          //   则走旧路径 commitStreamMessage + addMessage，避免孤立 tool message
+          const inStreaming = get().streaming.tool_calls.some((tc) => tc.id === p.call_id)
+          if (inStreaming) {
+            // 工具卡片在 streaming 浮动区：只更新 result，保持卡片可见
+            set((s) => ({
+              streaming: {
+                ...s.streaming,
+                tool_results: {
+                  ...s.streaming.tool_results,
+                  [p.call_id]: {
+                    content: p.status === 'failed'
+                      ? (p.error ?? '未知错误')
+                      : (p.result_preview ?? ''),
+                    status: p.status,
+                  },
+                },
+              },
+            }))
+          } else {
+            // 工具不在 streaming（如 intent_router 等）：走旧路径
+            commitStreamMessage()
+            const toolMsg: ChatToolMessage = {
+              id: newMsgId(),
+              role: 'tool',
+              tool_call_id: p.call_id,
+              name: p.tool,
+              content: p.status === 'failed'
+                ? `失败: ${p.error ?? '未知错误'}`
+                : (p.result_preview ?? ''),
+              createdAt: new Date().toISOString(),
+            }
+            addMessage(toolMsg)
           }
-          addMessage(toolMsg)
 
           // 文件操作工具成功完成时刷新文件树（FILE_OP_TOOLS 定义在模块顶部）
           if (p.status === 'succeeded' && typeof window !== 'undefined') {
@@ -855,6 +930,156 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
       case 'error': {
         const msg = (event.payload as { message?: string }).message ?? '未知错误'
         failRun(msg)
+        break
+      }
+
+      // ── LangGraph v6 图执行事件（graph_engine_v2.py 推送）────────────────
+      // 这些事件反映 LangGraph 图的实时执行状态，用于 PipelineTimeline 可视化。
+      // chat.store 只做轻量处理（更新 currentStep），详细展示交由 PipelineTimeline。
+
+      case 'graph.node_enter': {
+        // 节点进入：更新当前步骤提示（step/progress/node）
+        const p = event.payload as { node?: string; step?: number; progress?: number }
+        const nodeLabel = p.node ? `[图节点] ${p.node}` : '图执行中...'
+        setCurrentStep(nodeLabel)
+        set((s) => s.status !== 'running' ? { status: 'running' } : {})
+        break
+      }
+
+      case 'graph.node_exit': {
+        // 节点退出：有错误时更新步骤提示
+        const p = event.payload as { node?: string; has_error?: boolean; next_node?: string }
+        if (p.has_error) {
+          setCurrentStep(`[图节点] ${p.node ?? ''} 执行出错`)
+        }
+        break
+      }
+
+      case 'graph.progress': {
+        // 整体进度：100% 时结束 running 状态（兜底，正常由 message.completed 结束）
+        const p = event.payload as { progress?: number; status?: string; steps?: number }
+        if (p.progress === 100 && p.status === 'completed') {
+          // 仅当没有任何流式内容时才 finishRun（有流式内容由 message.completed 收尾）
+          // 检查三个维度：content / tool_calls / reasoning_content
+          const { streaming } = get()
+          const hasAnyStream = (
+            streaming.content.length > 0 ||
+            streaming.tool_calls.length > 0 ||
+            streaming.reasoning_content.length > 0
+          )
+          if (!hasAnyStream) {
+            // 延迟 300ms 再 finishRun：给 message.completed 留出到达时间
+            // 避免 graph.progress 比 message.completed 先处理导致状态不一致
+            setTimeout(() => {
+              const cur = useChatStore.getState()
+              const stillNoStream = (
+                cur.streaming.content.length === 0 &&
+                cur.streaming.tool_calls.length === 0 &&
+                cur.streaming.reasoning_content.length === 0
+              )
+              if (stillNoStream && cur.status === 'running') {
+                cur.finishRun()
+              }
+            }, 300)
+          }
+        }
+        break
+      }
+
+      case 'graph.error': {
+        // 图执行错误：触发 failRun
+        const p = event.payload as { message?: string; current_node?: string }
+        const errMsg = p.message ?? '图执行出错'
+        failRun(p.current_node ? `[${p.current_node}] ${errMsg}` : errMsg)
+        break
+      }
+
+      case 'graph.supervisor_decision': {
+        // Supervisor LLM 决策：更新当前步骤提示（含路由信息）
+        const p = event.payload as {
+          next_node?: string; reasoning?: string; confidence?: number; forced?: boolean
+        }
+        const label = p.forced
+          ? `[Supervisor] 强制结束（循环保护）`
+          : `[Supervisor] → ${p.next_node ?? 'END'}`
+        setCurrentStep(label)
+        break
+      }
+
+      case 'graph.reflection': {
+        // Reflect 节点质量评估：更新步骤提示（含评分）
+        const p = event.payload as {
+          score?: number; passed?: boolean; issues?: string[]; suggestion?: string
+        }
+        const scoreStr = p.score !== undefined ? ` (${(p.score * 100).toFixed(0)}分)` : ''
+        const label = p.passed
+          ? `[质量评估] 通过${scoreStr}`
+          : `[质量评估] 需重试${scoreStr}`
+        setCurrentStep(label)
+        break
+      }
+
+      case 'agent.call': {
+        // Agent 调用 span（agent_name/status/duration_ms）
+        // 仅在 running 时更新步骤提示，completed/failed 静默
+        const p = event.payload as { agent_name?: string; status?: string; duration_ms?: number }
+        if (p.status === 'running') {
+          setCurrentStep(`[Agent] ${p.agent_name ?? ''} 执行中...`)
+        }
+        break
+      }
+
+      case 'session.renamed': {
+        // 对话自动命名（session_id/title）
+        // chat.store 不处理，由 SessionBar/sidebar 监听 window 事件或直接读 DB
+        break
+      }
+
+      // ── 回放进度事件（ReplayEngineV2 / audit.py 推送）────────────────────
+      // replay.step：回放执行步骤进度（step/status/text/tool 字段）
+      // 仅更新 currentStep 提示，不影响 messages / streaming 状态
+      case 'replay.step': {
+        const p = event.payload as { step?: string; status?: string; text?: string; tool?: string }
+        const label = p.text
+          ? `[回放] ${p.text}`
+          : p.step
+            ? `[回放] ${p.step}`
+            : '[回放] 执行中...'
+        setCurrentStep(label)
+        break
+      }
+
+      // replay.error：回放执行错误（error 字段）
+      // 触发 failRun，在聊天区域显示错误信息
+      case 'replay.error': {
+        const p = event.payload as { error?: string }
+        failRun(p.error ? `[回放错误] ${p.error}` : '[回放错误] 未知错误')
+        break
+      }
+
+      // replay.done：回放完成（BUG-029 修复：后端推送摘要，前端收尾）
+      // status/mode/steps/visited 字段，调用 finishRun 解除 loading 状态
+      case 'replay.done': {
+        const p = event.payload as {
+          status?: string; mode?: string; steps?: number
+          visited?: string[]; error?: string
+        }
+        if (p.error) {
+          failRun(`[回放] ${p.error}`)
+        } else {
+          const modeLabel = p.mode === 'rerun' ? '重跑' : p.mode === 'fork' ? 'Fork' : '快照'
+          setCurrentStep(`[回放完成] ${modeLabel}模式 · ${p.steps ?? 0} 步`)
+          finishRun()
+        }
+        break
+      }
+
+      // ── 工作流事件（workflow_runner.py 推送，当前静默忽略）──────────────
+      // 工作流功能尚未在前端实现完整 UI，仅注册以消除对齐警告
+      case 'workflow.start':
+      case 'workflow.step':
+      case 'workflow.complete': {
+        // TODO: 工作流 UI 实现后在此处理
         break
       }
 

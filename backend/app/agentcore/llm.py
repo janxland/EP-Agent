@@ -194,15 +194,17 @@ async def complete(
 ) -> str:
     """普通完成，返回文本，带超时保护 + M7 重试熔断。
     tier='lite' 使用轻量模型（意图路由、TODO 规划等），tier='strong'（默认）使用强力模型。
+    lite tier 使用 _TIMEOUT_FAST（30s），strong tier 使用 _TIMEOUT_NORMAL（180s）。
     """
     model = _resolve_model(tier)
+    timeout = _TIMEOUT_FAST if tier == "lite" else _TIMEOUT_NORMAL
     resp = await _call_with_retry(
         lambda: get_llm_client().chat.completions.create(
             model=model,
             messages=messages,
             temperature=temperature,
         ),
-        timeout=_TIMEOUT_NORMAL,
+        timeout=timeout,
         label=f"complete[{tier}]",
     )
     return resp.choices[0].message.content or ""
@@ -212,23 +214,63 @@ async def complete_stream(
     messages: list[dict],
     temperature: float = 0.2,
     tier: ModelTier = "strong",
-) -> AsyncIterator[str]:
-    """流式完成，逐 token yield，带超时保护 + M7 重试熔断。"""
+    thinking: str | None = None,
+) -> AsyncIterator[tuple[str, str]]:
+    """
+    流式完成，逐 token yield (content_delta, reasoning_delta) 二元组。
+    带超时保护 + M7 重试熔断。
+
+    reasoning_delta：推理模型（DeepSeek-R1 等）的思考链 token，普通模型始终为空串。
+
+    thinking：控制 DeepSeek-V4 系列的思考模式（硅基流动 extra_body 参数）。
+      None        → 不传该参数，使用模型默认行为
+      "disabled"  → 关闭思考（Non-Think），速度最快，适合创作/路由等任务
+      "enabled"   → 开启思考（Think High），适合复杂推理
+      注意：thinking="disabled" 时 temperature 等参数正常生效；
+            thinking="enabled"  时 temperature/top_p 等参数不生效（DeepSeek 官方限制）。
+    """
     model = _resolve_model(tier)
+    # 构造 extra_body（thinking 参数通过 extra_body 传给硅基流动）
+    extra_body = {}
+    if thinking is not None:
+        extra_body["thinking"] = {"type": thinking}
+
     stream = await _call_with_retry(
         lambda: get_llm_client().chat.completions.create(
             model=model,
             messages=messages,
             temperature=temperature,
             stream=True,
+            **({"extra_body": extra_body} if extra_body else {}),
         ),
         timeout=_TIMEOUT_STREAM,
         label=f"complete_stream[{tier}]",
     )
-    async for chunk in stream:
-        delta = chunk.choices[0].delta.content
-        if delta:
-            yield delta
+    # chunk 级超时：每次等待下一个 token 最多 _CHUNK_TIMEOUT 秒
+    # 防止流建立后模型长时间无输出导致请求永久挂死
+    _CHUNK_TIMEOUT = 45  # 单 chunk 等待上限（秒）
+    _aiter = stream.__aiter__()
+    while True:
+        try:
+            chunk = await asyncio.wait_for(_aiter.__anext__(), timeout=_CHUNK_TIMEOUT)
+        except StopAsyncIteration:
+            break
+        except asyncio.TimeoutError:
+            _logger.warning(
+                "[complete_stream] %ds 内无新 token，流式超时终止（model=%s）",
+                _CHUNK_TIMEOUT, model,
+            )
+            raise TimeoutError(
+                f"complete_stream 流式超时：{_CHUNK_TIMEOUT}s 内无新 token（model={model}）"
+            )
+        choice = chunk.choices[0] if chunk.choices else None
+        if not choice:
+            continue
+        delta = choice.delta
+        content   = delta.content or ""
+        reasoning = getattr(delta, "reasoning_content", None) or ""
+        if content or reasoning:
+            yield content, reasoning
 
 
 async def complete_with_tools_stream(

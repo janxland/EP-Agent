@@ -218,12 +218,13 @@ function FileContent({ tab }: { tab: FileTab }) {
   const dlUrl  = getFileDownloadUrl(workspaceId, file.path, projectId)
   const isImg  = IMAGE_EXTS.has(file.ext)
   const isHtml = file.ext === 'html' || file.ext === 'htm'
-  const isText = TEXT_EXTS.has(file.ext) && !isHtml
+  const isAbc  = file.ext === 'abc'
+  const isText = TEXT_EXTS.has(file.ext) && !isHtml && !isAbc
   const isMidi = file.ext === 'mid' || file.ext === 'midi'
   const isAudio = ['mp3','wav','ogg','m4a'].includes(file.ext)
 
   useEffect(() => {
-    if (!isText) return
+    if (!isText && !isAbc) return
     setLoading(true)
     setText(null)
     fetch(rawUrl)
@@ -231,7 +232,7 @@ function FileContent({ tab }: { tab: FileTab }) {
       .then(t => setText(t))
       .catch(() => setText('无法加载文件内容'))
       .finally(() => setLoading(false))
-  }, [rawUrl, isText])
+  }, [rawUrl, isText, isAbc])
 
   if (isHtml) return (
     <iframe
@@ -267,6 +268,20 @@ function FileContent({ tab }: { tab: FileTab }) {
         className="text-xs px-4 py-2 rounded-lg bg-violet-50 text-violet-600 hover:bg-violet-100 transition-colors border border-violet-100 font-medium">
         下载 MIDI
       </a>
+    </div>
+  )
+
+  if (isAbc) return (
+    <div className="p-5 overflow-auto h-full">
+      {loading ? (
+        <div className="flex items-center justify-center h-full">
+          <span className="text-xs text-gray-400 animate-pulse">加载中…</span>
+        </div>
+      ) : (
+        <div className="border border-gray-100 rounded-2xl overflow-hidden shadow-sm">
+          <ABCRenderer abc={text ?? ''} title={file.name} />
+        </div>
+      )}
     </div>
   )
 

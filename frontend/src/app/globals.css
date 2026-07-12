@@ -55,6 +55,85 @@ html, body {
 /* abcjs 默认黑色笔画，确保在白底上清晰可见 */
 .abcjs-note_selected { fill: #ea580c !important; }  /* orange-600 高亮选中音符 */
 
+/* ── abcjs SynthController 播放器样式 ───────────────────────────────────────── */
+.abcjs-inline-audio {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 12px;
+  background: #fafafa;
+  border: 1px solid #f0f0f0;
+  border-radius: 12px;
+  margin-top: 8px;
+  flex-wrap: wrap;
+}
+
+/* SynthController 宿主容器，确保控件有足够空间 */
+.abcjs-synth-host {
+  min-height: 48px;
+}
+
+/* 播放/暂停/重置等按钮 */
+.abcjs-inline-audio button,
+.abcjs-inline-audio .abcjs-btn {
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: 4px 6px;
+  border-radius: 6px;
+  color: #6b7280;
+  font-size: 13px;
+  line-height: 1;
+  transition: background 0.15s, color 0.15s;
+}
+.abcjs-inline-audio button:hover,
+.abcjs-inline-audio .abcjs-btn:hover {
+  background: #f3f4f6;
+  color: #ea580c;
+}
+.abcjs-inline-audio button:disabled,
+.abcjs-inline-audio .abcjs-btn:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+
+/* 进度条 */
+.abcjs-inline-audio .abcjs-progress-indicator {
+  flex: 1;
+  min-width: 80px;
+  height: 4px;
+  border-radius: 2px;
+  background: #e5e7eb;
+  cursor: pointer;
+  position: relative;
+  overflow: hidden;
+}
+.abcjs-inline-audio .abcjs-progress-indicator .abcjs-progress {
+  height: 100%;
+  background: #ea580c;
+  border-radius: 2px;
+  transition: width 0.1s linear;
+}
+
+/* 速度（warp）控件 */
+.abcjs-inline-audio .abcjs-tempo-wrapper {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  color: #9ca3af;
+}
+.abcjs-inline-audio .abcjs-tempo-wrapper input[type=range] {
+  width: 60px;
+  accent-color: #ea580c;
+}
+
+/* 加载中状态 */
+.abcjs-inline-audio.abcjs-disabled {
+  opacity: 0.5;
+  pointer-events: none;
+}
+
 /* ── 动画：TODO 子任务入场 ───────────────────────────────────────────────────── */
 @keyframes fadeSlideIn {
   from {

@@ -18,6 +18,7 @@ ConvertAgent — Sky JSON / ABC 转换 SubAgent（v3.2）
 from __future__ import annotations
 
 import json
+from app.agentcore.agents.base_agent import BaseAgent
 import re
 from typing import Callable, Awaitable
 
@@ -84,7 +85,7 @@ def _extract_abc(content: str, filename: str) -> str | None:
 
 
 @register("convert")
-class ConvertAgent:
+class ConvertAgent(BaseAgent):
     """
     Sky JSON / ABC → 加载 SubAgent。
 
@@ -95,7 +96,7 @@ class ConvertAgent:
       - 失败：{"domain": "convert", "abc_updated": False, "message": "..."}
     """
 
-    async def run(
+    async def _run_impl(
         self,
         session_id: str,
         message: str,
@@ -106,9 +107,34 @@ class ConvertAgent:
         todo_mgr: TodoManager,
         session_getter: Callable,
         session_saver: Callable,
+        attachment_workspace_path: str = "",
     ) -> dict:
-        json_content = attachment_content or message
-        file_name    = attachment_name or "score"
+        # ── 解耦设计：attachment_content 为空但有工作区路径时，自动读取文件内容 ──
+        # 前端发送 @文件名 引用时，attachment_content="" 而 attachment_workspace_path 有值。
+        # ConvertAgent 自己负责读取，不依赖上层预处理（LLM 也不应该做文件 IO）。
+        _resolved_content = attachment_content
+        _resolved_name    = attachment_name or "score"
+        if not _resolved_content and attachment_workspace_path:
+            try:
+                from app.agentcore.tools.workspace_tools import read_workspace_file
+                _file_text = read_workspace_file(attachment_workspace_path)
+                if isinstance(_file_text, str):
+                    _resolved_content = _file_text
+                import logging as _log
+                _log.getLogger("ep_agent.convert_agent").info(
+                    "[convert_agent] 从工作区路径读取附件 path=%s content_len=%d",
+                    attachment_workspace_path, len(_resolved_content),
+                )
+            except Exception as _re:
+                import logging as _log
+                _log.getLogger("ep_agent.convert_agent").warning(
+                    "[convert_agent] 工作区文件读取失败 path=%s: %s",
+                    attachment_workspace_path, _re,
+                )
+
+        # 最终内容：已解析的附件内容 > 用户消息（用户可能把内容直接粘贴在消息里）
+        json_content = _resolved_content or message
+        file_name    = _resolved_name
 
         # ── 优先尝试提取 Sky JSON ─────────────────────────────────────────────
         sky_json = _extract_sky_json(json_content)
@@ -125,6 +151,7 @@ class ConvertAgent:
                 abc_content, file_name, session_id, publish,
                 todo_mgr, session_getter, session_saver,
             )
+
 
         # ── 两者都不是 → 降级 ─────────────────────────────────────────────────
         await todo_mgr.finish_all(publish, "failed")
@@ -367,7 +394,7 @@ class ConvertAgent:
             "meta":        meta,
         }
 
-    async def run_with_ctx(self, ctx: "RunContext") -> dict:
+    async def run(self, ctx: "RunContext") -> dict:
         """v4.0 解耦接口：从 RunContext 解包参数，调用原 run()。
         AGENT-2 修复：session_getter/saver 通过 ctx 属性统一解包（fallback 逻辑在 RunContext 中）。
         """
@@ -377,11 +404,12 @@ class ConvertAgent:
             from app.agentcore.todo_manager import TodoManager as _TM
             todo_mgr = _TM()
             todo_mgr.session_id = ctx.session_id
-        return await self.run(
+        return await self._run_impl(
             session_id=ctx.session_id,
             message=ctx.message,
             attachment_content=ctx.attachment_content,
             attachment_name=ctx.attachment_name,
+            attachment_workspace_path=ctx.attachment_workspace_path,
             publish=ctx.publish,
             convert_fn=convert_fn,
             todo_mgr=todo_mgr,

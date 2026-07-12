@@ -130,4 +130,52 @@ async def set_active_model(body: dict):
         raise HTTPException(400, "model_id is required")
     config.LLM_MODEL = model_id
     _llm.reset_client()
+    # config 变更后刷新服务健康状态
+    try:
+        from app.agentcore.service_health import service_health
+        service_health.refresh()
+    except Exception:
+        pass
     return {"ok": True, "active": model_id}
+
+
+# ── Service Health ──────────────────────────────────────────────────────────────────
+
+@router.get("/health/services")
+async def health_services():
+    """
+    查询所有外部服务的配置状态。
+    前端可用于展示服务可用性面板，帮助用户快速判断哪些工具可用。
+    """
+    from app.agentcore.service_health import service_health
+    try:
+        statuses = service_health.get_all_statuses()
+        available = service_health.available_services()
+        unavailable = service_health.unavailable_services()
+        return {
+            "ok": True,
+            "summary": service_health.summary_str(),
+            "available_count": len(available),
+            "unavailable_count": len(unavailable),
+            "services": statuses,
+        }
+    except Exception as e:
+        raise HTTPException(500, f"服务状态查询失败: {e}")
+
+
+@router.post("/health/services/refresh")
+async def refresh_service_health():
+    """
+    手动触发服务状态重新检测。
+    用于配置更新后（如新增 API Key）无需重启即可生效。
+    """
+    from app.agentcore.service_health import service_health
+    try:
+        service_health.refresh()
+        return {
+            "ok": True,
+            "summary": service_health.summary_str(),
+            "services": service_health.get_all_statuses(),
+        }
+    except Exception as e:
+        raise HTTPException(500, f"刷新失败: {e}")

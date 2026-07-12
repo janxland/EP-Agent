@@ -25,11 +25,27 @@ from app.agentcore.intent_router import route_intent, detect_chain_intent
 from app.agentcore.todo_manager import TodoManager, assert_finish_gate
 from app.agentcore.role_config import get_role_or_default, DEFAULT_ROLE_ID
 
-# ── v5 双轨切换开关 ────────────────────────────────────────────────────────────
+# ── 执行引擎：唯一路径 = v6 LangGraph ──────────────────────────────────────────
+# v5（自研图引擎）和 v4（if/elif 硬编码）已废弃，全量迁移到 v6
+# 保留 USE_LANGGRAPH_V2 环境变量仅用于紧急关闭（不应触发）
 import os as _os
-USE_GRAPH_ENGINE = _os.getenv("EP_AGENT_USE_GRAPH_ENGINE", "false").lower() == "true"
+USE_LANGGRAPH_V2 = _os.getenv("EP_AGENT_USE_LANGGRAPH_V2", "true").lower() == "true"
 
 _logger = _logging.getLogger("ep_agent.runner")
+
+# ── 模块加载时预检 langgraph 可用性 ──────────────────────────────────────────────
+try:
+    from app.agentcore.graph_engine_v2 import _LANGGRAPH_AVAILABLE as _LG_AVAILABLE
+except Exception:
+    _LG_AVAILABLE = False
+
+if not _LG_AVAILABLE:
+    # langgraph 未安装是严重配置错误，启动时必须修复
+    _logger.error(
+        "[runner] ❌ langgraph 未安装！EP-Agent 需要 langgraph v6 引擎才能运行。"
+        " 请立即执行: pip install langgraph>=0.2 langchain-core>=0.3"
+    )
+    USE_LANGGRAPH_V2 = False  # 防止 ImportError，但此时系统无法正常工作
 
 
 Publisher = Callable[[str, dict], Awaitable[None]]
@@ -105,7 +121,33 @@ class UniversalChatRunner:
         role_id: str | None = None,
     ) -> dict:
         sess = session_getter(session_id)
-        has_score = sess.score is not None
+        # BUG-036 同类修复：session_getter fallback 路径可能返回 dict，防御性处理
+        if isinstance(sess, dict):
+            try:
+                from app.pipeline.domain import Session, Score, ScoreMeta
+                _row = sess
+                sess = Session(
+                    id=_row.get("id", session_id),
+                    workspace_id=_row.get("workspace_id", "") or "",
+                    project_id=_row.get("project_id", "") or "",
+                    pipeline_state=_row.get("pipeline_state", "idle") or "idle",
+                    extra=_row.get("extra", {}) if isinstance(_row.get("extra"), dict) else {},
+                )
+                _abc = _row.get("abc_notation") or ""
+                if _abc:
+                    sess.score = Score(
+                        title=_row.get("score_title", "") or "",
+                        abc_notation=_abc,
+                        meta=ScoreMeta(
+                            title=_row.get("score_title", "") or "",
+                            key=_row.get("score_key", "C") or "C",
+                            bpm=float(_row.get("score_bpm") or 120),
+                            note_count=int(_row.get("score_notes") or 0),
+                        ),
+                    )
+            except Exception:
+                sess = None
+        has_score = bool(sess and sess.score)
 
         # ── 从 session extra 读取 role_id（若调用方未传则从 DB 恢复）──────────
         if not role_id:
@@ -162,7 +204,7 @@ class UniversalChatRunner:
         })
 
         context_summary = ""
-        if sess.intent_history:
+        if sess and not isinstance(sess, dict) and sess.intent_history:
             last = sess.intent_history[-1]
             context_summary = f"最近一次操作：{last.summary}（{last.intent_type}）"
         # 工作区谱子库上下文追加到 context_summary，让意图路由和子 Agent 感知
@@ -190,6 +232,7 @@ class UniversalChatRunner:
             "step":   "routing",
             "status": "succeeded",
             "text":   f"意图识别：{domain} — {route.get('summary', '')}",
+            "domain": domain,
         })
 
         # ── 自动命名对话（仅首轮，title 为"新对话"时触发）──────────────────────
@@ -218,28 +261,22 @@ class UniversalChatRunner:
         await todo_mgr.plan(message, domain, has_score, publish, session_id)
 
         # ── Step 3: 按 domain 调度 SubAgent ───────────────────────────────────
-        # v5 双轨切换：环境变量 EP_AGENT_USE_GRAPH_ENGINE=true 启用动态图引擎
-        if USE_GRAPH_ENGINE:
-            return await self._dispatch_v5(
-                session_id=session_id,
-                message=message,
-                attachment_content=attachment_content,
-                attachment_name=attachment_name,
-                attachment_workspace_path=attachment_workspace_path,
-                attachment_b64=attachment_b64,
-                publish=publish,
-                session_getter=session_getter,
-                session_saver=session_saver,
-                convert_fn=convert_fn,
-                edit_fn=edit_fn,
-                todo_mgr=todo_mgr,
-                has_score=has_score,
-                role_id=role_id,
-                workspace_id=workspace_id,
+        # 唯一执行路径：v6/v7 LangGraph 原生图引擎（graph_engine_v2.py）
+        # v5/v4 已废弃，不再作为降级路径
+        if not USE_LANGGRAPH_V2:
+            # langgraph 未安装时给出明确错误，不静默降级
+            _logger.error(
+                "[runner] langgraph 不可用，无法处理请求。"
+                " 请执行: pip install langgraph>=0.2 langchain-core>=0.3"
             )
-        return await self._dispatch(
-            domain=domain,
-            chain_intents=chain_intents,
+            return {
+                "error": "langgraph_unavailable",
+                "content": "系统配置错误：langgraph 未安装，请联系管理员。",
+            }
+        # _LG_AVAILABLE 在模块加载时已确认，此处直接调用无需 try/except ImportError
+        # v7：将 session_id 绑定到 todo_mgr，确保 ReactExecutor 落库时能正确关联
+        todo_mgr.session_id = session_id
+        return await self._dispatch_v6(
             session_id=session_id,
             message=message,
             attachment_content=attachment_content,
@@ -251,322 +288,15 @@ class UniversalChatRunner:
             session_saver=session_saver,
             convert_fn=convert_fn,
             edit_fn=edit_fn,
-            audio_chat_fn=audio_chat_fn,
             todo_mgr=todo_mgr,
             has_score=has_score,
             role_id=role_id,
             workspace_id=workspace_id,
-            project_id=project_id,  # NEW-07 修复：显式传入，_dispatch 是实例方法非闭包
+            audio_chat_fn=audio_chat_fn,
+            project_id=project_id,
         )
 
-    async def _dispatch(
-        self,
-        domain: str,
-        chain_intents: list[str],
-        session_id: str,
-        message: str,
-        attachment_content: str,
-        attachment_name: str,
-        attachment_workspace_path: str,
-        attachment_b64: str,
-        publish: Publisher,
-        session_getter,
-        session_saver,
-        convert_fn,
-        edit_fn,
-        audio_chat_fn,
-        todo_mgr: TodoManager,
-        has_score: bool,
-        project_id: str = "",   # NEW-07 修复：从 run() 显式传入，不依赖闭包
-        role_id: str | None = None,
-        workspace_id: str = "",
-    ) -> dict:
-        """
-        按 domain 调度对应 SubAgent（v4.0 注册表分发）。
-
-        分发优先级：
-          1. convert 域（含降级 + 链式意图）→ 内联处理
-          2. edit 域（无谱子时降级为 create）→ 内联处理
-          3. h5 域（需先保存附件）→ 内联处理
-          4. 注册表 get_agent(domain) → run_with_ctx(ctx)
-          5. 兜底 → QueryAgent
-        """
-        from app.agentcore.agent_registry import get_agent, ensure_all_agents_loaded
-        from app.agentcore.run_context import RunContext
-
-        # 确保所有 Agent 模块已加载（触发 @register 装饰器）
-        ensure_all_agents_loaded()
-
-        # role 对象在降级时重推 role.active
-        role = get_role_or_default(role_id)
-
-        # ── 构造统一 RunContext（贯穿全链路）─────────────────────────────────
-        # extra 携带旧接口所需回调，供各 Agent 的 run_with_ctx 解包
-        ctx = RunContext(
-            session_id=session_id,
-            workspace_id=workspace_id,
-            project_id=project_id,  # NEW-14 修复：传入 project_id，RunContext 不再为空
-            role_id=role_id or "",
-            message=message,
-            attachment_content=attachment_content,
-            attachment_name=attachment_name,
-            attachment_workspace_path=attachment_workspace_path,
-            attachment_b64=attachment_b64,
-            has_score=has_score,
-            domain=domain,
-            publish=publish,
-            extra={
-                "session_getter": session_getter,
-                "session_saver":  session_saver,
-                "convert_fn":     convert_fn,
-                "edit_fn":        edit_fn,
-                "audio_chat_fn":  audio_chat_fn,
-                "todo_mgr":       todo_mgr,
-            },
-        )
-
-        # ── BUG-4 FIX: 拦截 .txt 附件+创作词但 router 未路由到 convert 的情况 ─────
-        # router LLM 可能没返回 chain_intents，导致走 create 域而跳过了 convert 步骤。
-        # 此时手动补 convert（因为 .txt 含 songNotes，必须先转 ABC）。
-        _needs_convert_first = (
-            domain != "convert"
-            and attachment_name
-            and attachment_name.lower().endswith(".txt")
-            and attachment_content
-        )
-        if _needs_convert_first:
-            # 快速检测附件内容是否含 songNotes（convert 域的判断逻辑）
-            try:
-                import json as _json, re as _re
-                _raw = attachment_content.strip()
-                _m = _re.search(r'\{.*\}', _raw, _re.DOTALL)
-                _candidate = _m.group() if _m else _raw
-                _parsed = _json.loads(_candidate)
-                _arr = _parsed if isinstance(_parsed, list) else [_parsed]
-                _is_sky = bool(_arr and isinstance(_arr[0], dict) and _arr[0].get("songNotes"))
-                if not _is_sky:
-                    # 尝试列表中的每一项
-                    for _item in (_parsed if isinstance(_parsed, list) else [_parsed]):
-                        if isinstance(_item, dict) and _item.get("songNotes"):
-                            _is_sky = True
-                            break
-            except Exception:
-                _is_sky = False
-            if _is_sky:
-                # 强制走 convert 域，不走其他域
-                domain = "convert"
-                await publish("pipeline.step", {
-                    "step": "force_convert", "status": "running",
-                    "text": f"检测到 .txt 含 Sky JSON，强制先执行 convert 步骤",
-                })
-
-        # ── convert 域（含降级 + 链式意图，逻辑复杂保留内联）────────────────
-        if domain == "convert":
-            result = await get_agent("convert")().run_with_ctx(ctx)
-
-            # 降级：不是合法 Sky JSON → 重新规划并路由到 create
-            if not result.get("valid", True):
-                await publish("pipeline.step", {
-                    "step": "convert_fallback", "status": "running",
-                    "text": "附件不是 Sky JSON，降级为创作模式",
-                })
-                fallback_todo_mgr = TodoManager()
-                fallback_todo_mgr.session_id = session_id
-                await fallback_todo_mgr.plan(message, "create", has_score, publish, session_id)
-                fallback_ctx = ctx.with_domain("create").with_extra(todo_mgr=fallback_todo_mgr)
-                return await get_agent("create")().run_with_ctx(fallback_ctx)
-
-            # 链式意图：convert 成功后检测是否还有 edit/create/h5
-            extra_domain = detect_chain_intent(message, chain_intents, attachment_name)
-            if extra_domain in ("edit", "create", "h5_create", "h5_edit"):
-                await publish("pipeline.step", {
-                    "step": "chain_intent", "status": "running",
-                    "text": f"检测到链式意图，继续执行：{extra_domain}",
-                })
-                chain_todo_mgr = TodoManager()
-                chain_todo_mgr.session_id = session_id
-                await chain_todo_mgr.plan(message, extra_domain, True, publish, session_id)
-
-                # ── 关键：把 .txt 替换为 convert 生成的 .abc 文件路径 ─────────────
-                # ConvertAgent._run_sky_json() 已把 ABC 落盘到 .sky/<title>.abc
-                # _ws_abc_path 存在 → 后续 Agent 看到的 attachment 是 .abc 而非 .txt
-                _chain_abc_path = result.get("workspace_path", "")
-                _chain_ctx = ctx.with_domain(extra_domain).with_extra(
-                    todo_mgr=chain_todo_mgr,
-                    current_abc=result.get("abc_notation", ""),
-                )
-                if _chain_abc_path:
-                    _chain_ctx = _chain_ctx.with_attachment_path(_chain_abc_path)
-
-                if extra_domain in ("h5_create", "h5_edit"):
-                    _att_path = attachment_workspace_path or ""
-                    # BUG-05+NEW-07 修复：project_id 已作为参数传入 _dispatch
-                    _chain_proj_id = project_id
-                    if not _att_path and attachment_b64 and attachment_name and workspace_id:
-                        _att_path = await _save_attachment_to_workspace(
-                            attachment_b64, attachment_name, workspace_id, _chain_proj_id
-                        )
-                    _chain_ctx = _chain_ctx.with_attachment_path(_att_path)
-                ChainCls = get_agent(extra_domain)
-                if ChainCls:
-                    return await ChainCls().run_with_ctx(_chain_ctx)
-            return result
-
-        # ── edit 域（无谱子时降级为 create）──────────────────────────────────
-        if domain == "edit":
-            if not has_score:
-                domain = "create"
-                await publish("role.active", {
-                    "role_id":   role.id,
-                    "role_name": role.name,
-                    "icon":      role.icon,
-                    "color":     role.color,
-                    "_degraded": True,
-                })
-                # v4.0: plan() 已同步完成，降级时直接重新规划（无竞态）
-                fallback_todo_mgr = TodoManager()
-                fallback_todo_mgr.session_id = session_id
-                await fallback_todo_mgr.plan(message, "create", has_score, publish, session_id)
-                fallback_ctx = ctx.with_domain("create").with_extra(todo_mgr=fallback_todo_mgr)
-                return await get_agent("create")().run_with_ctx(fallback_ctx)
-            return await get_agent("edit")().run_with_ctx(ctx)
-
-        # ── h5 域（需先保存附件到工作区）─────────────────────────────────────
-        if domain in ("h5_create", "h5_edit"):
-            _att_ws_path = attachment_workspace_path or ""
-            if not _att_ws_path and attachment_b64 and attachment_name and workspace_id:
-                _att_ws_path = await _save_attachment_to_workspace(
-                    attachment_b64, attachment_name, workspace_id, project_id
-                )
-            if _att_ws_path and workspace_id:
-                try:
-                    from app.agentcore.session_context import remember_workspace_file
-                    remember_workspace_file(session_id, _att_ws_path, attachment_name)
-                except Exception:
-                    pass
-            h5_ctx = ctx.with_attachment_path(_att_ws_path)
-            return await get_agent(domain)().run_with_ctx(h5_ctx)
-
-        # ── sovits 域：先把音频附件落盘到项目目录，再分发 ──────────────────
-        # 与 h5 域同等待遇：attachment_b64 或 attachment_workspace_path 均需落盘，
-        # 否则 sovits_list_audio_files() 扫描磁盘找不到参考音频。
-        if domain == "sovits":
-            _sov_ws_path = attachment_workspace_path or ""
-            # 仅当 b64 有值且磁盘路径尚未确定时才落盘（避免重复写入）
-            if not _sov_ws_path and attachment_b64 and attachment_name:
-                # OPT-1: 确保 ContextVar 已注入（防御性调用，避免跨 await 丢失）
-                try:
-                    from app.agentcore.session_context import set_current_session_id
-                    set_current_session_id(session_id)
-                except Exception:
-                    pass
-                # Fix: 不从 ctx.extra 取 project_id（刷新重建后 extra 可能为空）
-                # 直接从 DB 取，此时守门已确保 project_id 写入 DB
-                _sov_proj_id = project_id or ""
-                if not _sov_proj_id:
-                    try:
-                        from app.pipeline import db as _db_sov
-                        _si = _db_sov.get_session_info(session_id)
-                        _sov_proj_id = (_si or {}).get("project_id") or ""
-                    except Exception:
-                        pass
-                _sov_ws_path = await _save_attachment_to_workspace(
-                    attachment_b64, attachment_name, workspace_id,
-                    _sov_proj_id,
-                )
-                if _sov_ws_path:
-                    _logger.info(
-                        "[dispatch] sovits 附件已落盘: %s → %s",
-                        attachment_name, _sov_ws_path,
-                    )
-                else:
-                    # OPT-1: 落盘失败时给出明确错误，而不是静默继续
-                    _logger.error(
-                        "[dispatch] sovits 附件落盘失败: %s（workspace_id=%s）",
-                        attachment_name, workspace_id,
-                    )
-                    await publish("pipeline.step", {
-                        "step":   "sovits_attach_save",
-                        "status": "failed",
-                        "text":   f"⚠️ 参考音频保存失败（{attachment_name}），请重新上传",
-                    })
-                    return {
-                        "error":   "attachment_save_failed",
-                        "message": f"参考音频「{attachment_name}」保存失败，请重新上传或检查工作区权限",
-                    }
-            # 落盘成功后写入 session 重要记忆，供下一轮直接引用
-            if _sov_ws_path:
-                try:
-                    from app.agentcore.session_context import remember_workspace_file
-                    remember_workspace_file(session_id, _sov_ws_path, attachment_name)
-                except Exception:
-                    pass
-
-            # OPT-2: 将 GPT-SoVITS 服务状态注入 context，让 Agent 有明确指令而非自行判断
-            _sovits_status_hint = ""
-            _sovits_base_url = ""
-            try:
-                from app.config import config as _cfg
-                _sovits_base_url = getattr(_cfg, "sovits_base_url", "") or ""
-            except Exception:
-                pass
-            if _sovits_base_url:
-                try:
-                    import httpx as _httpx
-                    async with _httpx.AsyncClient(timeout=2.0) as _hc:
-                        _r = await _hc.get(_sovits_base_url.rstrip("/") + "/")
-                        _sovits_ok = _r.status_code < 500
-                except Exception:
-                    _sovits_ok = False
-                _sovits_status_hint = (
-                    "【GPT-SoVITS 服务状态：✅ 可用，优先使用 sovits 工具组】"
-                    if _sovits_ok else
-                    "【GPT-SoVITS 服务状态：❌ 不可用，必须使用 MiniMax 降级流程，禁止调用任何 sovits_* 工具】"
-                )
-            else:
-                _sovits_status_hint = "【GPT-SoVITS 服务状态：❌ 未配置 SOVITS_BASE_URL，必须使用 MiniMax 降级流程】"
-
-            sovits_ctx = ctx.with_attachment_path(_sov_ws_path)
-            # 将服务状态 hint 注入 extra，供 VoiceCloneAgent 拼入 system message
-            sovits_ctx = sovits_ctx.with_extra(sovits_status_hint=_sovits_status_hint)
-
-            # OPT-3: 执行 sovits Agent，完成后检测是否有 audio 链式意图
-            sovits_result = await get_agent("sovits")().run_with_ctx(sovits_ctx)
-
-            # 检测 sovits + audio 链式意图（如"克隆后生成一首歌"）
-            _chain_audio = _detect_sovits_audio_chain(message, chain_intents)
-            if _chain_audio and not sovits_result.get("error"):
-                _cloned_voice_path = sovits_result.get("workspace_path", "")
-                _cloned_voice_id   = sovits_result.get("voice_id", "")
-                await publish("pipeline.step", {
-                    "step":   "chain_intent_audio",
-                    "status": "running",
-                    "text":   "检测到链式意图：音色克隆完成，继续生成音频...",
-                })
-                chain_todo_mgr = TodoManager()
-                chain_todo_mgr.session_id = session_id
-                await chain_todo_mgr.plan(message, "audio", has_score, publish, session_id)
-                audio_ctx = ctx.with_domain("audio").with_extra(
-                    todo_mgr=chain_todo_mgr,
-                    cloned_voice_path=_cloned_voice_path,
-                    cloned_voice_id=_cloned_voice_id,
-                )
-                AudioAgentCls = get_agent("audio")
-                if AudioAgentCls:
-                    return await AudioAgentCls().run_with_ctx(audio_ctx)
-
-            return sovits_result
-
-        # ── 注册表通用分发（create / audio / voice 等）───────────────────────
-        AgentCls = get_agent(domain)
-        if AgentCls:
-            return await AgentCls().run_with_ctx(ctx)
-
-        # ── 兜底：query（未知 domain 或注册表未命中）─────────────────────────
-        _logger.warning("[dispatch] 未知 domain=%s，兜底到 QueryAgent", domain)
-        return await get_agent("query")().run_with_ctx(ctx)
-
-    async def _dispatch_v5(
+    async def _dispatch_v6(
         self,
         session_id: str,
         message: str,
@@ -583,29 +313,16 @@ class UniversalChatRunner:
         has_score: bool,
         role_id: str | None = None,
         workspace_id: str = "",
+        audio_chat_fn=None,
+        project_id: str = "",
     ) -> dict:
         """
-        v5 分发：走 AgentGraph 动态图引擎。
-        Supervisor 节点（LLM）决定每一步调用哪个节点，替代 if/elif 硬编码。
-        通过 EP_AGENT_USE_GRAPH_ENGINE=true 启用。
+        v6 分发：走真实 langgraph 包图引擎（graph_engine_v2.py）。
+        通过 EP_AGENT_USE_LANGGRAPH_V2=true 启用（默认开启）。
+        此方法仅在 USE_LANGGRAPH_V2=True（模块级已预检通过）时才会被调用。
         """
-        # 延迟导入，避免循环依赖
-        import importlib
-        import sys
-
-        # 确保所有节点已注册到图引擎（顺序：supervisor → reflect → 业务节点）
-        for _mod in (
-            "app.agentcore.supervisor_agent",
-            "app.agentcore.agents.reflect_agent",
-            "app.agentcore.agents.agent_nodes",   # convert/edit/create/h5/audio/sovits/query
-        ):
-            if _mod not in sys.modules:
-                try:
-                    importlib.import_module(_mod)
-                except Exception as _e:
-                    _logger.warning("[dispatch_v5] 节点模块导入失败: %s — %s", _mod, _e)
-
-        from app.agentcore.graph_engine import AgentGraph, GraphState
+        # 直接导入（模块级已预检 _LG_AVAILABLE=True，这里不会报 ImportError）
+        from app.agentcore.graph_engine_v2 import stream_graph_events, EPState
 
         # 读取当前会话的 ABC 谱（如果有）
         _abc = ""
@@ -616,51 +333,63 @@ class UniversalChatRunner:
         except Exception:
             pass
 
-        # 注入长期记忆上下文（用户风格/调号/BPM偏好）
+        # 注入长期记忆上下文
+        # MEM-001 修复：使用模块级单例 long_term_memory，避免每次请求重新创建 SQLite 连接
+        # service.py 已正确使用单例，此处对齐保持一致
         _memory_context = ""
         try:
-            from app.agentcore.long_term_memory import LongTermMemory
-            _memory_context = LongTermMemory().build_memory_context(session_id)
+            from app.agentcore.long_term_memory import long_term_memory
+            _memory_context = long_term_memory.build_memory_context(session_id)
         except Exception:
             pass
 
-        state = GraphState(
-            session_id=session_id,
-            workspace_id=workspace_id,
-            role_id=role_id or "",
-            message=message,
-            attachment_name=attachment_name,
-            attachment_content=attachment_content,
-            attachment_workspace_path=attachment_workspace_path,
-            attachment_b64=attachment_b64,
-            has_score=has_score,
-            abc_notation=_abc,
-            publish=publish,
-            session_getter=session_getter,
-            session_saver=session_saver,
-            convert_fn=convert_fn,
-            edit_fn=edit_fn,
-            todo_mgr=todo_mgr,
-            memory_context=_memory_context,
-        )
+        # 构造 EPState（TypedDict，LangGraph 原生格式）
+        state: EPState = {
+            "session_id":                session_id,
+            "workspace_id":              workspace_id,
+            "project_id":                project_id,
+            "role_id":                   role_id or "",
+            "message":                   message,
+            "attachment_name":           attachment_name,
+            "attachment_content":        attachment_content,
+            "attachment_workspace_path": attachment_workspace_path,
+            "attachment_b64":            attachment_b64,
+            "has_score":                 has_score,
+            "abc_notation":              _abc,
+            "visited":                   [],
+            "visit_counts":              {},
+            "tool_results":              [],
+            "outputs":                   {},
+            "reflection_score":          1.0,
+            "reflection_notes":          "",
+            "retry_count":               0,
+            "final_output":              {},
+            "error":                     "",
+            "memory_context":            _memory_context,
+            # 运行时回调（不被 Checkpointer 序列化）
+            "publish":        publish,
+            "session_getter": session_getter,
+            "session_saver":  session_saver,
+            "convert_fn":     convert_fn,
+            "edit_fn":        edit_fn,
+            "audio_chat_fn":  audio_chat_fn,
+            "todo_mgr":       todo_mgr,
+        }
 
         _logger.info(
-            "[dispatch_v5] 启动图引擎 session=%s message=%s",
+            "[dispatch_v6] 启动 LangGraph v2 session=%s message=%s",
             session_id[:8], message[:50],
         )
 
-        graph = AgentGraph()
-        final_state = await graph.run(state, start_node="supervisor")
+        final_state = await stream_graph_events(state, publish, session_id)
 
-        if final_state.error:
-            _logger.warning("[dispatch_v5] 图执行有错误: %s", final_state.error)
+        if final_state.get("error"):
+            _logger.warning("[dispatch_v6] 图执行有错误: %s", final_state["error"])
 
-        return final_state.final_output or {
-            "content": final_state.error or "图引擎执行完成",
-            "abc_notation": final_state.abc_notation,
+        return final_state.get("final_output") or {
+            "content":      final_state.get("error") or "LangGraph 执行完成",
+            "abc_notation": final_state.get("abc_notation", ""),
         }
-
-
 
 
 # ── OPT-3: sovits + audio 链式意图检测 ───────────────────────────────────────

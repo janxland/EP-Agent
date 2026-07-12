@@ -1,16 +1,10 @@
 """
-ReflectAgent — 质量反思节点 (v5)
+ReflectAgent — 质量反思节点 (v6 LangGraph 原生)
 
-在关键步骤后插入，强制 LLM 对输出进行质量评估：
-  - ABC 谱创作/编辑完成后：检查音符范围、节奏合理性、ABC 语法
-  - H5 页面生成后：检查模板变量是否全部替换
-  - 音频生成后：检查是否符合用户风格要求
-
-评分低于阈值时：
-  - 将反思内容注入下一轮 LLM 上下文（state.message）
-  - 触发原节点重试（最多 2 次）
-
-这解决了 v4 的核心问题：工具结果质量无自动评估。
+迁移记录 v6：
+  - 去掉旧版 @node 装饰器 + GraphState dataclass 依赖
+  - 节点函数签名改为 LangGraph 原生：(state: EPState dict) -> dict
+  - 只返回变更字段（LangGraph 自动 merge）
 """
 from __future__ import annotations
 
@@ -18,9 +12,8 @@ import json
 import logging
 import re
 
-from app.agentcore.graph_engine import GraphState, node
 from app.agentcore.llm import complete
-from app.agentcore.supervisor_agent import REFLECTION_THRESHOLD, _find_last_real_node  # 单一来源
+from app.agentcore.supervisor_agent import REFLECTION_THRESHOLD, _find_last_real_node
 
 _logger = logging.getLogger("ep_agent.reflect")
 
@@ -43,30 +36,35 @@ _REFLECT_SYSTEM = """你是 EP-Agent 的质量评审员（Critic）。
 """
 
 
-@node("reflect_node")
-async def reflect_node(state: GraphState) -> GraphState:
+async def reflect_node(state: dict, config: dict | None = None) -> dict:
     """
-    反思节点：评估上一步输出质量，决定是否需要重试。
-    通过 graph_engine 的 @node 装饰器注册到图中。
+    反思节点（LangGraph 原生）：评估上一步输出质量，决定是否需要重试。
+    只返回变更字段，LangGraph 自动 merge 到 EPState。
+    config["configurable"] 含 publish 等运行时回调（BUG-011：不经 checkpointer 序列化）。
     """
-    context_parts = [f"用户原始请求：{state.message}"]
+    message      = state.get("message", "")
+    abc_notation = state.get("abc_notation", "")
+    tool_results = state.get("tool_results") or []
+    error        = state.get("error", "")
+    visited      = state.get("visited") or []
+    retry_count  = int(state.get("retry_count", 0))
+    _cfg         = (config or {}).get("configurable", {})
+    publish      = _cfg.get("publish") or state.get("publish")
 
-    if state.abc_notation:
-        context_parts.append(
-            f"生成的 ABC 谱（前500字）：\n{state.abc_notation[:500]}"
-        )
+    context_parts = [f"用户原始请求：{message}"]
+    if abc_notation:
+        context_parts.append(f"生成的 ABC 谱（前500字）：\n{abc_notation[:500]}")
+    if tool_results:
+        last_result = tool_results[-1]
+        context_parts.append(f"上一步执行结果：{str(last_result)[:300]}")
 
-    if state.tool_results:
-        last_result = state.tool_results[-1]
-        context_parts.append(
-            f"上一步执行结果：{str(last_result)[:300]}"
-        )
+    changes: dict = {}
 
     # 有错误时直接给低分，不消耗 LLM token
-    if state.error:
-        state.reflection_score = 0.3
-        state.reflection_notes = f"上一步发生错误：{state.error}"
-        _logger.warning("[reflect] 上一步有错误，直接低分: %s", state.error)
+    if error:
+        reflection_score = 0.3
+        reflection_notes = f"上一步发生错误：{error}"
+        _logger.warning("[reflect] 上一步有错误，直接低分: %s", error)
     else:
         try:
             resp = await complete([
@@ -78,65 +76,62 @@ async def reflect_node(state: GraphState) -> GraphState:
             m = re.search(r'\{[^{}]*\}', raw, re.DOTALL)
             if m:
                 review = json.loads(m.group())
-                state.reflection_score = float(review.get("score", 0.5))
-                state.reflection_notes = review.get("suggestion", "")
-                issues = review.get("issues", [])
-                passed = review.get("passed", state.reflection_score >= REFLECTION_THRESHOLD)
+                reflection_score = float(review.get("score", 0.5))
+                reflection_notes = review.get("suggestion", "")
+                issues  = review.get("issues", [])
+                passed  = review.get("passed", reflection_score >= REFLECTION_THRESHOLD)
 
                 _logger.info(
                     "[reflect] score=%.2f passed=%s issues=%s",
-                    state.reflection_score, passed, issues,
+                    reflection_score, passed, issues,
                 )
 
-                if state.publish:
+                if publish:
                     try:
-                        await state.publish("graph.reflection", {
-                            "score":      state.reflection_score,
+                        await publish("graph.reflection", {
+                            "score":      reflection_score,
                             "passed":     passed,
                             "issues":     issues,
-                            "suggestion": state.reflection_notes,
+                            "suggestion": reflection_notes,
                         })
                     except Exception:
                         pass
             else:
-                # LLM 没有返回合法 JSON，给一个中等分数继续
-                state.reflection_score = 0.7
+                reflection_score = 0.7
+                reflection_notes = ""
         except Exception as exc:
             _logger.warning("[reflect] LLM 评估失败，默认通过: %s", exc)
-            state.reflection_score = 0.7
+            reflection_score = 0.7
+            reflection_notes = ""
+
+    changes["reflection_score"] = reflection_score
+    changes["reflection_notes"] = reflection_notes
 
     # 决策：通过 or 重试
-    if state.reflection_score >= REFLECTION_THRESHOLD:
-        # 质量通过 → 回到 supervisor 决定下一步
-        state.next_node = "supervisor"
-        state.retry_count = 0
-        _logger.info("[reflect] 质量通过 score=%.2f → supervisor", state.reflection_score)
+    if reflection_score >= REFLECTION_THRESHOLD:
+        changes["next_node"]   = "supervisor"
+        changes["retry_count"] = 0
+        _logger.info("[reflect] 质量通过 score=%.2f → supervisor", reflection_score)
     else:
-        # 质量不通过 → 重试上一个实质性节点
-        last_real_node = _find_last_real_node(state.visited)
-        if state.retry_count < 2 and last_real_node:
-            state.retry_count += 1
-            state.next_node = last_real_node
+        last_real_node = _find_last_real_node(visited)
+        if retry_count < 2 and last_real_node:
+            changes["retry_count"] = retry_count + 1
+            changes["next_node"]   = last_real_node
             # 将反思建议注入消息，下一轮 LLM 能看到
-            state.message = (
-                f"{state.message}\n\n"
-                f"[质量反思-第{state.retry_count}次重试] {state.reflection_notes}"
+            changes["message"] = (
+                f"{message}\n\n"
+                f"[质量反思-第{retry_count + 1}次重试] {reflection_notes}"
             )
             _logger.info(
                 "[reflect] 质量不通过 score=%.2f，重试 %s（第%d次）",
-                state.reflection_score, last_real_node, state.retry_count,
+                reflection_score, last_real_node, retry_count + 1,
             )
         else:
-            # 重试次数耗尽，强制通过
-            _exhausted = state.retry_count  # 记录耗尽时的值，再重置
-            state.retry_count = 0
-            state.next_node = "supervisor"
+            changes["retry_count"] = 0
+            changes["next_node"]   = "supervisor"
             _logger.warning(
                 "[reflect] 重试次数耗尽（retry_count=%d），强制通过",
-                _exhausted,
+                retry_count,
             )
 
-    return state
-
-
-# _find_last_real_node 已从 supervisor_agent 导入，此处不再重复定义（CROSS-1 修复）
+    return changes

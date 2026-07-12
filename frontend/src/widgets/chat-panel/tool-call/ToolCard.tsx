@@ -3,6 +3,8 @@
 import { useState, useEffect, useRef, memo, useCallback } from 'react'
 import type { MouseEvent } from 'react'
 import { useWorkspaceStore } from '@/features/workspace/store/workspace.store'
+import { useScoreStore } from '@/entities/session/store'
+import { ABCRenderer } from '@/widgets/abc-editor/ABCRenderer'
 
 // ─── 工具配置（图标 + 标签合表，单一数据源）─────────────────────────────────
 
@@ -82,11 +84,25 @@ const TOOL_CONFIG: Record<string, ToolConfig> = {
 
   // ── audio 保存组 ──────────────────────────────────────────────────────────────
   save_audio_from_url:       { bg: '#F0FDF4', fg: '#15803D', emoji: '💿', label: '保存音频到工作区' },
+
+  // ── llm: SubAgent 内部 LLM 调用（AUDIT-FIX-02：让 ABC 创作 LLM 在 Timeline 可见）──
+  // create_agent 发布 tool.call(tool='llm:create_main') 供审计 + 前端渲染
+  'llm:create_main':    { bg: '#FAF5FF', fg: '#7C3AED', emoji: '✨', label: 'AI 创作 ABC' },
+  'llm:quality_fix':    { bg: '#FFF7ED', fg: '#EA580C', emoji: '🔧', label: 'AI 质量修正' },
+  'llm:validate':       { bg: '#F0FDF4', fg: '#16A34A', emoji: '✔️',  label: 'AI 验证 ABC' },
+  'llm:edit_main':      { bg: '#FFFBEB', fg: '#D97706', emoji: '✏️',  label: 'AI 编辑 ABC' },
+  'llm:convert_main':   { bg: '#ECFEFF', fg: '#0891B2', emoji: '🔄', label: 'AI 转换处理' },
+  'llm:query_main':     { bg: '#EFF6FF', fg: '#2563EB', emoji: '💬', label: 'AI 问答' },
 }
 
 const _DEFAULT_CONFIG: ToolConfig = { bg: '#F9FAFB', fg: '#6B7280', emoji: '🔧', label: '' }
 function getToolConfig(name: string): ToolConfig {
-  return TOOL_CONFIG[name] ?? { ..._DEFAULT_CONFIG, label: name.replace(/_/g, ' ') }
+  if (TOOL_CONFIG[name]) return TOOL_CONFIG[name]
+  // llm: 前缀通配：未精确匹配时 fallback 到 llm: 通用样式（AI 推理调用）
+  if (name.startsWith('llm:')) {
+    return { bg: '#FAF5FF', fg: '#7C3AED', emoji: '🤖', label: `AI · ${name.slice(4).replace(/_/g, ' ')}` }
+  }
+  return { ..._DEFAULT_CONFIG, label: name.replace(/_/g, ' ') }
 }
 
 // ─── 文件类型判断 ─────────────────────────────────────────────────────────────
@@ -337,6 +353,61 @@ function MediaFileCard({ info }: { info: FileInfo }) {
   )
 }
 
+// ─── ABC 实时预览卡片 ────────────────────────────────────────────────────────
+// 嵌入在 llm:create_main / abc_composer 工具卡片底部
+// 生成中：监听 scoreStore.abcNotation 实时渲染（abc.updated 每200字符推送一次）
+// 完成后：显示最终完整谱子 + 播放控制
+
+// 触发 ABC 实时预览的工具名集合
+const ABC_LIVE_TOOLS = new Set(['llm:create_main', 'abc_composer'])
+
+function AbcLiveCard({ status }: { status: 'running' | 'succeeded' | 'failed' }) {
+  const abcNotation = useScoreStore((s) => s.abcNotation)
+  const [expanded, setExpanded] = useState(true)
+
+  // 没有 ABC 内容时不渲染
+  if (!abcNotation) return null
+
+  const isRunning = status === 'running'
+
+  return (
+    <div className="mt-2 rounded-xl border border-violet-100 bg-white overflow-hidden">
+      {/* 卡片头部 */}
+      <button
+        className="flex items-center gap-2 w-full px-3 py-2 bg-gradient-to-r from-violet-50 to-purple-50 hover:from-violet-100 hover:to-purple-100 transition-colors text-left"
+        onClick={() => setExpanded((v) => !v)}
+      >
+        <span className="text-base">🎵</span>
+        <span className="text-[11px] font-semibold text-violet-700">
+          {isRunning ? '正在生成乐谱...' : '乐谱预览'}
+        </span>
+        {isRunning && (
+          <span className="flex items-center gap-1 text-[10px] text-violet-400">
+            <span className="w-1.5 h-1.5 rounded-full bg-violet-400 animate-pulse" />
+            实时渲染中
+          </span>
+        )}
+        <svg
+          className={['w-3 h-3 text-violet-300 ml-auto transition-transform duration-200', expanded ? 'rotate-90' : ''].join(' ')}
+          fill="none" stroke="currentColor" viewBox="0 0 24 24"
+        >
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+        </svg>
+      </button>
+
+      {/* ABCRenderer */}
+      {expanded && (
+        <div className="border-t border-violet-50">
+          <ABCRenderer
+            abc={abcNotation}
+            className="min-h-0"
+          />
+        </div>
+      )}
+    </div>
+  )
+}
+
 // ─── JSON 语法高亮 ────────────────────────────────────────────────────────────
 
 function JsonHighlight({ raw }: { raw: string }) {
@@ -507,6 +578,11 @@ export const ToolCard = memo(function ToolCard({
                 )}
               </pre>
             </div>
+          )}
+
+          {/* ABC 实时预览（create_main / abc_composer 专属） */}
+          {ABC_LIVE_TOOLS.has(toolName) && (
+            <AbcLiveCard status={status} />
           )}
 
           {/* 结果区域 */}

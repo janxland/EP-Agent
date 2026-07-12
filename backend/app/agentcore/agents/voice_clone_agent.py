@@ -19,6 +19,7 @@ from __future__ import annotations
 from typing import Callable, Awaitable
 
 from app.agentcore.todo_manager import TodoManager, assert_finish_gate
+from app.agentcore.agents.base_agent import BaseAgent
 from app.agentcore.agent_registry import register
 
 if False:  # TYPE_CHECKING
@@ -39,7 +40,7 @@ _MINIMAX_TOOLS = {
 
 
 @register("sovits")
-class VoiceCloneAgent:
+class VoiceCloneAgent(BaseAgent):
     """
     GPT-SoVITS 音色克隆专家 SubAgent。
 
@@ -52,7 +53,7 @@ class VoiceCloneAgent:
       5. finish_all + assert_finish_gate
     """
 
-    async def run(
+    async def _run_impl(
         self,
         session_id: str,
         message: str,
@@ -216,14 +217,14 @@ class VoiceCloneAgent:
             session_id=session_id,
         )
 
-    async def run_with_ctx(self, ctx: "RunContext") -> dict:
+    async def run(self, ctx: "RunContext") -> dict:
         """v4.0 解耦接口：从 RunContext 解包参数，调用原 run()。"""
         todo_mgr = ctx.extra.get("todo_mgr")
         if todo_mgr is None:
             from app.agentcore.todo_manager import TodoManager as _TM
             todo_mgr = _TM()
             todo_mgr.session_id = ctx.session_id
-        return await self.run(
+        return await self._run_impl(
             session_id=ctx.session_id,
             message=ctx.message,
             publish=ctx.publish,

@@ -29,6 +29,7 @@ import {
   IMAGE_EXTS,
   type WorkspaceFile,
 } from '@/shared/lib/workspace-files-api'
+import { previewTabs } from '@/features/preview/store/preview-tabs.store'
 
 // ─── 全局事件总线 ─────────────────────────────────────────────────────────────
 
@@ -708,8 +709,12 @@ export function WorkspaceFileTree() {
     if (file.ext === 'abc') {
       try {
         const abc = await readWorkspaceFile(activeWorkspaceId, file.path, resolvedProjectId)
+        // 同时发送旧事件（兼容其他监听方）
         window.dispatchEvent(new CustomEvent('ep:load-score', { detail: { abc, path: file.path, name: file.name } }))
+        // 直接打开 ABCRenderer 播放标签页，而非普通文本预览
+        previewTabs.openAbc(abc, file.name, file.name)
       } catch { /* ignore */ }
+      return
     }
     emitFilePreview({ ...file, workspaceId: activeWorkspaceId, projectId: resolvedProjectId || undefined })
   }, [activeWorkspaceId, resolvedProjectId])

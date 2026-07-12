@@ -495,6 +495,7 @@ export function ChatPanel() {
             content={streaming.content}
             reasoningContent={streaming.reasoning_content}
             toolCalls={streaming.tool_calls}
+            toolResults={streaming.tool_results}
             roundIdx={streaming.roundIdx}
           />
         )}

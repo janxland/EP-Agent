@@ -31,6 +31,7 @@ from app.agentcore.abc_utils import extract_abc_and_summary
 from app.agentcore.react_executor import ReactExecutor
 from app.agentcore.todo_manager import TodoManager
 from app.agentcore.tools import get_tool_schemas, call_tool
+from typing import Optional
 from app.pipeline.domain import ScoreMeta
 
 Publisher = Callable[[str, dict], Awaitable[None]]
@@ -93,30 +94,52 @@ def _build_system_prompt() -> str:
 
 def _build_user_prompt(
     intent: str,
-    meta: ScoreMeta,
     current_abc: str,
+    meta: "Optional[ScoreMeta]" = None,
     context_summary: str = "",
 ) -> str:
-    """构造编辑任务的用户消息（注入谱子上下文）。"""
-    parts = [
-        f"用户意图：{intent}",
-        f"谱子信息：标题={meta.title}，调号={meta.key}，"
-        f"BPM={meta.bpm:.0f}，拍号={meta.time_sig_num}/{meta.time_sig_den}，"
-        f"音符数={meta.note_count}",
-    ]
-    if context_summary:
-        parts.append(f"历史上下文：{context_summary}")
-    parts.append(f"\n当前 ABC 谱：\n{current_abc}")
+    """构造编辑任务的用户消息（注入谱子上下文）。
+
+    解耦设计：
+      - current_abc 有值（来自 session.score）：注入谱子元数据 + ABC 正文
+      - current_abc 为空（用户把 ABC 粘贴在 intent/message 里）：
+        LLM 自己从 intent 文本中理解 ABC，无需 Python 层预提取。
+        告知 LLM 在用户消息中寻找 ABC 并按要求修改后输出。
+    """
+    parts = [f"用户意图：{intent}"]
+
+    if current_abc:
+        # 有 session 谱子：注入元数据 + 完整 ABC
+        if meta:
+            parts.append(
+                f"谱子信息：标题={meta.title}，调号={meta.key}，"
+                f"BPM={meta.bpm:.0f}，拍号={meta.time_sig_num}/{meta.time_sig_den}，"
+                f"音符数={meta.note_count}"
+            )
+        if context_summary:
+            parts.append(f"历史上下文：{context_summary}")
+        parts.append(f"\n当前 ABC 谱：\n{current_abc}")
+    else:
+        # 无 session 谱子：用户消息中可能直接包含 ABC，交给 LLM 理解
+        if context_summary:
+            parts.append(f"历史上下文：{context_summary}")
+        parts.append(
+            "\n注意：当前 session 暂无已保存的谱子。"
+            "请从上方用户消息中识别 ABC Notation 内容（若有），"
+            "按用户意图修改后，输出完整的修改后 ABC + SUMMARY 行。"
+            "若消息中未包含有效 ABC，请告知用户提供谱子。"
+        )
+
     return "\n".join(parts)
 
 
 async def run_edit(
-    current_abc: str,
     intent: str,
-    meta: ScoreMeta,
-    context_summary: str,
     publish: Publisher,
     todo_mgr: TodoManager,
+    current_abc: str = "",           # 来自 session.score，可为空（用户消息中含 ABC 时）
+    meta: "Optional[ScoreMeta]" = None,  # 谱子元数据，current_abc 为空时可省略
+    context_summary: str = "",
     scene: Scene = "editor",
     session_id: str = "",   # 传入后 ReactExecutor 自动落库 tool message
     workspace_id: str = "", # 保留参数兼容旧调用，内部不再使用（工具通过 ContextVar 推断路径）
@@ -149,6 +172,9 @@ async def run_edit(
         "text":   f"正在理解意图：{intent}",
     })
 
+    # ── fallback_abc：LLM 输出无法提取时的保底（有 session 谱则用，否则空串）──
+    _FALLBACK = current_abc or ""
+
     # ── 构造 messages ─────────────────────────────────────────────────────────
     # default 组：analyze_abc / validate_abc / transpose_abc / abc_to_sky_json 等
     # abc_edit 组：abc_to_midi / load_abc_score
@@ -160,7 +186,9 @@ async def run_edit(
         if s["function"]["name"] in ("list_workspace_files", "read_workspace_files",
                                      "read_workspace_file", "list_workspace_scores")
     ]
-    tools = get_tool_schemas("default") + get_tool_schemas("abc_edit") + _workspace_read_tools
+    # TOOL-001 修复：DEFAULT_GROUP='abc_edit'，不存在 'default' 分组（永远为空列表）。
+    # 去掉 get_tool_schemas('default')，避免混淆；abc_edit 分组已包含所有 ABC 操作工具。
+    tools = get_tool_schemas("abc_edit") + _workspace_read_tools
     # ── 注入重要记忆前缀（跨轮次上下文携带体）─────────────────────────────────
     _memory_prefix = ""
     if session_id:
@@ -176,7 +204,10 @@ async def run_edit(
     messages = [
         {"role": "system", "content": _system},
         {"role": "user",   "content": _build_user_prompt(
-            intent, meta, current_abc, context_summary
+            intent=intent,
+            current_abc=current_abc,
+            meta=meta,
+            context_summary=context_summary,
         )},
     ]
 
@@ -212,7 +243,6 @@ async def run_edit(
     midi_url = exec_result.get("extra", {}).get("midi_url")
 
     # ── 提取 ABC + SUMMARY ───────────────────────────────────────────────────
-    _FALLBACK = current_abc
     new_abc, summary = extract_abc_and_summary(raw, _FALLBACK)
 
     await publish("pipeline.step", {

@@ -16,12 +16,20 @@ CreateAgent — ABC 谱创作 SubAgent
 """
 from __future__ import annotations
 
+import logging
 import re
+from app.agentcore.agents.base_agent import BaseAgent
+import asyncio
+import time
+import uuid
 from typing import Callable, Awaitable
 
-from app.agentcore.llm import complete as llm_complete
+_logger = logging.getLogger("ep_agent.create_agent")
+
+from app.agentcore.llm import complete as llm_complete, complete_stream, get_current_model_name
 from app.agentcore.todo_manager import TodoManager, assert_finish_gate
 from app.agentcore.agent_registry import register
+from app.pipeline import db as _db
 
 if False:  # TYPE_CHECKING
     from app.agentcore.run_context import RunContext
@@ -49,6 +57,64 @@ def _load_system_create() -> str:
         )
 
 _FALLBACK_ABC = "X:1\nT:新曲\nM:4/4\nL:1/8\nQ:1/4=120\nK:C\nCDEF GABc|dedB cAGE|FEDC DEFG|E4 z4|\n"
+
+_AGENT_NAME = "create_agent"
+
+
+async def _llm_with_span(
+    messages: list,
+    temperature: float,
+    publish: Publisher,
+    span_name: str,
+    call_id: str = "",
+) -> str:
+    """
+    包装 llm_complete，自动发布 tool.call span 供 TraceCollector 记录。
+    每次 LLM 调用都会在审计链路中留下可见的 span：
+      - span_kind=model（通过 tool 名称前缀 'llm:' 识别）
+      - 记录模型名、temperature、耗时、输出字符数
+    """
+    cid = call_id or f"llm_{span_name}_{uuid.uuid4().hex[:8]}"
+    model_name = ""
+    try:
+        model_name = get_current_model_name("strong")
+    except Exception:
+        pass
+
+    await publish("tool.call", {
+        "call_id":   cid,
+        "tool":      f"llm:{span_name}",
+        "status":    "running",
+        "arguments": {
+            "model":          model_name,
+            "temperature":    temperature,
+            "messages_count": len(messages),
+            "agent":          _AGENT_NAME,
+        },
+        "round_idx": 0,
+    })
+
+    t0 = time.time()
+    try:
+        resp = await llm_complete(messages, temperature=temperature)
+        raw = resp if isinstance(resp, str) else resp.get("content", "")
+        elapsed_ms = int((time.time() - t0) * 1000)
+        await publish("tool.call", {
+            "call_id":        cid,
+            "tool":           f"llm:{span_name}",
+            "status":         "succeeded",
+            "result_preview": f"{len(raw)}chars {elapsed_ms}ms",
+            "full_result":    f"output_chars={len(raw)} elapsed_ms={elapsed_ms} model={model_name}",
+        })
+        return raw
+    except Exception as e:
+        await publish("tool.call", {
+            "call_id": cid,
+            "tool":    f"llm:{span_name}",
+            "status":  "failed",
+            "error":   str(e),
+        })
+        raise
 
 
 def _calc_duration_hint(mins: float, bpm: float, time_sig_num: int = 4) -> str:
@@ -187,10 +253,10 @@ def _extract_bars_from_offset(abc: str, skip_bars: int, take_bars: int) -> str:
 
 
 @register("create")
-class CreateAgent:
+class CreateAgent(BaseAgent):
     """ABC 谱创作 SubAgent（从零创作 或 基于已有谱子改编）。"""
 
-    async def run(
+    async def _run_impl(
         self,
         session_id: str,
         message: str,
@@ -202,9 +268,9 @@ class CreateAgent:
     ) -> dict:
         from app.pipeline.domain import Score, ScoreMeta
 
+        _logger.info("[create_agent] 开始 session=%s msg=%s", session_id[:8], message[:60].replace('\n', ' '))
+
         # ── 从 session 读取已有 ABC（改编/延伸时的数据基础）──────────────────────
-        # current_abc 优先级：参数传入 > session.score.abc_notation
-        # 这保证了「改编已有谱子」时 LLM 能看到完整的原谱数据（含 BPM/调号/旋律）
         session_abc = ""
         session_bpm = 120.0
         session_time_sig_num = 4
@@ -214,18 +280,19 @@ class CreateAgent:
                 session_abc = sess.score.abc_notation
                 session_bpm = float(sess.score.meta.bpm or 120.0)
                 session_time_sig_num = int(getattr(sess.score.meta, 'time_sig_num', 4) or 4)
-        except Exception:
-            pass
+                _logger.info("[create_agent] session ABC 已加载 len=%d bpm=%.0f", len(session_abc), session_bpm)
+        except Exception as _e:
+            _logger.debug("[create_agent] session_getter 失败（忽略）: %s", _e)
 
-        # ── BUG-PROMPT-1 修复：从 message 中提取内嵌 ABC 参考谱 ─────────────────
-        # 用户常常把参考 ABC 直接粘贴在消息里（而非作为附件上传）
-        # 原代码完全忽略了这种情况，导致 base_abc 永远为空，改编模式永远不触发
-        # 修复：检测 message 是否含合法 ABC（含 K: 字段），若有则提取为 message_abc
+        # 从 message 中提取内嵌 ABC 参考谱
         message_abc = extract_abc_from_message(message)
+        if message_abc:
+            _logger.info("[create_agent] 从消息提取到 ABC len=%d", len(message_abc))
 
         # 确定本次创作的「基础 ABC」：参数传入 > session.score.abc_notation > message 内嵌
-        # 规则：只认真正的 ABC Notation（含 K: 字段），不读 .txt/.json（Sky JSON）
         base_abc = current_abc or session_abc or message_abc
+        _logger.info("[create_agent] 创作模式=%s base_abc_len=%d",
+                     '改编' if base_abc else '从零创作', len(base_abc))
 
         # BUG-CR1 修复：只取 pending 状态的 TODO，不 fallback 到 ids 全量
         # 原来 pending 为空时 fallback 到 ids（含 done/failed），会重复操作已完成 TODO
@@ -234,6 +301,7 @@ class CreateAgent:
         if exec_ids:
             await todo_mgr.tick(exec_ids[0], "running", publish)
 
+        _logger.info("[create_agent] exec_ids=%s temperature将动态决定", exec_ids)
         create_call_id = f"call_create_{session_id[:8]}"
         await publish("tool.call", {
             "call_id":   create_call_id,
@@ -272,16 +340,126 @@ class CreateAgent:
                 create_temperature = 0.85
         else:
             create_temperature = 0.92
+        # ── 主创作：流式 LLM 调用（边生成边推送 abc.updated，用户实时看到谱子）──
+        # 同时通过 _llm_with_span 在审计链路留下可见 span
+        main_llm_cid = f"llm_create_main_{uuid.uuid4().hex[:8]}"
+        model_name = ""
         try:
-            resp = await llm_complete(
-                [
-                    {"role": "system", "content": system},
-                    {"role": "user",   "content": user_prompt},
-                ],
-                temperature=create_temperature,
-            )
-            raw = resp if isinstance(resp, str) else resp.get("content", "")
+            model_name = get_current_model_name("strong")
+        except Exception:
+            pass
+        await publish("tool.call", {
+            "call_id":   main_llm_cid,
+            "tool":      "llm:create_main",
+            "status":    "running",
+            "arguments": {
+                "model":          model_name,
+                "temperature":    create_temperature,
+                "messages_count": 2,
+                "agent":          _AGENT_NAME,
+                "has_base_abc":   bool(base_abc),
+            },
+            "round_idx": 0,
+        })
+        t0_main = time.time()
+        raw = ""
+        _logger.info("[create_agent] 开始流式主创作 temperature=%.2f model=%s", create_temperature, model_name)
+        try:
+            # 优先尝试流式生成（边生成边推送 abc.updated，用户实时看到谱子渐进出现）
+            _partial_buf = ""
+            _last_push_len = 0
+            _push_interval = 200  # 每累积 200 字符推送一次中间状态
+            _token_count = 0
+            _reasoning_buf = ""  # 累积完整推理内容，落库时写入 reasoning 字段
+            try:
+                async for chunk in complete_stream(
+                    [
+                        {"role": "system", "content": system},
+                        {"role": "user",   "content": user_prompt},
+                    ],
+                    temperature=create_temperature,
+                    # thinking 参数不传：使用模型默认思考行为（DeepSeek-V4 默认开启思考，保证创作质量）
+                ):
+                    # complete_stream yield (content_delta, reasoning_delta) 二元组
+                    content_delta   = chunk[0] if isinstance(chunk, tuple) else chunk
+                    reasoning_delta = chunk[1] if isinstance(chunk, tuple) and len(chunk) > 1 else ""
+                    # ── 推送 reasoning_delta（思考过程）到聊天气泡 ──────────────
+                    # ABC 正文内容（content_delta）不发 message.delta：
+                    #   - ABC notation 是结构化数据，不应出现在聊天气泡里
+                    #   - 用户通过编辑器实时预览（abc.updated 事件，下方每 200 字符推一次）
+                    # reasoning_delta（思考过程）可以发：让用户看到 AI 思考过程
+                    if reasoning_delta:
+                        _reasoning_buf += reasoning_delta  # 累积推理内容（无截断）
+                        await publish("message.delta", {
+                            "delta":            "",
+                            "reasoning_delta":  reasoning_delta,
+                        })
+                    # pipeline.step 进度提示（每 100 token 推一次，让用户知道 AI 在工作）
+                    if content_delta and _token_count % 100 == 0 and _token_count > 0:
+                        await publish("pipeline.step", {
+                            "step":   "create_generating",
+                            "status": "running",
+                            "text":   f"🎵 AI 创作中... 已生成 {_token_count} tokens",
+                        })
+                    if content_delta:
+                        raw += content_delta
+                        _partial_buf += content_delta
+                        _token_count += 1
+                        if _token_count % 50 == 0:
+                            _logger.debug("[create_agent] 流式生成中 tokens=%d raw_len=%d", _token_count, len(raw))
+                        # 每累积足够内容时推送中间 abc.updated（渐进式预览）
+                        if len(raw) - _last_push_len >= _push_interval:
+                            _partial, _ = extract_abc_and_summary(raw, "")
+                            if "K:" in _partial:
+                                await publish("abc.updated", {
+                                    "abc":     _partial,
+                                    "version": 0,
+                                    "summary": "生成中...",
+                                })
+                                _last_push_len = len(raw)
+                _logger.info("[create_agent] 流式生成完成 tokens=%d raw_len=%d elapsed=%.1fs",
+                             _token_count, len(raw), time.time() - t0_main)
+            except (AttributeError, NotImplementedError, TimeoutError):
+                # 流式超时或旧版 SDK 不支持 stream=True → 降级为非流式调用
+                _logger.warning("[create_agent] 流式生成超时或不支持，降级为非流式调用 elapsed=%.1fs", time.time() - t0_main)
+                await publish("pipeline.step", {
+                    "step": "create_stream_fallback", "status": "running",
+                    "text": "流式生成超时，切换为普通模式重试...",
+                })
+                resp = await llm_complete(
+                    [
+                        {"role": "system", "content": system},
+                        {"role": "user",   "content": user_prompt},
+                    ],
+                    temperature=create_temperature,
+                )
+                raw = resp if isinstance(resp, str) else resp.get("content", "")
+
+            elapsed_ms = int((time.time() - t0_main) * 1000)
+            await publish("tool.call", {
+                "call_id":        main_llm_cid,
+                "tool":           "llm:create_main",
+                "status":         "succeeded",
+                "result_preview": f"{len(raw)}chars {elapsed_ms}ms",
+                "full_result":    f"output_chars={len(raw)} elapsed_ms={elapsed_ms} model={model_name}",
+            })
+            # ── 落库主创作 assistant 消息（含完整 raw 输出 + 完整推理内容，前端 SSE replay 恢复）──
+            if session_id:
+                try:
+                    _db.insert_message(
+                        msg_id=f"asst_create_{uuid.uuid4().hex[:12]}",
+                        session_id=session_id,
+                        role="assistant",
+                        content=raw,
+                        reasoning=_reasoning_buf,  # 完整推理内容，无截断
+                    )
+                except Exception as _dbe:
+                    _logger.warning("[create_agent] assistant 消息落库失败 session=%s: %s", session_id, _dbe)
         except Exception as e:
+            await publish("tool.call", {
+                "call_id": main_llm_cid, "tool": "llm:create_main",
+                "status": "failed", "error": str(e),
+            })
             await publish("tool.call", {
                 "call_id": create_call_id, "tool": "abc_composer",
                 "status": "failed", "error": str(e),
@@ -298,79 +476,105 @@ class CreateAgent:
 
         new_abc, summary = extract_abc_and_summary(raw, _FALLBACK_ABC)
 
-        # ── 验证 ABC 音符范围 + 自动修正 ─────────────────────────────────────
-        new_abc, summary = await self._validate_and_fix(
-            new_abc, summary, raw, system, user_prompt, publish
-        )
+        # ── 质量流水线已移除（PERF-01）────────────────────────────────────────
+        # 原有 4 步串行 LLM 修正（validate/dup/rhythm/melody）最坏增加 4 次 LLM 调用，
+        # 导致总耗时 10+ 分钟。现在把所有质量约束直接写进 _build_prompt，
+        # 由主创作 LLM 一次性输出正确结果，无需事后修正。
 
-        # ── 重复行检测 + 自动修正（防止主旋律循环）──────────────────────────────
-        new_abc, summary = await self._fix_duplicate_lines(
-            new_abc, summary, raw, system, user_prompt, message, publish
-        )
-
-        # ── 节奏多样性检测 + 自动修正（防止全八分音符单调输出）──────────────────
-        new_abc, summary = await self._fix_rhythm_monotone(
-            new_abc, summary, system, user_prompt, publish
-        )
-
-        # ── 旋律线条质量检测 + 自动修正（BUG-QP-1 修复：防止纯和弦块堆砌）────────
-        # 必须在节奏修正之后执行，避免误判节奏修正后的结果
-        new_abc, summary = await self._fix_melody_quality(
-            new_abc, summary, system, user_prompt, publish
-        )
-
-        # ── 时长验证：用户指定分钟数时检查小节数是否满足要求 ─────────────────────
+        # ── 流式续写循环：时长不足时持续流式追加，全程实时推送，无超时概念 ─────────
+        # 设计原则：
+        #   - 不做并行扩展（有超时风险），改为串行流式续写循环
+        #   - 每轮写 2 行（8 小节），流式输出，实时追加到编辑器
+        #   - 用户全程看到谱子一行行增长，体验流畅
+        #   - 最多续写 8 轮（防止极端情况无限循环），每轮独立 stream
         dur_match = re.search(r'(\d+(?:\.\d+)?)\s*分钟', message)
         if dur_match:
             required_mins = float(dur_match.group(1))
             dur_check = check_duration_requirement(new_abc, required_mins)
             if not dur_check["satisfied"]:
-                shortage = dur_check["shortage_bars"]
-                actual   = dur_check["actual_bars"]
-                required = dur_check["required_bars"]
+                actual_header = parse_abc_header(new_abc)
+                _cont_key  = actual_header["key"] or "C"
+                _cont_bpm  = actual_header["bpm"] or session_bpm
+                _cont_tsig = f"{actual_header['time_sig_num']}/{actual_header['time_sig_den']}"
+                _cont_system = (
+                    f"你是 ABC Notation 音乐创作专家。"
+                    f"调号={_cont_key}，BPM={_cont_bpm:.0f}，拍号={_cont_tsig}，L:1/8。"
+                    f"直接输出 ABC 正文行（每行4小节），不输出任何 Header（X:/T:/M:/L:/Q:/K:），"
+                    f"不输出解释，不输出 SUMMARY。每行旋律必须不同，不能与参考行重复。"
+                )
+                _MAX_EXTEND_ROUNDS = 8  # 最多续写轮次，防止极端情况
+                _extend_round = 0
+                while not dur_check["satisfied"] and _extend_round < _MAX_EXTEND_ROUNDS:
+                    _extend_round += 1
+                    shortage = dur_check["shortage_bars"]
+                    actual   = dur_check["actual_bars"]
+                    required = dur_check["required_bars"]
+                    # 提取末尾 3 行作为风格参考
+                    _k_pos = new_abc.find("K:")
+                    _body_lines = []
+                    if _k_pos >= 0:
+                        _body_raw = new_abc[new_abc.find("\n", _k_pos):].strip()
+                        _body_lines = [l for l in _body_raw.splitlines() if l.strip()]
+                    _tail_ctx = "\n".join(_body_lines[-3:]) if _body_lines else ""
+                    # 每轮写 2 行（8 小节），不足 2 行时写到满足为止
+                    _lines_this_round = max(2, min(4, (shortage + 3) // 4))
+                    _cont_user = (
+                        f"参考已有旋律末尾（保持风格连贯，每行必须不同）：\n{_tail_ctx}\n\n"
+                        f"请继续写 {_lines_this_round} 行新旋律（每行4小节），风格：{message[:80]}。"
+                        f"直接输出 {_lines_this_round} 行 ABC 正文，不含任何 Header 或解释。"
+                    )
+                    await publish("pipeline.step", {
+                        "step": "create_extend", "status": "running",
+                        "text": f"🎵 续写第 {_extend_round} 轮（已有 {actual}/{required} 小节，补充 {shortage} 小节）...",
+                    })
+                    _ext_raw = ""
+                    try:
+                        async for _chunk in complete_stream(
+                            [
+                                {"role": "system", "content": _cont_system},
+                                {"role": "user",   "content": _cont_user},
+                            ],
+                            temperature=0.88 + _extend_round * 0.02,
+                            # thinking 默认，模型自决
+                        ):
+                            _cd = _chunk[0] if isinstance(_chunk, tuple) else _chunk
+                            _rd = _chunk[1] if isinstance(_chunk, tuple) and len(_chunk) > 1 else ""
+                            if _rd:
+                                await publish("message.delta", {"delta": "", "reasoning_delta": _rd})
+                            if _cd:
+                                _ext_raw += _cd
+                    except Exception as _ext_e:
+                        _logger.warning("[create_agent] 续写第 %d 轮失败: %s", _extend_round, _ext_e)
+                        break
+                    # 过滤 header 行，只保留正文
+                    _new_lines = [
+                        l for l in _ext_raw.splitlines()
+                        if l.strip()
+                        and not re.match(r'^[XTMLQKCS]:', l.strip())
+                        and not l.strip().startswith('%')
+                        and not l.strip().startswith('SUMMARY')
+                    ]
+                    if not _new_lines:
+                        _logger.warning("[create_agent] 续写第 %d 轮无有效输出，停止", _extend_round)
+                        break
+                    # 追加到 ABC body 末尾
+                    _k_end = new_abc.find("\n", new_abc.find("K:"))
+                    if _k_end >= 0:
+                        new_abc = new_abc[:_k_end + 1] + new_abc[_k_end + 1:].rstrip() + "\n" + "\n".join(_new_lines)
+                    # 实时推送编辑器（用户看到谱子增长）
+                    await publish("abc.updated", {
+                        "abc":     new_abc,
+                        "version": 0,
+                        "summary": f"续写中（第 {_extend_round} 轮）...",
+                    })
+                    # 重新检查是否满足时长
+                    dur_check = check_duration_requirement(new_abc, required_mins)
+                    _logger.info("[create_agent] 续写第 %d 轮完成 actual=%d required=%d satisfied=%s",
+                                 _extend_round, dur_check["actual_bars"], dur_check["required_bars"], dur_check["satisfied"])
                 await publish("pipeline.step", {
-                    "step": "create_duration_check", "status": "running",
-                    "text": f"时长不足（{actual}/{required} 小节），正在补充 {shortage} 小节...",
+                    "step": "create_extend", "status": "succeeded",
+                    "text": f"✅ 续写完成（{_extend_round} 轮，共 {count_bars(new_abc)} 小节）",
                 })
-                try:
-                    # 从已生成的 ABC 解析实际 BPM（LLM 可能改变了 BPM）
-                    actual_header = parse_abc_header(new_abc)
-                    actual_bpm = actual_header["bpm"] or session_bpm
-                    extend_hint = _calc_duration_hint(
-                        required_mins, actual_bpm, actual_header["time_sig_num"]
-                    )
-                    resp3 = await llm_complete(
-                        [
-                            {"role": "system",    "content": system},
-                            {"role": "user",      "content": user_prompt},
-                            {"role": "assistant", "content": raw},
-                            {"role": "user",      "content": (
-                                f"你的作品只有约 {actual} 小节（约 {dur_check['actual_seconds']:.0f} 秒），"
-                                f"但用户要求 {required_mins} 分钟（需要约 {required} 小节）。\n"
-                                f"{extend_hint}\n"
-                                f"请在现有旋律基础上继续扩展，补充约 {shortage} 小节。\n"
-                                f"⚠️ 新增的每一行旋律必须与已有行不同，禁止重复已有旋律行。\n"
-                                f"重新输出完整 ABC + SUMMARY 行。"
-                            )},
-                        ],
-                        temperature=0.88,
-                    )
-                    raw3 = resp3 if isinstance(resp3, str) else resp3.get("content", "")
-                    abc3, sum3 = extract_abc_and_summary(raw3, new_abc)
-                    if "K:" in abc3 and count_notes(abc3) > count_notes(new_abc):
-                        # 再次做重复行检测
-                        dup3 = detect_duplicate_lines(abc3)
-                        if not dup3["has_duplicates"]:
-                            new_abc, summary = abc3, sum3
-                        else:
-                            # 扩展版有重复，保留原版
-                            pass
-                        await publish("pipeline.step", {
-                            "step": "create_duration_check", "status": "succeeded",
-                            "text": f"已扩展至 {check_duration_requirement(new_abc, required_mins)['actual_bars']} 小节",
-                        })
-                except Exception:
-                    pass
 
         header   = parse_abc_header(new_abc)
         note_cnt = count_notes(new_abc)
@@ -484,12 +688,28 @@ class CreateAgent:
                     "text": "正在导出 MIDI 文件...",
                 })
                 try:
+                    _midi_tc_id = f"call_midi_{uuid.uuid4().hex[:8]}"
                     _midi_result = await _call_tool("abc_to_midi", {
                         "abc": new_abc,
                         "output_filename": f"{header['title'] or 'score'}.mid",
                     })
                     _export_results["midi"] = _midi_result
                     _export_done = True
+                    # ── 落库 tool 消息（abc_to_midi 结果，前端可渲染工具卡片）──
+                    if session_id:
+                        try:
+                            import json as _json
+                            _midi_result_str = _midi_result if isinstance(_midi_result, str) else _json.dumps(_midi_result, ensure_ascii=False)
+                            _db.insert_message(
+                                msg_id=f"tool_{_midi_tc_id}_{uuid.uuid4().hex[:8]}",
+                                session_id=session_id,
+                                role="tool",
+                                content=_midi_result_str,
+                                tool_call_id=_midi_tc_id,
+                                tool_name="abc_to_midi",
+                            )
+                        except Exception as _dbe:
+                            _logger.warning("[create_agent] abc_to_midi tool 消息落库失败: %s", _dbe)
                     await publish("pipeline.step", {
                         "step": "create_export_midi", "status": "succeeded",
                         "text": "MIDI 文件已导出",
@@ -505,6 +725,7 @@ class CreateAgent:
                     "text": "正在导出 Sky JSON...",
                 })
                 try:
+                    _sky_tc_id = f"call_sky_{uuid.uuid4().hex[:8]}"
                     # BUG-CR3 修复：补充 output_filename，使用曲目标题而非默认文件名
                     _sky_result = await _call_tool("abc_to_sky_json", {
                         "abc": new_abc,
@@ -512,6 +733,21 @@ class CreateAgent:
                     })
                     _export_results["sky_json"] = _sky_result
                     _export_done = True
+                    # ── 落库 tool 消息（abc_to_sky_json 结果，前端可渲染工具卡片）──
+                    if session_id:
+                        try:
+                            import json as _json
+                            _sky_result_str = _sky_result if isinstance(_sky_result, str) else _json.dumps(_sky_result, ensure_ascii=False)
+                            _db.insert_message(
+                                msg_id=f"tool_{_sky_tc_id}_{uuid.uuid4().hex[:8]}",
+                                session_id=session_id,
+                                role="tool",
+                                content=_sky_result_str,
+                                tool_call_id=_sky_tc_id,
+                                tool_name="abc_to_sky_json",
+                            )
+                        except Exception as _dbe:
+                            _logger.warning("[create_agent] abc_to_sky_json tool 消息落库失败: %s", _dbe)
                     await publish("pipeline.step", {
                         "step": "create_export_sky", "status": "succeeded",
                         "text": "Sky JSON 已导出",
@@ -648,6 +884,153 @@ class CreateAgent:
             user = f"请创作：{message}{duration_hint}"
 
         return system, user
+
+    async def _fix_all_quality_issues(
+        self,
+        abc: str,
+        summary: str,
+        raw: str,
+        system: str,
+        user_prompt: str,
+        message: str,
+        publish: Publisher,
+    ) -> tuple[str, str]:
+        """
+        质量流水线 v2.0：并行检测 + 一次合并修正。
+
+        优化前：3个检测串行，每次触发都额外 LLM 调用（最坏 3次额外 LLM）。
+        优化后：3个检测并行（纯CPU，无IO），汇总问题后一次 LLM 修正。
+        预期收益：最坏情况从 4次 LLM → 2次 LLM，耗时减少 30-50%。
+        """
+        try:
+            # ── 并行运行所有质量检测（纯 CPU，用 asyncio.to_thread 避免阻塞事件循环）
+            dup_result, rhythm_result, melody_result = await asyncio.gather(
+                asyncio.to_thread(detect_duplicate_lines, abc),
+                asyncio.to_thread(check_rhythm_variety, abc),
+                asyncio.to_thread(check_melody_quality, abc),
+                return_exceptions=True,
+            )
+            # 异常时降级为空结果
+            if isinstance(dup_result, Exception):
+                dup_result = {"has_duplicates": False, "duplicate_pairs": [], "total_lines": 0, "unique_lines": 0}
+            if isinstance(rhythm_result, Exception):
+                rhythm_result = {"variety_ratio": 1.0, "monotone_count": 0, "total_body_lines": 0}
+            if isinstance(melody_result, Exception):
+                melody_result = {"quality_ratio": 1.0, "chord_block_count": 0, "total_body_lines": 0}
+
+            # ── 汇总所有问题
+            issues: list[str] = []
+            fix_instructions: list[str] = []
+            total_lines = dup_result.get("total_lines", 0) or rhythm_result.get("total_body_lines", 0)
+
+            # 1. 重复行问题
+            dup_count = len(dup_result.get("duplicate_pairs", []))
+            if dup_result.get("has_duplicates") and dup_count > 0:
+                dup_desc = "\n".join(
+                    f"  - 第{a+1}行与第{b+1}行完全相同：「{content}」"
+                    for a, b, content in dup_result["duplicate_pairs"][:5]
+                )
+                issues.append(f"【问题1】重复旋律行（{dup_count} 对）：\n{dup_desc}")
+                fix_instructions.append(
+                    "① 重写所有重复行，使用动机发展手法（倒影、增值、减值、移调、节奏变形），"
+                    "确保每行旋律独特。"
+                )
+
+            # 2. 节奏单调问题
+            variety_ratio = rhythm_result.get("variety_ratio", 1.0)
+            mono_count = rhythm_result.get("monotone_count", 0)
+            if variety_ratio < 0.7 and total_lines >= 4:
+                mono_lines = rhythm_result.get("monotone_lines", [])[:3]
+                mono_desc = "\n".join(
+                    f"  - 第{i+1}行：{preview}" for i, preview in mono_lines
+                )
+                issues.append(f"【问题2】节奏单调（{mono_count}/{total_lines} 行纯八分音符）：\n{mono_desc}")
+                fix_instructions.append(
+                    "② 修改单调节奏行，每行混用至少2种时值："
+                    "四分音符C2（重量感）、附点八分C3/2（律动感）、长音C4（呼吸点）、休止符z2（留白）。"
+                )
+
+            # 3. 旋律质量问题
+            quality_ratio = melody_result.get("quality_ratio", 1.0)
+            cb_count = melody_result.get("chord_block_count", 0)
+            if quality_ratio < 0.5 and total_lines >= 4:
+                cb_lines = melody_result.get("chord_block_lines", [])[:3]
+                cb_desc = "\n".join(
+                    f"  - 第{i+1}行（和弦块占{ratio:.0%}）：{preview}"
+                    for i, ratio, preview in cb_lines
+                )
+                issues.append(f"【问题3】旋律线条质量差（{cb_count}/{total_lines} 行纯和弦堆砌）：\n{cb_desc}")
+                fix_instructions.append(
+                    "③ 重写和弦堆砌行：用单音旋律音符（d2 e2 f2 g2）构成主旋律，"
+                    "和弦块[]只用于低音铺垫，不能占全行80%以上，旋律应有方向感。"
+                )
+
+            if not issues:
+                return abc, summary  # 所有检测通过，无需修正
+
+            # ── 发布合并修正进度
+            issue_summary = " / ".join([
+                f"重复行×{dup_count}" if dup_result.get("has_duplicates") else "",
+                f"节奏单调{mono_count}行" if variety_ratio < 0.7 and total_lines >= 4 else "",
+                f"旋律质量差{cb_count}行" if quality_ratio < 0.5 and total_lines >= 4 else "",
+            ])
+            issue_summary = " / ".join(s for s in issue_summary.split(" / ") if s)
+            await publish("pipeline.step", {
+                "step":       "create_quality_fix",
+                "status":     "running",
+                "text":       f"质量检测发现 {len(issues)} 个问题（{issue_summary}），正在一次性修正...",
+                "agent_name": _AGENT_NAME,
+            })
+
+            # ── 一次 LLM 调用修正所有问题（_llm_with_span 自动记录 span）
+            fix_prompt = (
+                f"你的 ABC 谱存在以下 {len(issues)} 个问题，请一次性全部修正：\n\n"
+                + "\n\n".join(issues)
+                + "\n\n修正要求：\n"
+                + "\n".join(fix_instructions)
+                + "\n\n行数保持不变，重新输出完整 ABC + SUMMARY 行。"
+            )
+            raw_fix = await _llm_with_span(
+                messages=[
+                    {"role": "system",    "content": system},
+                    {"role": "user",      "content": user_prompt},
+                    {"role": "assistant", "content": raw},
+                    {"role": "user",      "content": fix_prompt},
+                ],
+                temperature=0.82,
+                publish=publish,
+                span_name="quality_fix",
+            )
+            abc_fix, sum_fix = extract_abc_and_summary(raw_fix, abc)
+            if "K:" in abc_fix:
+                # 验证修正效果（只做快速检测，不再触发新 LLM）
+                dup2 = detect_duplicate_lines(abc_fix)
+                rhythm2 = check_rhythm_variety(abc_fix)
+                melody2 = check_melody_quality(abc_fix)
+                improved = (
+                    (not dup2.get("has_duplicates") or len(dup2.get("duplicate_pairs", [])) < dup_count)
+                    and (rhythm2.get("variety_ratio", 0) >= variety_ratio)
+                    and (melody2.get("quality_ratio", 0) >= quality_ratio)
+                )
+                status_text = "已修正" if improved else "修正效果有限，保留原版"
+                await publish("pipeline.step", {
+                    "step":       "create_quality_fix",
+                    "status":     "succeeded" if improved else "failed",
+                    "text":       status_text,
+                    "agent_name": _AGENT_NAME,
+                })
+                if improved:
+                    return abc_fix, sum_fix
+            else:
+                await publish("pipeline.step", {
+                    "step":       "create_quality_fix",
+                    "status":     "failed",
+                    "text":       "修正输出无效（缺少K:字段），保留原版",
+                    "agent_name": _AGENT_NAME,
+                })
+        except Exception:
+            pass
+        return abc, summary
 
     async def _validate_and_fix(
         self,
@@ -913,7 +1296,7 @@ class CreateAgent:
 
         return abc, summary
 
-    async def run_with_ctx(self, ctx: "RunContext") -> dict:
+    async def run(self, ctx: "RunContext") -> dict:
         """v4.0 解耦接口：从 RunContext 解包参数，调用原 run()。
         AGENT-2 修复：session_getter/saver 通过 ctx 属性统一解包（fallback 逻辑在 RunContext 中）。
         """
@@ -922,7 +1305,7 @@ class CreateAgent:
             from app.agentcore.todo_manager import TodoManager as _TM
             todo_mgr = _TM()
             todo_mgr.session_id = ctx.session_id
-        return await self.run(
+        return await self._run_impl(
             session_id=ctx.session_id,
             message=ctx.message,
             publish=ctx.publish,

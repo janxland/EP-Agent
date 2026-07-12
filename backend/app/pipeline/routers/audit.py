@@ -30,7 +30,18 @@ def _build_llm_friendly_trace(trace: dict, spans: list[dict], fixtures: list[dic
         ri = s.get("round_idx", 0)
         if ri not in rounds:
             rounds[ri] = {"round_idx": ri, "model_call": None, "tool_calls": []}
-        if s.get("span_kind") == "model":
+
+        tool_name = s.get("tool_name", "")
+        span_kind = s.get("span_kind", "")
+
+        # AUDIT-FIX-02: llm: 前缀的 model span（来自 SubAgent 内部 LLM 调用，如 llm:create_main）
+        # 同时放入 model_call（token 统计）和 tool_calls（让 PipelineTimeline 可见）。
+        # 普通 model span（supervisor/pipeline 级别）只放 model_call，不进 tool_calls。
+        is_llm_tool_span = span_kind == "model" and tool_name.startswith("llm:")
+        is_plain_model_span = span_kind == "model" and not tool_name.startswith("llm:")
+
+        if is_plain_model_span:
+            # 普通模型调用（supervisor LLM 决策等）：只更新 model_call
             rounds[ri]["model_call"] = {
                 "model":         s.get("model", ""),
                 "input_tokens":  s.get("input_tokens", 0),
@@ -39,14 +50,13 @@ def _build_llm_friendly_trace(trace: dict, spans: list[dict], fixtures: list[dic
                 "duration_ms":   s.get("duration_ms", 0),
                 "status":        s.get("status", ""),
             }
-        elif s.get("span_kind") == "tool":
-            # 完整解析 tool_args JSON（不截断）
+        elif span_kind == "tool" or is_llm_tool_span:
+            # 工具调用 span + llm: SubAgent LLM 调用 span：都放入 tool_calls 供 Timeline 展示
             raw_args = s.get("tool_args") or "{}"
             try:
                 args_obj = _json.loads(raw_args)
             except Exception:
                 args_obj = {"_raw": raw_args}
-            # 完整解析 tool_result JSON（不截断）
             raw_result = s.get("tool_result") or "{}"
             try:
                 result_obj = _json.loads(raw_result)
@@ -54,19 +64,34 @@ def _build_llm_friendly_trace(trace: dict, spans: list[dict], fixtures: list[dic
                 result_obj = {"_raw": raw_result}
 
             rounds[ri]["tool_calls"].append({
-                "step_idx":      s.get("step_idx", 0),
-                "tool_name":     s.get("tool_name", ""),
-                "status":        s.get("status", ""),
-                "duration_ms":   s.get("duration_ms", 0),
-                "args":          args_obj,          # 完整入参（已解析为对象）
-                "result":        result_obj,         # 完整出参（已解析为对象）
+                "step_idx":       s.get("step_idx", 0),
+                "tool_name":      tool_name,
+                "status":         s.get("status", ""),
+                "duration_ms":    s.get("duration_ms", 0),
+                "args":           args_obj,
+                "result":         result_obj,
                 "result_preview": s.get("tool_result_preview", ""),
-                "error_msg":     s.get("error_msg", "") or "",
-                "call_id":       s.get("call_id", ""),
+                "error_msg":      s.get("error_msg", "") or "",
+                "call_id":        s.get("call_id", ""),
+                # llm: span 额外携带 model 信息，方便前端展示耗时和模型名
+                "model":          s.get("model", "") if is_llm_tool_span else "",
+                "agent_name":     s.get("agent_name", "") if is_llm_tool_span else "",
             })
+            # llm: span 同时也更新 model_call（token 统计）
+            if is_llm_tool_span:
+                rounds[ri]["model_call"] = {
+                    "model":         s.get("model", ""),
+                    "input_tokens":  s.get("input_tokens", 0),
+                    "output_tokens": s.get("output_tokens", 0),
+                    "finish_reason": s.get("finish_reason", ""),
+                    "duration_ms":   s.get("duration_ms", 0),
+                    "status":        s.get("status", ""),
+                }
 
-    # 按 round_idx 排序
+    # 按 round_idx 排序，每个 round 内 tool_calls 按 step_idx 排序
     react_rounds = [rounds[k] for k in sorted(rounds.keys())]
+    for rnd in react_rounds:
+        rnd["tool_calls"].sort(key=lambda x: x.get("step_idx", 0))
 
     # fixture 摘要（用于理解哪些工具调用有缓存快照）
     fixture_summary = [
@@ -78,9 +103,18 @@ def _build_llm_friendly_trace(trace: dict, spans: list[dict], fixtures: list[dic
         for f in fixtures
     ]
 
-    # 统计
-    total_tool_calls  = sum(1 for s in spans if s.get("span_kind") == "tool")
-    failed_tool_calls = sum(1 for s in spans if s.get("span_kind") == "tool" and s.get("status") == "error")
+    # 统计：tool span + llm: span 都计入 tool_calls 统计
+    total_tool_calls  = sum(
+        1 for s in spans
+        if s.get("span_kind") == "tool"
+        or (s.get("span_kind") == "model" and s.get("tool_name", "").startswith("llm:"))
+    )
+    failed_tool_calls = sum(
+        1 for s in spans
+        if (s.get("span_kind") == "tool"
+            or (s.get("span_kind") == "model" and s.get("tool_name", "").startswith("llm:")))
+        and s.get("status") == "error"
+    )
     total_in_tokens   = sum(s.get("input_tokens", 0)  for s in spans if s.get("span_kind") == "model")
     total_out_tokens  = sum(s.get("output_tokens", 0) for s in spans if s.get("span_kind") == "model")
 
@@ -199,11 +233,27 @@ async def list_trace_replays(trace_id: str, limit: int = 10):
 
 @router.post("/traces/{trace_id}/replay")
 async def replay_trace(trace_id: str, mode: str = "fixture"):
+    """
+    基于 LangGraph Checkpointer 快照的 trace 回放（v2）。
+    优先用 ReplayEngineV2（快照回放），无快照时自动 rerun。
+    """
     if mode not in ("fixture", "live"):
         raise HTTPException(400, "mode 必须为 fixture 或 live")
     try:
-        from app.agentcore.replay_engine import ReplayEngine
-        result = await ReplayEngine().replay(source_trace_id=trace_id, mode=mode)
+        # 先查 trace 对应的 session_id
+        trace = _db.get_trace(trace_id)
+        if not trace:
+            raise HTTPException(404, f"trace not found: {trace_id}")
+        session_id = trace.get("session_id", "")
+        if not session_id:
+            raise HTTPException(400, "trace 缺少 session_id，无法回放")
+
+        from app.agentcore.replay_engine_v2 import ReplayEngineV2
+        if mode == "live":
+            result = await ReplayEngineV2().replay_rerun(session_id=session_id)
+        else:
+            # fixture 模式：快照只读回放
+            result = await ReplayEngineV2().replay_snapshot(session_id=session_id)
         if result.get("error"):
             raise HTTPException(500, result["error"])
         return {"ok": True, **result}
@@ -215,8 +265,20 @@ async def replay_trace(trace_id: str, mode: str = "fixture"):
 
 @router.post("/traces/{trace_id}/replay/stream")
 async def replay_trace_stream(trace_id: str, mode: str = "fixture"):
+    """
+    基于 LangGraph Checkpointer 快照的流式 trace 回放（v2，SSE）。
+    优先用 ReplayEngineV2（快照回放），无快照时自动 rerun。
+    """
     if mode not in ("fixture", "live"):
         raise HTTPException(400, "mode 必须为 fixture 或 live")
+
+    # 先查 trace 对应的 session_id（在生成器外查，避免异常被 SSE 吞掉）
+    trace = _db.get_trace(trace_id)
+    if not trace:
+        raise HTTPException(404, f"trace not found: {trace_id}")
+    session_id = trace.get("session_id", "")
+    if not session_id:
+        raise HTTPException(400, "trace 缺少 session_id，无法回放")
 
     async def event_generator():
         queue: asyncio.Queue = asyncio.Queue()
@@ -224,12 +286,16 @@ async def replay_trace_stream(trace_id: str, mode: str = "fixture"):
         async def publish(evt_type: str, payload: dict):
             await queue.put((evt_type, payload))
 
-        from app.agentcore.replay_engine import ReplayEngine
-        engine = ReplayEngine()
+        from app.agentcore.replay_engine_v2 import ReplayEngineV2
+        engine = ReplayEngineV2()
 
         async def run_replay():
             try:
-                result = await engine.replay(source_trace_id=trace_id, mode=mode, publish=publish)
+                if mode == "live":
+                    # BUG-019 修复：live 模式必须传 publish，否则 SSE 事件进入黑洞
+                    result = await engine.replay_rerun(session_id=session_id, publish=publish)
+                else:
+                    result = await engine.replay_snapshot(session_id=session_id, publish=publish)
                 await queue.put(("replay.done", result))
             except Exception as exc:
                 await queue.put(("replay.error", {"error": str(exc)}))
@@ -248,7 +314,17 @@ async def replay_trace_stream(trace_id: str, mode: str = "fixture"):
                     yield 'data: {"type": "done"}\n\n'
                     break
                 elif evt_type == "replay.done":
-                    yield f"data: {_json.dumps({'type': 'replay.done', 'result': {'ok': True, **payload}}, ensure_ascii=False)}\n\n"
+                    # BUG-029/035 修复：只推送摘要，不含 snapshots 大数组（防超大帧）
+                    slim = {
+                        "type":       "replay.done",
+                        "status":     payload.get("status", ""),
+                        "mode":       payload.get("mode", ""),
+                        "session_id": payload.get("session_id", ""),
+                        "steps":      payload.get("steps", 0),
+                        "visited":    payload.get("visited", []),
+                        "error":      payload.get("error", ""),
+                    }
+                    yield f"data: {_json.dumps(slim, ensure_ascii=False)}\n\n"
                 elif evt_type == "replay.error":
                     yield f"data: {_json.dumps({'type': 'replay.error', **payload}, ensure_ascii=False)}\n\n"
                 elif evt_type in ("pipeline.step", "replay.step"):
@@ -338,5 +414,94 @@ async def export_session_traces_json(session_id: str, limit: int = 10):
         )
     except HTTPException:
         raise
+    except Exception as e:
+        raise HTTPException(500, str(e))
+
+
+# ── LangGraph Checkpointer 审计回放 v2 端点 ──────────────────────────────────
+
+@router.get("/sessions/{session_id}/snapshots")
+async def list_session_snapshots(session_id: str):
+    """获取 session 的所有 LangGraph Checkpointer 快照序列。"""
+    try:
+        from app.agentcore.graph_engine_v2 import get_session_history
+        snapshots = await get_session_history(session_id)
+        return {"ok": True, "session_id": session_id, "steps": len(snapshots), "snapshots": snapshots}
+    except Exception as e:
+        raise HTTPException(500, str(e))
+
+
+@router.post("/sessions/{session_id}/replay/snapshot")
+async def replay_session_snapshot(session_id: str):
+    """快照回放（只读）：从 Checkpointer 读取历史快照按时间轴推送 SSE 事件，零副作用。
+    BUG-036 修复：SSE replay.done 帧只推送摘要字段（不含 snapshots 大数组）。
+    HTTP 端点（此函数）也只返回摘要，不将 snapshots 序列化到响应体。
+    """
+    async def _gen():
+        q: asyncio.Queue = asyncio.Queue()
+        async def pub(t, p): await q.put((t, p))
+        from app.agentcore.replay_engine_v2 import ReplayEngineV2
+        async def run():
+            try:
+                r = await ReplayEngineV2().replay_snapshot(session_id=session_id, publish=pub)
+                await q.put(("replay.done", r))
+            except Exception as exc:
+                await q.put(("replay.error", {"error": str(exc)}))
+            finally:
+                await q.put(("__done__", {}))
+        task = asyncio.create_task(run())
+        try:
+            while True:
+                try:
+                    t, p = await asyncio.wait_for(q.get(), timeout=120.0)
+                except asyncio.TimeoutError:
+                    yield 'data: {"type":"replay.error","error":"超时"}\n\n'; break
+                if t == "__done__":
+                    yield 'data: {"type":"done"}\n\n'; break
+                # BUG-035 修复：replay.done 只推送摘要，不含 snapshots 大数组（防超大帧）
+                if t == "replay.done":
+                    slim = {
+                        "type":       "replay.done",
+                        "status":     p.get("status", ""),
+                        "mode":       p.get("mode", ""),
+                        "session_id": p.get("session_id", ""),
+                        "steps":      p.get("steps", 0),
+                        "visited":    p.get("visited", []),
+                        "error":      p.get("error", ""),
+                    }
+                    yield f"data: {_json.dumps(slim, ensure_ascii=False)}\n\n"
+                else:
+                    yield f"data: {_json.dumps({**p, 'type': t}, ensure_ascii=False)}\n\n"
+        finally:
+            if not task.done():
+                task.cancel()
+                try: await task
+                except Exception: pass
+    return StreamingResponse(_gen(), media_type="text/event-stream",
+                             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+
+@router.post("/sessions/{session_id}/replay/rerun")
+async def replay_session_rerun(session_id: str):
+    """重跑回放：从原始输入重新执行，对比新旧快照差异。"""
+    try:
+        from app.agentcore.replay_engine_v2 import ReplayEngineV2
+        result = await ReplayEngineV2().replay_rerun(session_id=session_id)
+        return {"ok": True, **result}
+    except Exception as e:
+        raise HTTPException(500, str(e))
+
+
+@router.post("/sessions/{session_id}/replay/fork")
+async def replay_session_fork(session_id: str, step_index: int = 0, new_message: str = ""):
+    """Fork 重跑：从历史快照某步 fork，支持覆盖 message 模拟不同输入。"""
+    try:
+        from app.agentcore.replay_engine_v2 import ReplayEngineV2
+        result = await ReplayEngineV2().replay_fork(
+            session_id=session_id,
+            step_index=step_index,
+            new_message=new_message or None,
+        )
+        return {"ok": True, **result}
     except Exception as e:
         raise HTTPException(500, str(e))

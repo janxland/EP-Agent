@@ -31,12 +31,14 @@ AudioSession 结构（存于 Session.audio_history）：
   ]
 """
 from __future__ import annotations
+import asyncio
 import json
 from typing import Callable, Awaitable
 
 from app.agentcore.llm import complete, complete_with_tools
 from app.pipeline.domain import ScoreMeta
 from app.agentcore.tools import get_tool_schemas, call_tool
+from app.agentcore.service_health import service_health
 
 Publisher = Callable[[str, dict], Awaitable[None]]
 
@@ -69,26 +71,36 @@ _ROUTER_SYSTEM = """你是音频生成意图路由器。分析用户消息，输
 }
 """
 
-# ─── Audio Agent System Prompt ────────────────────────────────────────────────
+# ─── Audio Agent System Prompt（动态构建，每次请求注入最新服务状态）────────────
 
-_AUDIO_AGENT_SYSTEM = """你是专业的 AI 音乐生成助手，通过调用工具生成和迭代改进音频。
+_AUDIO_AGENT_SYSTEM_TEMPLATE = """你是专业的 AI 音乐生成助手，通过调用工具生成和迭代改进音频。
 
 工作原则：
-1. 首次生成：用 abc_to_audio_prompt 提取谱子特征，再调用生成工具
-2. 迭代改进：先调用 evolve_audio_prompt 进化参数，再调用生成工具
-3. 翻唱：直接调用 generate_cover_minimax
+1. 首次生成（audio_generate 域）：
+   a. 若有 ABC 谱 → 【一次性同时调用】abc_to_audio_prompt 和 generate_lyrics_minimax（两者完全独立，并行执行节省时间）
+   b. 拿到 prompt 和 lyrics 后，一次调用生成工具（generate_audio_minimax 或 generate_audio_suno）
+   c. 生成完成，输出 JSON 结果。全程最多 3 次 LLM 推理轮次。
+2. 迭代改进（audio_iterate 域）：【一次性同时调用】evolve_audio_prompt，拿到结果后调用生成工具
+3. 翻唱（audio_cover 域）：直接调用 generate_cover_minimax
 4. 音色克隆（voice_clone 域）：
    - 上传并克隆 → upload_voice_sample 获取 file_id → clone_voice_minimax 克隆
    - 用克隆音色合成语音 → synthesize_speech_minimax（需 voice_id）
    - 查看已有音色 → list_cloned_voices
-5. 服务商选择：
+5. 服务商选择（必须参考下方【当前可用服务状态】，❌ 标记的工具本轮严禁调用）：
    - 纯音乐/快速预览 → generate_audio_minimax（model=music-2.6-free）
-   - 有歌词的歌曲 → generate_audio_suno
+   - 有歌词的歌曲 → 优先 generate_audio_suno，不可用时直接用 generate_audio_minimax + lyrics 参数
    - 高质量 → generate_audio_minimax（model=music-2.6）或 generate_audio_suno（model=chirp-v5-5）
-6. 生成完成后，提供 2-3 个迭代建议
+6. 【重要】generate_audio_minimax 和 generate_cover_minimax 已内置自动落盘：
+   - 工具内部会自动将音频下载保存到 workspace，并在返回结果中包含 workspace_path 字段
+   - 调用这两个工具后，【禁止】再调用 save_audio_from_url 重复保存，否则会产生两个相同文件
+   - 只有当工具返回的 workspace_path 为空字符串时，才允许调用 save_audio_from_url 作为兜底
+7. 生成完成后，提供 2-3 个迭代建议
+8. 【效率要求】尽量在一次 LLM 推理中输出所有可并行的工具调用，减少推理轮次
+
+{service_status_block}
 
 完成所有工具调用后，用 JSON 格式回复最终结果：
-{
+{{
   "audio_url": "...",
   "provider": "minimax|suno",
   "prompt_used": "...",
@@ -98,8 +110,15 @@ _AUDIO_AGENT_SYSTEM = """你是专业的 AI 音乐生成助手，通过调用工
   "voice_id": "（音色克隆域：克隆或使用的 voice_id；其他域留空）",
   "summary": "一句话描述本次生成",
   "suggestions": ["建议1", "建议2"]
-}
+}}
 """
+
+
+def _build_audio_agent_system() -> str:
+    """每次请求动态构建 System Prompt，注入最新服务可用性状态"""
+    return _AUDIO_AGENT_SYSTEM_TEMPLATE.format(
+        service_status_block=service_health.prompt_block()
+    )
 
 
 class AudioChatRunner:
@@ -169,7 +188,7 @@ class AudioChatRunner:
         )
 
         messages: list[dict] = [
-            {"role": "system", "content": _AUDIO_AGENT_SYSTEM},
+            {"role": "system", "content": _build_audio_agent_system()},
             {"role": "user", "content": user_content},
         ]
 
@@ -179,7 +198,7 @@ class AudioChatRunner:
             "text": "Audio Agent 开始处理...",
         })
 
-        # ── Step 4: Tool-Calling Loop ───────────────────────────────────────
+        # ── Step 4: Tool-Calling Loop（支持并行工具调用）──────────────────────
         import uuid as _uuid
         from app.pipeline import db as _db
         import logging as _log
@@ -198,7 +217,7 @@ class AudioChatRunner:
                 "tool_calls": tool_calls_this_round,
             })
 
-            # ── 落库本轮 assistant 消息（含 tool_calls，刷新后 SSE replay 恢复工具卡片）──
+            # ── 落库本轮 assistant 消息 ──────────────────────────────────────
             if session_id:
                 try:
                     _db.insert_message(
@@ -215,7 +234,6 @@ class AudioChatRunner:
                     )
 
             if response["finish_reason"] == "stop" or not tool_calls_this_round:
-                # LLM 给出最终文本结果
                 raw = content_this_round
                 try:
                     start = raw.find("{")
@@ -226,8 +244,11 @@ class AudioChatRunner:
                     latest_result = {"summary": raw, "audio_url": ""}
                 break
 
-            # 执行工具调用
-            for tc in tool_calls_this_round:
+            # ── 并行执行本轮所有工具调用 ────────────────────────────────────
+            # LLM 可能在一次推理中输出多个工具调用（parallel tool calls），
+            # 用 asyncio.gather 并发执行，消除串行等待。
+            async def _exec_one_tool(tc: dict) -> tuple[dict, str, str | None]:
+                """执行单个工具调用，返回 (tc, result_str, error_msg)"""
                 tool_name = tc["function"]["name"]
                 try:
                     arguments = json.loads(tc["function"]["arguments"])
@@ -248,83 +269,105 @@ class AudioChatRunner:
                         result if isinstance(result, str)
                         else json.dumps(result, ensure_ascii=False)
                     )
+                    return tc, tool_name, arguments, result, result_str, None
+                except Exception as e:
+                    return tc, tool_name, arguments, {}, f"工具执行失败: {e}", str(e)
 
-                    # 捕获生成结果
-                    if tool_name in ("generate_audio_minimax", "generate_audio_suno",
-                                     "generate_cover_minimax", "save_audio_from_url"):
-                        if isinstance(result, dict):
-                            latest_result = result
+            # 并发执行所有工具
+            exec_results = await asyncio.gather(
+                *[_exec_one_tool(tc) for tc in tool_calls_this_round],
+                return_exceptions=False
+            )
 
+            # ── 按顺序处理结果（保持 messages 顺序一致）──────────────────────
+            for tc, tool_name, arguments, result, result_str, err in exec_results:
+                if err:
+                    # 工具执行失败
                     tool_call_records.append({
-                        "id": tc["id"],
-                        "tool": tool_name,
-                        "arguments": {k: v for k, v in arguments.items()
-                                      if k not in ("lyrics", "abc")},
-                        "result_preview": result_str[:120] + "..." if len(result_str) > 120 else result_str,
-                        "status": "succeeded",
+                        "id": tc["id"], "tool": tool_name,
+                        "arguments": arguments, "status": "failed", "error": err,
                     })
-
                     await publish("tool.call", {
                         "call_id": tc["id"],
-                        "tool": tool_name,
-                        "status": "succeeded",
-                        "result_preview": result_str[:80] + "..." if len(result_str) > 80 else result_str,
-                        "full_result": result_str[:4096],
+                        "tool": tool_name, "status": "failed", "error": err,
                     })
-
                     messages.append({
                         "role": "tool",
                         "tool_call_id": tc["id"],
                         "content": result_str,
                     })
-
-                    # ── 落库 tool 结果消息 ──────────────────────────────────────
                     if session_id:
                         try:
                             _db.insert_message(
                                 msg_id=f"tool_{tc['id']}_{_uuid.uuid4().hex[:8]}",
-                                session_id=session_id,
-                                role="tool",
+                                session_id=session_id, role="tool",
                                 content=result_str[:4096],
-                                tool_call_id=tc["id"],
-                                tool_name=tool_name,
-                            )
-                        except Exception as _e:
-                            _audio_logger.warning(
-                                "[AudioRunner] tool 消息落库失败 session=%s tool=%s: %s",
-                                session_id, tool_name, _e
-                            )
-
-                except Exception as e:
-                    tool_call_records.append({
-                        "id": tc["id"], "tool": tool_name,
-                        "arguments": arguments, "status": "failed", "error": str(e),
-                    })
-                    await publish("tool.call", {
-                        "call_id": tc["id"],
-                        "tool": tool_name, "status": "failed", "error": str(e),
-                    })
-                    messages.append({
-                        "role": "tool",
-                        "tool_call_id": tc["id"],
-                        "content": f"工具执行失败: {e}",
-                    })
-                    # ── 落库 tool 失败消息 ──────────────────────────────────────
-                    if session_id:
-                        try:
-                            _db.insert_message(
-                                msg_id=f"tool_{tc['id']}_{_uuid.uuid4().hex[:8]}",
-                                session_id=session_id,
-                                role="tool",
-                                content=f"工具执行失败: {e}",
-                                tool_call_id=tc["id"],
-                                tool_name=tool_name,
+                                tool_call_id=tc["id"], tool_name=tool_name,
                             )
                         except Exception as _e:
                             _audio_logger.warning(
                                 "[AudioRunner] tool 失败消息落库失败 session=%s tool=%s: %s",
                                 session_id, tool_name, _e
                             )
+                    continue
+
+                # 捕获生成结果
+                if tool_name in ("generate_audio_minimax", "generate_audio_suno",
+                                 "generate_cover_minimax", "save_audio_from_url"):
+                    if isinstance(result, dict):
+                        latest_result = result
+
+                # ── 防重复落盘拦截 ──────────────────────────────────────────
+                if (
+                    tool_name == "save_audio_from_url"
+                    and isinstance(latest_result, dict)
+                    and latest_result.get("workspace_path")
+                ):
+                    _audio_logger.info(
+                        "[AudioRunner] 跳过重复 save_audio_from_url，"
+                        "workspace_path 已存在: %s",
+                        latest_result["workspace_path"]
+                    )
+                    result = {
+                        "workspace_path": latest_result["workspace_path"],
+                        "filename": latest_result["workspace_path"].split("/")[-1],
+                        "success": True,
+                        "error": "",
+                        "_skipped_reason": "文件已由生成工具自动落盘，跳过重复下载",
+                    }
+                    result_str = json.dumps(result, ensure_ascii=False)
+
+                tool_call_records.append({
+                    "id": tc["id"], "tool": tool_name,
+                    "arguments": {k: v for k, v in arguments.items()
+                                  if k not in ("lyrics", "abc")},
+                    "result_preview": result_str[:120] + "..." if len(result_str) > 120 else result_str,
+                    "status": "succeeded",
+                })
+                await publish("tool.call", {
+                    "call_id": tc["id"],
+                    "tool": tool_name, "status": "succeeded",
+                    "result_preview": result_str[:80] + "..." if len(result_str) > 80 else result_str,
+                    "full_result": result_str[:4096],
+                })
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": tc["id"],
+                    "content": result_str,
+                })
+                if session_id:
+                    try:
+                        _db.insert_message(
+                            msg_id=f"tool_{tc['id']}_{_uuid.uuid4().hex[:8]}",
+                            session_id=session_id, role="tool",
+                            content=result_str[:4096],
+                            tool_call_id=tc["id"], tool_name=tool_name,
+                        )
+                    except Exception as _e:
+                        _audio_logger.warning(
+                            "[AudioRunner] tool 消息落库失败 session=%s tool=%s: %s",
+                            session_id, tool_name, _e
+                        )
 
         # ── Step 5: 构造本轮记录 ────────────────────────────────────────────
         audio_record = {

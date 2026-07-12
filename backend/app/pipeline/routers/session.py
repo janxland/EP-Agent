@@ -140,6 +140,8 @@ class UniversalChatRequest(BaseModel):
     attachment_name:            str = ""
     attachment_workspace_path:  str = ""
     attachment_b64:             str = ""
+    # BUG-034 修复：前端可直接传 role_id，优先于 DB session.extra 中存储的值
+    role_id:                    str = ""
 
 
 def _rebuild_session_from_db(session_id: str):
@@ -245,6 +247,10 @@ async def universal_chat(session_id: str, req: UniversalChatRequest):
         _logger.warning("[chat] 守门异常 session=%s: %s", session_id, _ge)
         final_proj = req.project_id
         role_id    = None
+
+    # BUG-034 修复：请求体中直接传入的 role_id 优先于 DB session.extra 中的值
+    if req.role_id:
+        role_id = req.role_id
 
     async def _run():
         try:

@@ -440,6 +440,42 @@ async def universal_chat(
         except Exception as _te:
             _logger.debug("[service] trace 落库异常（不影响主流程）: %s", _te)
 
+        # ── 把 tracer 收集的 tool/model span 落库为 role=tool 消息 ──────────────
+        # 目的：CreateAgent 等非 ReactExecutor 路径不产生 role=tool DB 消息，
+        # 导致前端刷新后工具卡片消失。此处把 TraceCollector 已收集的 span 补写入
+        # messages 表，保证所有路径（create/query/convert）刷新后都能渲染工具卡片。
+        # 去重策略：只落库 span_kind in (tool, model) 且 status=ok 的 span，
+        # 跳过 node/step/agent span（这些是调度噪音，不需要在聊天界面展示）。
+        # ReactExecutor 路径已在执行中落库（_persisted=True），但 tracer span 的
+        # call_id 与 ReactExecutor 写入的 msg_id 不同，不会触发 INSERT OR IGNORE 冲突。
+        try:
+            from app.pipeline.domain import new_id as _new_id
+            _SHOW_KINDS = {"tool", "model"}
+            for _span in _tracer.get_spans():
+                if _span.get("span_kind") not in _SHOW_KINDS:
+                    continue
+                if _span.get("status") != "ok":
+                    continue
+                _tool_nm = _span.get("tool_name", "")
+                _result_content = _span.get("tool_result") or _span.get("tool_result_preview") or ""
+                # model span 的 tool_result 存的是 reasoning 文本，用 full_result 兜底
+                if not _result_content:
+                    _result_content = f"[{_tool_nm}] 执行完成"
+                _db.insert_message(
+                    msg_id=f"span_{_span['span_id']}",
+                    session_id=session_id,
+                    role="tool",
+                    content=_result_content,
+                    tool_call_id=_span.get("call_id", ""),
+                    tool_name=_tool_nm,
+                )
+            _logger.debug(
+                "[service] tracer span→tool消息落库完成 session=%s spans=%d",
+                session_id, len(_tracer.get_spans()),
+            )
+        except Exception as _span_e:
+            _logger.warning("[service] tracer span 落库失败（不影响主流程）: %s", _span_e)
+
         # ── v5 Phase 5：对话结束后提取并保存长期记忆 ────────────────────────────
         try:
             from app.agentcore.long_term_memory import long_term_memory, extract_and_save_memories

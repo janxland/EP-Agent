@@ -12,6 +12,7 @@ from __future__ import annotations
 from typing import Callable, Awaitable
 
 from app.agentcore.todo_manager import TodoManager, assert_finish_gate
+from app.agentcore.agents.base_agent import BaseAgent
 from app.agentcore.agent_registry import register
 
 if False:  # TYPE_CHECKING
@@ -22,10 +23,10 @@ Publisher = Callable[[str, dict], Awaitable[None]]
 
 
 @register("query")
-class QueryAgent:
+class QueryAgent(BaseAgent):
     """谱子查询/问答 SubAgent，LLM 直接流式回答。"""
 
-    async def run(
+    async def _run_impl(
         self,
         session_id: str,
         message: str,
@@ -38,7 +39,33 @@ class QueryAgent:
         if ids:
             await todo_mgr.tick(ids[0], "running", publish)
 
+        # BUG-036 同类修复：session_getter fallback 路径可能返回 dict，防御性重建 Session
         sess = session_getter(session_id)
+        if isinstance(sess, dict):
+            try:
+                from app.pipeline.domain import Session, Score, ScoreMeta
+                _row = sess
+                sess = Session(
+                    id=_row.get("id", session_id),
+                    workspace_id=_row.get("workspace_id", "") or "",
+                    project_id=_row.get("project_id", "") or "",
+                    pipeline_state=_row.get("pipeline_state", "idle") or "idle",
+                    extra=_row.get("extra", {}) if isinstance(_row.get("extra"), dict) else {},
+                )
+                _abc = _row.get("abc_notation") or ""
+                if _abc:
+                    sess.score = Score(
+                        title=_row.get("score_title", "") or "",
+                        abc_notation=_abc,
+                        meta=ScoreMeta(
+                            title=_row.get("score_title", "") or "",
+                            key=_row.get("score_key", "C") or "C",
+                            bpm=float(_row.get("score_bpm") or 120),
+                            note_count=int(_row.get("score_notes") or 0),
+                        ),
+                    )
+            except Exception:
+                sess = None
 
         # ── 角色专属 system prompt 注入 ──────────────────────────────────────
         from app.agentcore.role_config import get_role_or_default
@@ -79,7 +106,7 @@ class QueryAgent:
             pass
 
         # 注入谱子上下文
-        if sess and sess.score:
+        if sess and not isinstance(sess, dict) and sess.score:
             m = sess.score.meta
             system_parts.append(
                 f"当前谱子：《{m.title}》，调号={m.key}，BPM={m.bpm:.0f}，"
@@ -88,7 +115,7 @@ class QueryAgent:
             )
 
         # 注入对话历史（最近 3 条）
-        if sess and sess.intent_history:
+        if sess and not isinstance(sess, dict) and sess.intent_history:
             lines = [f"- {r.intent_type}：{r.summary}" for r in sess.intent_history[-3:]]
             system_parts.append("历史操作记录：\n" + "\n".join(lines))
 
@@ -125,7 +152,7 @@ class QueryAgent:
         await publish("message.completed", {"message": answer})
         return {"domain": "query", "message": answer, "abc_updated": False}
 
-    async def run_with_ctx(self, ctx: "RunContext") -> dict:
+    async def run(self, ctx: "RunContext") -> dict:
         """v4.0 解耦接口：从 RunContext 解包参数，调用原 run()。
         AGENT-2 修复：session_getter 通过 ctx 属性统一解包（fallback 逻辑在 RunContext 中）。
         """
@@ -134,7 +161,7 @@ class QueryAgent:
             from app.agentcore.todo_manager import TodoManager as _TM
             todo_mgr = _TM()
             todo_mgr.session_id = ctx.session_id
-        return await self.run(
+        return await self._run_impl(
             session_id=ctx.session_id,
             message=ctx.message,
             publish=ctx.publish,

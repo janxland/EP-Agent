@@ -71,13 +71,31 @@ async def stream_text(text: str, publish: Publisher, chunk_size: int = 80):
 
 
 async def stream_llm(messages: list[dict], publish: Publisher) -> str:
-    """真正的流式 LLM 调用，每 token 推送 message.delta，降级为分块推送。"""
+    """
+    真正的流式 LLM 调用，每 token 推送 message.delta，降级为分块推送。
+
+    ALIGN-001-R 修复：
+      complete_stream 现在 yield (content_delta, reasoning_delta) 二元组。
+      reasoning_delta 非空时以 reasoning_delta 字段推送（前端 appendReasoningChunk 处理）。
+      普通模型 reasoning_delta 始终为空串，行为与修复前完全一致。
+
+    降级条件：AttributeError / NotImplementedError（旧版 SDK 不支持 stream=True）。
+    现代 openai>=1.40 SDK 始终支持流式，正常情况下不会触发降级。
+    """
     try:
         full_text = ""
-        async for chunk in complete_stream(messages):
-            if chunk:
-                await publish("message.delta", {"delta": chunk})
-                full_text += chunk
+        async for content_delta, reasoning_delta in complete_stream(messages):
+            payload: dict = {}
+            if content_delta:
+                payload["delta"] = content_delta
+                full_text += content_delta
+            if reasoning_delta:
+                payload["reasoning_delta"] = reasoning_delta
+            if payload:
+                # 若同时有 content 和 reasoning，合并为一次推送减少帧数
+                if "delta" not in payload:
+                    payload["delta"] = ""
+                await publish("message.delta", payload)
         return full_text
     except (AttributeError, NotImplementedError):
         resp = await complete(messages)
@@ -170,9 +188,31 @@ class ReactExecutor:
                         response = await complete_with_tools_stream(
                             messages, tools, publish, temperature=temperature
                         )
-                    except Exception:
-                        # 流式失败则降级为非流式
+                    except (TimeoutError, asyncio.TimeoutError) as _stream_err:
+                        # 超时：降级为非流式（超时说明网络/服务抖动，非流式超时更短更快失败）
+                        import logging as _log
+                        _log.getLogger("ep_agent.react").warning(
+                            "[ReAct] 流式 Tool Calling 超时，降级非流式 round=%d: %s",
+                            round_idx, _stream_err,
+                        )
                         response = await complete_with_tools(messages, tools, temperature=temperature)
+                    except Exception as _stream_err:
+                        # 其他异常（鉴权失败、参数错误等）：记录后透传，不静默降级
+                        # 仅当是已知的流式协议兼容问题时才降级
+                        _err_str = str(_stream_err).lower()
+                        _is_stream_compat = any(k in _err_str for k in (
+                            "stream", "streaming", "not supported", "unsupported",
+                            "connection", "network", "broken pipe", "eof",
+                        ))
+                        if _is_stream_compat:
+                            import logging as _log
+                            _log.getLogger("ep_agent.react").warning(
+                                "[ReAct] 流式 Tool Calling 兼容性错误，降级非流式 round=%d: %s",
+                                round_idx, _stream_err,
+                            )
+                            response = await complete_with_tools(messages, tools, temperature=temperature)
+                        else:
+                            raise  # 鉴权/参数/业务错误：透传，让上层感知
                 else:
                     response = await complete_with_tools(messages, tools, temperature=temperature)
             else:
@@ -410,10 +450,11 @@ class ReactExecutor:
                     if session_id:
                         try:
                             # FIX: 用 uuid 保证唯一，避免 call_id 复用时 INSERT OR IGNORE 静默丢弃
+                            # FIX-TRUNC: 移除 [:4096] 截断，完整保存工具结果（与 trace_collector 保持一致）
                             _db.insert_message(
                                 msg_id=f"tool_{tc['id']}_{uuid.uuid4().hex[:8]}",
                                 session_id=session_id,
-                                role="tool", content=result_str[:4096],
+                                role="tool", content=result_str,
                                 tool_call_id=tc["id"], tool_name=tool_name,
                             )
                         except Exception as _e:
@@ -538,6 +579,8 @@ class ReactExecutor:
             # workspace 类工具依赖 project_id 定位文件目录，若未绑定则提前修复，
             # 避免工具执行时抛 "会话未绑定项目" PermissionError。
             _WS_TOOLS = frozenset({
+                # TOOL-002 修复：同时保留单数（read_workspace_file）和复数（read_workspace_files）
+                # workspace_tools.py 中两个函数名均已注册，单数是单文件读取，复数是批量读取
                 "list_workspace_files", "read_workspace_files", "read_workspace_file",
                 "write_workspace_file", "edit_workspace_file", "delete_workspace_file",
                 "copy_workspace_file", "rename_workspace_file", "move_workspace_file",
@@ -582,7 +625,7 @@ class ReactExecutor:
                     )
 
             try:
-                from app.agentcore.replay_engine import get_mock_registry
+                from app.agentcore.replay_engine_v2 import get_mock_registry
                 _mock = get_mock_registry()
             except Exception:
                 _mock = None

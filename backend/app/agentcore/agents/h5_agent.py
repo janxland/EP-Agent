@@ -20,6 +20,7 @@ H5Agent — H5 乐谱海报 SubAgent
 from __future__ import annotations
 
 import json
+from app.agentcore.agents.base_agent import BaseAgent
 from typing import Callable, Awaitable
 
 from app.agentcore.todo_manager import TodoManager, assert_finish_gate
@@ -133,10 +134,10 @@ list_workspace_files()       → 找到 MIDI / ABC / JSON 文件路径
 
 
 @register("h5_create", "h5_edit")
-class H5Agent:
+class H5Agent(BaseAgent):
     """H5 乐谱海报 SubAgent，通过 ReactExecutor 执行工具链。"""
 
-    async def run(
+    async def _run_impl(
         self,
         session_id: str,
         message: str,
@@ -146,6 +147,8 @@ class H5Agent:
         todo_mgr: TodoManager,
         domain: str = "h5_create",
         workspace_id: str = "",
+        attachment_b64: str = "",
+        attachment_content: str = "",
     ) -> dict:
         ids = todo_mgr.get_ids()
         if ids:
@@ -404,7 +407,7 @@ class H5Agent:
 
         return "".join(parts)
 
-    async def run_with_ctx(self, ctx: "RunContext") -> dict:
+    async def run(self, ctx: "RunContext") -> dict:
         """v4.0 解耦接口：从 RunContext 解包参数，调用原 run()。
         AGENT-4 修复：补充 attachment_b64/attachment_content，H5 Agent 可处理内联附件。
         """
@@ -413,7 +416,7 @@ class H5Agent:
             from app.agentcore.todo_manager import TodoManager as _TM
             todo_mgr = _TM()
             todo_mgr.session_id = ctx.session_id
-        return await self.run(
+        return await self._run_impl(
             session_id=ctx.session_id,
             message=ctx.message,
             attachment_workspace_path=ctx.attachment_workspace_path,

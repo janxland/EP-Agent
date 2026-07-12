@@ -38,6 +38,24 @@ async def lifespan(app: FastAPI):
     """应用生命周期管理（替代已废弃的 @app.on_event）"""
     # 启动阶段：初始化 SQLite 数据库
     init_db()
+
+    # ── 启动预检：验证 langgraph 安装 ─────────────────────────────────────────
+    # 审计通过 TraceCollector（SSE 旁路）独立落库，主流程无外部 Checkpointer 依赖。
+    _startup_logger = logging.getLogger("ep_agent.startup")
+    try:
+        from app.agentcore.graph_engine_v2 import _LANGGRAPH_AVAILABLE
+        if not _LANGGRAPH_AVAILABLE:
+            _startup_logger.error(
+                "[startup] ❌ langgraph 未安装！"
+                " 请执行: pip install langgraph>=0.2 langchain-core>=0.3"
+            )
+        else:
+            _startup_logger.info(
+                "[startup] ✅ LangGraph 就绪（MemorySaver，审计通过 TraceCollector 独立落库）"
+            )
+    except Exception as _e:
+        _startup_logger.error("[startup] LangGraph 预检异常: %s", _e)
+
     yield
     # 关闭阶段：可在此添加资源清理逻辑
 

@@ -501,7 +501,9 @@ async def save_audio_from_url(
     filename: str = "",
 ) -> dict:
     """将远程音频 URL 下载并保存到当前项目工作区（audio/ 子目录）。
-    用于将 MiniMax / Suno 返回的临时链接永久保存，防止 24h 后失效。
+    【适用场景】仅用于 generate_audio_suno 等【未自动落盘】的工具返回的 audio_url。
+    【注意】generate_audio_minimax 和 generate_cover_minimax 已内置自动落盘，
+    调用这两个工具后【禁止】再调用本工具，否则会产生两个内容相同但文件名不同的重复文件。
     audio_url: 音频文件的公开 HTTP(S) URL
     filename: 保存的文件名（留空则自动生成，格式 music_YYYYMMDD_HHMMSS.mp3）
     返回: {"workspace_path": str, "filename": str, "success": bool, "error": str}

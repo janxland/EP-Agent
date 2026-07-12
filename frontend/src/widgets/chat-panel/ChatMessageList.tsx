@@ -567,11 +567,14 @@ export const StreamingAssistantCard = memo(function StreamingAssistantCard({
   content,
   reasoningContent,
   toolCalls,
+  toolResults,
   roundIdx,
 }: {
   content: string
   reasoningContent?: string
   toolCalls: { id: string; type: 'function'; function: { name: string; arguments: string } }[]
+  /** streaming 阶段的工具结果缓存（call_id → result），用于实时更新工具卡片状态 */
+  toolResults?: Record<string, { content: string; status: 'succeeded' | 'failed' }>
   roundIdx?: number
 }) {
   const m: ChatAssistantMessage = {
@@ -583,6 +586,22 @@ export const StreamingAssistantCard = memo(function StreamingAssistantCard({
     createdAt: new Date().toISOString(),
     kind: 'turn',
   }
+
+  // 把 streaming.tool_results 转为 Map<tool_call_id, ChatToolMessage>，供 AssistantBubble 渲染
+  const toolResultMap = useMemo(() => {
+    const map = new Map<string, ChatToolMessage>()
+    if (!toolResults) return map
+    for (const [callId, result] of Object.entries(toolResults)) {
+      map.set(callId, {
+        id: `streaming_result_${callId}`,
+        role: 'tool',
+        tool_call_id: callId,
+        content: result.status === 'failed' ? `失败: ${result.content}` : result.content,
+        createdAt: new Date().toISOString(),
+      })
+    }
+    return map
+  }, [toolResults])
 
   return (
     <div className="space-y-1.5">
@@ -600,7 +619,7 @@ export const StreamingAssistantCard = memo(function StreamingAssistantCard({
           </span>
         </div>
       )}
-      <AssistantBubble m={m} streaming />
+      <AssistantBubble m={m} streaming toolResults={toolResultMap} />
     </div>
   )
 })
