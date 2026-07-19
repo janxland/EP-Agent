@@ -107,6 +107,8 @@ _DURATION_KWS = ["分钟", "秒钟", "秒长", "一分钟", "两分钟", "三分
 _CREATIVE_KWS = ["写一首", "创作", "重写", "改编成", "新旋律", "新谱子", "写旋律"]
 _EDIT_KWS     = ["转调", "升调", "降调", "加快", "放慢", "加花", "简化", "BPM", "拍号"]
 _CREATE_KWS   = ["写", "创作", "生成", "流行", "爵士", "古典", "中国风"]
+_AUDIO_KWS    = ["生成一首歌", "生成音乐", "生成配乐", "用suno", "用minimax生成",
+                 "generate music", "生成歌曲"]
 # FIX-BUG-4-2: 兜底：当 router 返回空 chain_intents，但用户有 .txt 附件+创作词时，补充 convert
 _SKY_ATTACH_WITH_CREATE_KWS = ["转化成", "改写", "改编成", "新旋律", "新谱子", "生成ABC", "创作旋律"]
 
@@ -119,39 +121,20 @@ def _rule_based_route(
     allowed_domains: list[str],
 ) -> dict | None:
     """
-    规则前置路由：对高置信度场景直接返回结果，完全跳过 LLM 调用。
-    命中返回 dict，未命中返回 None（降级到 LLM）。
+    规则前置路由：仅处理「零歧义结构信号」，直接跳过 LLM。
+    命中返回 dict，未命中返回 None → 交给 LLM 做语义判断。
 
-    覆盖场景（按优先级）：
-      1. 消息正文含 ABC 标记（X:/T:/K:）且 has_score 或消息含改编词 → edit/create
-      2. 附件是 .sky/.json 且含 songNotes → convert
-      3. 消息含明确 H5 关键词 → h5_create
-      4. 消息含明确音频生成词 → audio
+    设计原则（解耦版）：
+      规则层只做「内容结构」判断，不做「用户意图语义」判断。
+      语义判断（用户想干什么）全部交给 LLM router，不在此堆 if/elif。
+
+    零歧义结构信号（3条，不再扩展）：
+      1. 附件含 songNotes 字段           → convert（Sky JSON 格式，100% 确定）
+      2. 附件扩展名是 .abc / .mid        → convert / h5_create（文件格式，100% 确定）
+      3. 消息正文含 ABC 谱 + 无附件      → 告知 LLM「消息含ABC谱子」作为上下文提示
+         （不直接路由，让 LLM 根据角色+消息语义决定 create/edit/audio）
     """
-    msg = message
-
-    # ── 1. 消息正文直接含 ABC 谱（X: 和 K: 标记同时出现）──────────────────────
-    # 用户把 ABC 谱子粘贴进消息体，直接判断意图，无需 LLM
-    # 注意两个常见格式问题：
-    #   a. X:1T:曲名（无空格拼在一起）→ 用 X:\d 不要求 \b 边界
-    #   b. K:Db / K:Ab 等降号调（b 不在 A-G 范围）→ 扩展为 [A-Ga-g#b_^]
-    _has_abc_in_msg = (
-        re.search(r'X:\s*\d', msg) and
-        re.search(r'K:\s*[A-Ga-g#b_^]', msg)
-    )
-    if _has_abc_in_msg:
-        # 有改编/创作词 → create；否则有谱子 → edit；都没有 → create
-        _is_create = any(kw in msg for kw in _CREATIVE_KWS + _DURATION_KWS + _CREATE_KWS)
-        _domain = "create" if _is_create else ("edit" if has_score else "create")
-        if _domain in allowed_domains:
-            return {
-                "domain":        _domain,
-                "confidence":    0.97,
-                "chain_intents": [],
-                "summary":       f"规则路由：消息含ABC谱子 → {_domain}",
-            }
-
-    # ── 2. 附件是 Sky JSON（.sky/.json/.txt 且含 songNotes）→ convert ──────────
+    # ── 1. 附件含 songNotes → convert（Sky JSON，零歧义）──────────────────────
     if attachment_name and "convert" in allowed_domains:
         _ext = attachment_name.lower().rsplit(".", 1)[-1] if "." in attachment_name else ""
         if _ext in ("sky", "json", "txt") and "songNotes" in (attachment_preview or ""):
@@ -162,27 +145,29 @@ def _rule_based_route(
                 "summary":       "规则路由：附件含 songNotes → convert",
             }
 
-    # ── 3. 明确 H5 关键词 → h5_create ──────────────────────────────────────────
-    if "h5_create" in allowed_domains and any(kw.lower() in msg.lower() for kw in _H5_KWS):
-        return {
-            "domain":        "h5_create",
-            "confidence":    0.95,
-            "chain_intents": [],
-            "summary":       "规则路由：含H5关键词 → h5_create",
-        }
+    # ── 2. 附件扩展名零歧义（.abc → convert，.mid/.midi → h5_create）──────────
+    if attachment_name:
+        _ext = attachment_name.lower().rsplit(".", 1)[-1] if "." in attachment_name else ""
+        if _ext == "abc" and "convert" in allowed_domains:
+            return {
+                "domain":        "convert",
+                "confidence":    0.99,
+                "chain_intents": [],
+                "summary":       "规则路由：附件是 .abc 文件 → convert",
+            }
+        if _ext in ("mid", "midi") and "h5_create" in allowed_domains:
+            return {
+                "domain":        "h5_create",
+                "confidence":    0.99,
+                "chain_intents": [],
+                "summary":       "规则路由：附件是 MIDI 文件 → h5_create",
+            }
 
-    # ── 4. 明确音频生成词 → audio ───────────────────────────────────────────────
-    _AUDIO_KWS = ["生成一首歌", "生成音乐", "生成配乐", "用suno", "用minimax生成",
-                  "generate music", "生成歌曲"]
-    if "audio" in allowed_domains and any(kw.lower() in msg.lower() for kw in _AUDIO_KWS):
-        return {
-            "domain":        "audio",
-            "confidence":    0.95,
-            "chain_intents": [],
-            "summary":       "规则路由：含音频生成词 → audio",
-        }
-
-    return None  # 未命中，降级到 LLM
+    # ── 3. 其余全部交给 LLM ────────────────────────────────────────────────────
+    # 消息含 ABC 谱、含「生成一首歌」、含 H5 关键词等语义判断，
+    # 均由 LLM router 根据角色上下文（allowed_domains）自行决策。
+    # 不在此处堆关键词规则，避免角色间路由逻辑相互干扰。
+    return None
 
 
 async def route_intent(

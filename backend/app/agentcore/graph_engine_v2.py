@@ -97,6 +97,8 @@ if _LANGGRAPH_AVAILABLE:
         visited:       list[str]    # 节点访问序列（可观测）
         visit_counts:  dict         # 节点访问计数 O(1)
         has_score:     bool
+        initial_domain: str         # intent_router 路由结果（supervisor 优先参考）
+        initial_domain_confidence: float  # intent_router 路由置信度
 
         # 节点间传递的数据
         abc_notation:  str

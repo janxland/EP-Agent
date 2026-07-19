@@ -4,6 +4,18 @@ import { useRef, useState, useCallback } from 'react'
 import type { AudioTurn } from '@/shared/types'
 import { AudioDomain } from '@/shared/types'
 
+// ─── 播放 URL 解析 ────────────────────────────────────────────────────────────
+// 优先使用 workspace_path（本地永久文件），回退到 audio_url（临时 24h CDN 链接）
+// workspace_path 格式：audio/xxx.mp3 → 通过 /api/files/{session_id}/audio/xxx.mp3 访问
+const BACKEND_URL = process.env.NEXT_PUBLIC_BACKEND_URL ?? 'http://localhost:8080'
+
+function resolveAudioSrc(turn: AudioTurn, sessionId?: string): string {
+  if (turn.workspace_path && sessionId) {
+    return `${BACKEND_URL}/api/files/${sessionId}/${turn.workspace_path}`
+  }
+  return turn.audio_url ?? ''
+}
+
 // ─── VoiceCloneCard ───────────────────────────────────────────────────────────
 // 高内聚：所有 voice_clone 域的渲染逻辑封装于此，与 AudioMusicCard 完全解耦
 
@@ -91,9 +103,10 @@ function VoiceCloneCard({ turn, isActive }: VoiceCloneCardProps) {
 interface AudioMusicCardProps {
   turn: AudioTurn
   isActive: boolean
+  sessionId?: string
 }
 
-function AudioMusicCard({ turn, isActive }: AudioMusicCardProps) {
+function AudioMusicCard({ turn, isActive, sessionId }: AudioMusicCardProps) {
   const isDiff = turn.domain === AudioDomain.ITERATE && !!turn.diff_summary
   const durationSec = turn.duration_ms ? Math.round(turn.duration_ms / 1000) : null
 
@@ -128,12 +141,12 @@ function AudioMusicCard({ turn, isActive }: AudioMusicCardProps) {
         </p>
       )}
 
-      {/* 播放器（当前轮次展开） */}
-      {isActive && turn.audio_url && (
+      {/* 播放器（当前轮次展开）：优先 workspace_path（永久），回退 audio_url（24h 临时） */}
+      {isActive && (turn.workspace_path || turn.audio_url) && (
         <audio
-          src={turn.audio_url}
+          src={resolveAudioSrc(turn, sessionId)}
           controls
-          autoPlay={false}
+          autoPlay
           className="w-full"
           style={{ height: '32px' }}
           onClick={(e) => e.stopPropagation()}
@@ -159,7 +172,7 @@ function AudioMusicCard({ turn, isActive }: AudioMusicCardProps) {
 
 // ─── 域路由：按 AudioDomain 枚举分发渲染，O(1) switch，零字符串比较 ────────────
 
-function TurnCardBody({ turn, isActive }: { turn: AudioTurn; isActive: boolean }) {
+function TurnCardBody({ turn, isActive, sessionId }: { turn: AudioTurn; isActive: boolean; sessionId?: string }) {
   switch (turn.domain) {
     case AudioDomain.CLONE:
       return <VoiceCloneCard turn={turn} isActive={isActive} />
@@ -167,7 +180,7 @@ function TurnCardBody({ turn, isActive }: { turn: AudioTurn; isActive: boolean }
     case AudioDomain.ITERATE:
     case AudioDomain.COVER:
     default:
-      return <AudioMusicCard turn={turn} isActive={isActive} />
+      return <AudioMusicCard turn={turn} isActive={isActive} sessionId={sessionId} />
   }
 }
 
@@ -178,6 +191,7 @@ interface Props {
   currentTurn: number | null
   onPlayTurn: (turn: AudioTurn) => void
   onClearHistory: () => void
+  sessionId?: string
 }
 
 /**
@@ -186,7 +200,7 @@ interface Props {
  * 职责（单一）：列表骨架 + 轮次标头 + 域路由（委托给 TurnCardBody）
  * 不内联任何域渲染逻辑，保持低耦合
  */
-export function AudioHistoryList({ history, currentTurn, onPlayTurn, onClearHistory }: Props) {
+export function AudioHistoryList({ history, currentTurn, onPlayTurn, onClearHistory, sessionId }: Props) {
   const listRef = useRef<HTMLDivElement>(null)
 
   if (history.length === 0) return null
@@ -237,7 +251,7 @@ export function AudioHistoryList({ history, currentTurn, onPlayTurn, onClearHist
               </div>
 
               {/* 域内容（委托路由） */}
-              <TurnCardBody turn={turn} isActive={isActive} />
+              <TurnCardBody turn={turn} isActive={isActive} sessionId={sessionId} />
             </div>
           )
         })}

@@ -316,8 +316,13 @@ async def generate_audio_minimax(
     elif lyrics:
         payload["lyrics"] = lyrics
     else:
-        # 无歌词 + 非纯音乐 → 让 MiniMax 自动从 prompt 生成歌词
-        payload["lyrics_optimizer"] = True
+        # 无歌词 + 非纯音乐：
+        # music-2.6（付费版）支持 lyrics_optimizer=True 让 MiniMax 自动生成歌词
+        # music-2.6-free（免费版）不支持 lyrics_optimizer，传该字段会报错，直接不传即可
+        # MiniMax 服务端在无 lyrics 且无 is_instrumental 时会自动处理
+        if model == "music-2.6":
+            payload["lyrics_optimizer"] = True
+        # 免费版：不传 lyrics_optimizer，让服务端自动决定
 
     async with httpx.AsyncClient(timeout=120) as client:
         resp = await client.post(

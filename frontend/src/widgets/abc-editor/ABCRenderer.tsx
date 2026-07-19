@@ -1,12 +1,5 @@
 'use client'
 
-// 允许导入第三方 CSS，避免 abcjs-audio.css 等资源触发 TS 检查
-declare module '*.css'
-declare module 'abcjs/*'
-
-// abcjs audio 控件依赖这个样式文件，必须在组件侧导入，否则会报 CSS required
-// @ts-ignore
-import 'abcjs/abcjs-audio.css'
 import { useEffect, useRef, useState } from 'react'
 
 interface ABCRendererProps {
@@ -29,6 +22,19 @@ function isValidABC(abc: string): boolean {
 // 全局唯一 ID 计数器，给播放器容器生成唯一 CSS 选择器
 let _synthIdCounter = 0
 
+// 全局只注入一次 abcjs-audio.css（SynthController 强依赖）
+let _audioCssInjected = false
+function ensureAudioCss() {
+  if (_audioCssInjected) return
+  if (document.getElementById('abcjs-audio-css')) { _audioCssInjected = true; return }
+  const link = document.createElement('link')
+  link.id   = 'abcjs-audio-css'
+  link.rel  = 'stylesheet'
+  link.href = 'https://cdn.jsdelivr.net/npm/abcjs@6.4.4/abcjs-audio.css'
+  document.head.appendChild(link)
+  _audioCssInjected = true
+}
+
 /**
  * ABCRenderer — 使用 abcjs 在浏览器端渲染 ABC 乐谱，并提供音频播放功能
  *
@@ -42,7 +48,8 @@ let _synthIdCounter = 0
 export function ABCRenderer({ abc, title, className }: ABCRendererProps) {
   const containerRef  = useRef<HTMLDivElement>(null)
   // 每个组件实例持有一个固定的唯一 id，用于 SynthController.load(selector)
-  const synthIdRef    = useRef(`abcjs-synth-${++_synthIdCounter}`)
+  // 用 useState 惰性初始化，避免 StrictMode 双重 mount 导致计数器错位
+  const [synthId]     = useState(() => `abcjs-synth-${++_synthIdCounter}`)
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const synthCtrlRef  = useRef<any>(null)
 
@@ -69,10 +76,8 @@ export function ABCRenderer({ abc, title, className }: ABCRendererProps) {
       synthCtrlRef.current = null
     }
 
-    let cancelled = false
-
-    import('abcjs').then((abcjs: any) => {
-      if (cancelled || !containerRef.current) return
+    import('abcjs').then((abcjs) => {
+      if (!containerRef.current) return
 
       try {
         // ── 1. 渲染乐谱 ────────────────────────────────────────────────────────
@@ -90,67 +95,52 @@ export function ABCRenderer({ abc, title, className }: ABCRendererProps) {
         setIsLoading(false)
 
         // ── 2. 初始化播放器 ────────────────────────────────────────────────────
+        // SynthController 强依赖 abcjs-audio.css，必须先注入
+        ensureAudioCss()
+
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const synthModule = (abcjs as any).synth
         if (!synthModule || !synthModule.supportsAudio()) {
           setNoAudio(true)
           return
         }
 
-        if (!visualObj?.[0]) {
-          setNoAudio(true)
-          return
-        }
+        if (!visualObj?.[0]) return
 
-        // 保证播放器容器在 DOM 中且可被 abcjs 测量
-        const selector = `#${synthIdRef.current}`
+        // SynthController.load() 需要 CSS 选择器，且元素必须已挂载到 DOM
+        const selector = `#${synthId}`
         const ctrl = new synthModule.SynthController()
         synthCtrlRef.current = ctrl
 
-        // 延迟一帧，确保 React 已完成布局更新
-        const raf = requestAnimationFrame(() => {
-          if (cancelled) return
-
-          try {
-            ctrl.load(selector, null, {
-              displayLoop:     true,
-              displayRestart:  true,
-              displayPlay:     true,
-              displayProgress: true,
-              displayWarp:     true,
-            })
-
-            const createSynth = new synthModule.CreateSynth()
-            createSynth.init({ visualObj: visualObj[0] })
-              .then(() => ctrl.setTune(visualObj[0], false, {}))
-              .then(() => {
-                if (!cancelled) setSynthReady(true)
-              })
-              .catch((err: unknown) => {
-                console.error('ABC synth init failed:', err)
-                if (!cancelled) setNoAudio(true)
-              })
-          } catch (err) {
-            console.error('ABC synth load failed:', err)
-            if (!cancelled) setNoAudio(true)
-          }
+        ctrl.load(selector, null, {
+          displayLoop:     true,
+          displayRestart:  true,
+          displayPlay:     true,
+          displayProgress: true,
+          displayWarp:     true,
         })
 
-        return () => cancelAnimationFrame(raf)
+        // setTune(visualObj, userAction=false, audioParams)
+        // userAction=false：不立即创建 AudioContext，等用户点播放时再创建
+        ctrl.setTune(visualObj[0], false, {})
+          .then(() => {
+            setSynthReady(true)
+          })
+          .catch(() => {
+            // soundfont 加载失败等，不影响乐谱显示
+            setNoAudio(true)
+          })
+
       } catch (e) {
-        if (!cancelled) {
-          setIsLoading(false)
-          setError(e instanceof Error ? e.message : 'ABC 渲染失败，请检查谱子格式')
-        }
+        setIsLoading(false)
+        setError(e instanceof Error ? e.message : 'ABC 渲染失败，请检查谱子格式')
       }
     }).catch(() => {
-      if (!cancelled) {
-        setIsLoading(false)
-        setError('abcjs 加载失败，请检查网络或刷新页面')
-      }
+      setIsLoading(false)
+      setError('abcjs 加载失败，请检查网络或刷新页面')
     })
 
     return () => {
-      cancelled = true
       if (synthCtrlRef.current) {
         try { synthCtrlRef.current.destroy?.() } catch { /* ignore */ }
         synthCtrlRef.current = null
@@ -215,15 +205,13 @@ export function ABCRenderer({ abc, title, className }: ABCRendererProps) {
         ].join(' ')}
       />
 
-      {/* 播放器容器：abcjs SynthController 将控件注入此 div */}
+      {/* 播放器容器：abcjs SynthController 将控件注入此 div
+          - 始终挂载在 DOM（SynthController.load() 需要在 useEffect 里找到它）
+          - noAudio 时用 style 隐藏，不做条件渲染 */}
       <div
-        id={synthIdRef.current}
-        className={[
-          // abcjs 的 SynthController 需要稳定的容器尺寸进行内部测量/布局
-          'abcjs-synth-host relative mt-3 min-h-0',
-          // 首屏不可见，避免高度跳变；但保留布局占位，方便 abcjs 正确测量
-          synthReady ? 'opacity-100' : 'opacity-0',
-        ].join(' ')}
+        id={synthId}
+        className="px-4 pb-4"
+        style={{ display: noAudio ? 'none' : undefined }}
       />
 
       {/* 音频不可用时的友好提示 */}

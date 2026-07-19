@@ -1,0 +1,356 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>MiniMax TTS 语音合成测试</title>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body { font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
+         background:#f5f5f7; color:#1d1d1f; min-height:100vh; }
+  .header { background:linear-gradient(135deg,#f093fb,#f5576c); color:#fff;
+            padding:20px 24px; display:flex; align-items:center; gap:12px; }
+  .header h1 { font-size:1.3rem; }
+  .header a { color:#fff; opacity:.8; text-decoration:none; font-size:.85rem; }
+  .header a:hover { opacity:1; }
+  .container { max-width:900px; margin:0 auto; padding:24px; }
+  .panel { background:#fff; border-radius:16px; padding:24px; margin-bottom:16px;
+           box-shadow:0 2px 12px rgba(0,0,0,.06); }
+  .panel h2 { font-size:1.1rem; margin-bottom:16px; color:#333; display:flex; align-items:center; gap:8px; }
+  .row { display:flex; gap:12px; margin-bottom:12px; flex-wrap:wrap; }
+  .form-group { flex:1; min-width:160px; }
+  .form-group label { display:block; font-size:.8rem; font-weight:600; color:#555; margin-bottom:4px; }
+  .form-group input,.form-group select,.form-group textarea { width:100%; padding:8px 10px;
+    border:1px solid #d1d1d6; border-radius:8px; font-size:.85rem; outline:none; }
+  .form-group textarea { resize:vertical; min-height:100px; font-size:.9rem; }
+  .form-group input:focus,.form-group select:focus,.form-group textarea:focus { border-color:#f5576c; }
+  .form-group input[type="range"] { padding:0; border:none; }
+  .btn { padding:10px 24px; border:none; border-radius:10px; font-size:.9rem; font-weight:600;
+         cursor:pointer; transition:all .15s; }
+  .btn-primary { background:#f5576c; color:#fff; }
+  .btn-primary:hover { background:#e04a5e; }
+  .btn-primary:disabled { opacity:.5; cursor:not-allowed; }
+  .btn-secondary { background:#e8e8ed; color:#555; }
+  .btn-secondary:hover { background:#ddd; }
+  .btn-success { background:#2ed573; color:#fff; }
+  .btn-success:hover { background:#26b865; }
+  .divider { border:none; border-top:1px solid #e5e5e7; margin:16px 0; }
+  .audio-player { background:#f8f9fa; border-radius:10px; padding:16px; margin-top:12px;
+                  display:none; }
+  .audio-player audio { width:100%; }
+  .stream-indicator { display:none; align-items:center; gap:8px; padding:12px;
+    background:#fff3cd; border-radius:8px; margin-top:8px; font-size:.85rem; color:#856404; }
+  .stream-indicator.active { display:flex; }
+  .pulse { width:10px; height:10px; background:#f5576c; border-radius:50%;
+           animation:pulse 1s infinite; }
+  @keyframes pulse { 0%{transform:scale(1);opacity:1} 50%{transform:scale(1.5);opacity:.5}
+                     100%{transform:scale(1);opacity:1} }
+  .status { font-size:.8rem; color:#666; margin-top:8px; }
+  .badge { display:inline-block;font-size:.7rem;padding:2px 8px;border-radius:10px;
+           font-weight:500; }
+  .badge.streaming { background:#e3f2fd; color:#1565c0; }
+  .tab-bar { display:flex; gap:4px; margin-bottom:16px; }
+  .tab { padding:8px 16px; border-radius:8px 8px 0 0; cursor:pointer; font-size:.85rem;
+         background:#e8e8ed; color:#666; border:none; font-weight:500; }
+  .tab.active { background:#fff; color:#f5576c; font-weight:600; }
+</style>
+</head>
+<body>
+<div class="header">
+  <a href="/">← 返回</a>
+  <h1>🔊 TTS 语音合成</h1>
+</div>
+<div class="container">
+  <div class="tab-bar">
+    <button class="tab active" onclick="switchMode('standard',this)">标准合成</button>
+    <button class="tab" onclick="switchMode('streaming',this)">流式合成 🎯</button>
+    <button class="tab" onclick="switchMode('longtext',this)">长文本异步</button>
+  </div>
+
+  <!-- 标准/流式 TTS -->
+  <div class="panel" id="modeStandard">
+    <h2>📝 TTS 参数</h2>
+    <div class="row">
+      <div class="form-group">
+        <label>模型</label>
+        <select id="model">
+          <option value="speech-2.8-hd">speech-2.8-hd</option>
+          <option value="speech-2.8-turbo">speech-2.8-turbo</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label>Voice ID</label>
+        <input id="voiceId" value="male-qn-tianye" placeholder="输入音色ID">
+      </div>
+      <div class="form-group">
+        <label>输出格式</label>
+        <select id="format">
+          <option value="mp3">MP3</option>
+          <option value="wav">WAV</option>
+          <option value="pcm">PCM</option>
+        </select>
+      </div>
+    </div>
+    <div class="row">
+      <div class="form-group">
+        <label>语速: <span id="speedVal">1.0</span></label>
+        <input type="range" id="speed" min="0.5" max="2" step="0.1" value="1.0"
+               oninput="document.getElementById('speedVal').textContent=this.value">
+      </div>
+      <div class="form-group">
+        <label>音量: <span id="volumeVal">1.0</span></label>
+        <input type="range" id="volume" min="0" max="2" step="0.1" value="1.0"
+               oninput="document.getElementById('volumeVal').textContent=this.value">
+      </div>
+      <div class="form-group">
+        <label>采样率</label>
+        <select id="sampleRate">
+          <option value="16000">16000 Hz</option>
+          <option value="22050">22050 Hz</option>
+          <option value="32000" selected>32000 Hz</option>
+          <option value="44100">44100 Hz</option>
+          <option value="48000">48000 Hz</option>
+        </select>
+      </div>
+    </div>
+    <label>文本内容</label>
+    <textarea id="text" placeholder="输入要合成的文本...">你好，我是 MiniMax AI 语音助手，很高兴为您服务！</textarea>
+    <div class="row" style="margin-top:12px;">
+      <button class="btn btn-primary" id="synthBtn" onclick="synthesize()">🎤 合成并播放</button>
+      <button class="btn btn-secondary" onclick="document.getElementById('audioPlayer').style.display='none'">清空</button>
+      <button class="btn btn-secondary" onclick="listVoices()">📋 查询音色</button>
+    </div>
+    <div class="stream-indicator" id="streamIndicator">
+      <div class="pulse"></div>
+      <span>正在流式合成语音...</span>
+    </div>
+    <div class="status" id="status"></div>
+    <div class="audio-player" id="audioPlayer">
+      <audio id="audioEl" controls></audio>
+    </div>
+  </div>
+
+  <!-- 长文本 TTS -->
+  <div class="panel" id="modeLongText" style="display:none;">
+    <h2>📄 长文本 TTS（异步）</h2>
+    <div class="form-group">
+      <label>文本内容</label>
+      <textarea id="longText" rows="8" placeholder="输入长文本内容...">这是一段长文本测试。MiniMax 语音合成支持超长文本的异步合成，您可以提交任务后轮询获取结果。非常适合用于有声书、新闻播报等场景。</textarea>
+    </div>
+    <button class="btn btn-primary" onclick="createLongText()">📤 提交长文本任务</button>
+    <div class="status" id="longTextStatus"></div>
+    <div class="audio-player" id="longTextPlayer" style="display:none;">
+      <audio id="longTextAudio" controls></audio>
+    </div>
+  </div>
+
+  <!-- 音色列表 -->
+  <div class="panel" id="voiceListPanel" style="display:none;">
+    <h2>📋 可用音色</h2>
+    <div id="voiceList" style="max-height:300px;overflow-y:auto;"></div>
+  </div>
+</div>
+
+<script>
+const API = '';
+
+function switchMode(mode, btn) {
+  document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+  btn.classList.add('active');
+  document.getElementById('modeStandard').style.display = mode === 'standard' || mode === 'streaming' ? 'block' : 'none';
+  document.getElementById('modeLongText').style.display = mode === 'longtext' ? 'block' : 'none';
+  document.getElementById('voiceListPanel').style.display = 'none';
+  // 流式模式自动勾选流式
+  document.getElementById('synthBtn').textContent = mode === 'streaming' ? '🎤 流式合成并播放' : '🎤 合成并播放';
+  document.getElementById('synthBtn').dataset.mode = mode;
+}
+
+// 默认标准模式
+document.getElementById('synthBtn').dataset.mode = 'standard';
+
+async function synthesize() {
+  const isStreaming = document.getElementById('synthBtn').dataset.mode === 'streaming';
+  const btn = document.getElementById('synthBtn');
+  const status = document.getElementById('status');
+  const player = document.getElementById('audioPlayer');
+  const audioEl = document.getElementById('audioEl');
+  const indicator = document.getElementById('streamIndicator');
+
+  btn.disabled = true;
+  status.textContent = isStreaming ? '⏳ 开始流式合成...' : '⏳ 正在合成...';
+  player.style.display = 'none';
+
+  const payload = {
+    model: document.getElementById('model').value,
+    text: document.getElementById('text').value.trim() || '你好',
+    voice_id: document.getElementById('voiceId').value,
+    speed: parseFloat(document.getElementById('speed').value),
+    volume: parseFloat(document.getElementById('volume').value),
+    format: document.getElementById('format').value,
+    sample_rate: parseInt(document.getElementById('sampleRate').value),
+    stream: isStreaming,
+  };
+
+  try {
+    if (isStreaming) {
+      // ── 流式 TTS ──
+      indicator.classList.add('active');
+      status.textContent = '⏳ 流式接收音频块...';
+
+      const resp = await fetch(`${API}/api/v1/speech/synthesize`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      const reader = resp.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+      const audioChunks = [];
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop() || '';
+        for (const line of lines) {
+          if (!line.startsWith('data: ')) continue;
+          const data = line.slice(6).trim();
+          if (data === '[DONE]') continue;
+          try {
+            const parsed = JSON.parse(data);
+            if (parsed.audio) {
+              const binary = atob(parsed.audio);
+              const bytes = new Uint8Array(binary.length);
+              for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+              audioChunks.push(bytes);
+              status.textContent = `📦 已接收 ${(audioChunks.reduce((s,c)=>s+c.length,0)/1024).toFixed(1)} KB 音频`;
+            }
+          } catch(e) {}
+        }
+      }
+      if (audioChunks.length > 0) {
+        const blob = new Blob(audioChunks, { type: 'audio/mpeg' });
+        const url = URL.createObjectURL(blob);
+        audioEl.src = url;
+        player.style.display = 'block';
+        audioEl.play();
+        status.textContent = `✅ 流式合成完成 (${(blob.size/1024).toFixed(1)} KB, ${audioChunks.length} 个块)`;
+      } else {
+        status.textContent = '⚠️ 未接收到音频数据';
+      }
+      indicator.classList.remove('active');
+    } else {
+      // ── 标准 TTS ──
+      const resp = await fetch(`${API}/api/v1/speech/synthesize`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      if (!resp.ok) {
+        const err = await resp.json();
+        throw new Error(err.detail || `HTTP ${resp.status}`);
+      }
+      const blob = await resp.blob();
+      const url = URL.createObjectURL(blob);
+      audioEl.src = url;
+      player.style.display = 'block';
+      audioEl.play();
+      status.textContent = `✅ 合成完成 (${(blob.size/1024).toFixed(1)} KB)`;
+    }
+  } catch (err) {
+    status.textContent = '❌ 错误: ' + err.message;
+    indicator.classList.remove('active');
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+async function listVoices() {
+  const panel = document.getElementById('voiceListPanel');
+  const list = document.getElementById('voiceList');
+  panel.style.display = 'block';
+  list.innerHTML = '<p style="color:#999;">加载中...</p>';
+  try {
+    const resp = await fetch(`${API}/api/v1/voices`);
+    const data = await resp.json();
+    const voices = data.voices || [];
+    if (voices.length === 0) {
+      list.innerHTML = '<p style="color:#999;">没有找到音色</p>';
+      return;
+    }
+    list.innerHTML = voices.map(v => `
+      <div style="padding:8px 12px;border-bottom:1px solid #eee;display:flex;justify-content:space-between;align-items:center;">
+        <div>
+          <strong>${v.voice_id || v.name || '未知'}</strong>
+          <span style="font-size:.8rem;color:#666;margin-left:8px;">${v.type || ''}</span>
+        </div>
+        <button class="btn btn-secondary" style="padding:4px 12px;font-size:.8rem;"
+                onclick="useVoice('${v.voice_id || v.name}')">使用</button>
+      </div>
+    `).join('');
+  } catch (err) {
+    list.innerHTML = `<p style="color:red;">❌ ${err.message}</p>`;
+  }
+}
+
+function useVoice(id) {
+  document.getElementById('voiceId').value = id;
+  document.getElementById('voiceListPanel').style.display = 'none';
+  document.getElementById('status').textContent = `✅ 已选择音色: ${id}`;
+}
+
+async function createLongText() {
+  const status = document.getElementById('longTextStatus');
+  const text = document.getElementById('longText').value.trim();
+  if (!text) { status.textContent = '⚠️ 请输入文本'; return; }
+  status.textContent = '⏳ 提交任务...';
+  try {
+    const resp = await fetch(`${API}/api/v1/speech/long-text`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: document.getElementById('model').value,
+        text,
+        voice_id: document.getElementById('voiceId').value,
+        speed: parseFloat(document.getElementById('speed').value),
+        format: 'mp3',
+        stream: false,
+      }),
+    });
+    const data = await resp.json();
+    const taskId = data.task_id || data.id;
+    status.textContent = `✅ 任务已提交: ${taskId}，正在轮询...`;
+    pollLongText(taskId);
+  } catch (err) {
+    status.textContent = '❌ ' + err.message;
+  }
+}
+
+async function pollLongText(taskId) {
+  const status = document.getElementById('longTextStatus');
+  const player = document.getElementById('longTextPlayer');
+  try {
+    for (let i = 0; i < 60; i++) {
+      const resp = await fetch(`${API}/api/v1/speech/long-text/${taskId}`);
+      const data = await resp.json();
+      const fileId = data.file_id || data.data?.file_id;
+      if (fileId) {
+        const audioUrl = `${API}/api/v1/speech/long-text/download/${fileId}`;
+        document.getElementById('longTextAudio').src = audioUrl;
+        player.style.display = 'block';
+        status.textContent = `✅ 长文本合成完成！ (file_id: ${fileId})`;
+        return;
+      }
+      const statusStr = data.status || (data.data ? data.data.status : '');
+      status.textContent = `⏳ 等待中... (${statusStr || '处理中'}) 第 ${i+1} 次轮询`;
+      await new Promise(r => setTimeout(r, 2000));
+    }
+    status.textContent = '⏰ 轮询超时';
+  } catch (err) {
+    status.textContent = '❌ ' + err.message;
+  }
+}
+</script>
+</body>
+</html>

@@ -1,0 +1,243 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>MiniMax 文件管理测试</title>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body { font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
+         background:#f5f5f7; color:#1d1d1f; }
+  .header { background:linear-gradient(135deg,#667eea,#764ba2); color:#fff;
+            padding:20px 24px; display:flex; align-items:center; gap:12px; }
+  .header h1 { font-size:1.3rem; }
+  .header a { color:#fff; opacity:.8; text-decoration:none; font-size:.85rem; }
+  .header a:hover { opacity:1; }
+  .container { max-width:900px; margin:0 auto; padding:24px; }
+  .panel { background:#fff; border-radius:16px; padding:24px; margin-bottom:16px;
+           box-shadow:0 2px 12px rgba(0,0,0,.06); }
+  .panel h2 { font-size:1.1rem; margin-bottom:16px; }
+  .row { display:flex; gap:12px; margin-bottom:12px; flex-wrap:wrap; }
+  .form-group { flex:1; min-width:160px; }
+  .form-group label { display:block; font-size:.8rem; font-weight:600; color:#555; margin-bottom:4px; }
+  .form-group input,.form-group select { width:100%; padding:8px 10px;
+    border:1px solid #d1d1d6; border-radius:8px; font-size:.85rem; outline:none; }
+  .btn { padding:10px 24px; border:none; border-radius:10px; font-size:.9rem; font-weight:600;
+         cursor:pointer; transition:all .15s; }
+  .btn-primary { background:#667eea; color:#fff; }
+  .btn-primary:hover { background:#5a6fd6; }
+  .btn-primary:disabled { opacity:.5; cursor:not-allowed; }
+  .btn-secondary { background:#e8e8ed; color:#555; }
+  .btn-secondary:hover { background:#ddd; }
+  .btn-danger { background:#ff4757; color:#fff; }
+  .file-table { width:100%; border-collapse:collapse; font-size:.85rem; }
+  .file-table th { text-align:left; padding:10px 12px; background:#f8f9fa; border-bottom:2px solid #e5e5e7;
+                   font-weight:600; color:#555; }
+  .file-table td { padding:10px 12px; border-bottom:1px solid #eee; }
+  .file-table tr:hover { background:#f8f9fa; }
+  .status { font-size:.85rem; color:#666; margin-top:8px; }
+  .badge { display:inline-block;font-size:.7rem;padding:2px 8px;border-radius:10px;font-weight:500; }
+  .badge.audio { background:#e8f5e9; color:#2e7d32; }
+  .badge.image { background:#e3f2fd; color:#1565c0; }
+  .badge.video { background:#fff3e0; color:#e65100; }
+  .badge.other { background:#f3e5f5; color:#7b1fa2; }
+  .upload-zone { border:2px dashed #d1d1d6; border-radius:12px; padding:32px; text-align:center;
+                 cursor:pointer; transition:all .2s; }
+  .upload-zone:hover { border-color:#667eea; background:#f8f9ff; }
+  .upload-zone.dragover { border-color:#667eea; background:#eef0ff; }
+  .upload-zone p { color:#888; font-size:.9rem; }
+  .upload-zone .icon { font-size:2.5rem; margin-bottom:8px; }
+</style>
+</head>
+<body>
+<div class="header">
+  <a href="/">← 返回</a>
+  <h1>📁 文件管理</h1>
+</div>
+<div class="container">
+  <div class="panel">
+    <h2>📤 上传文件</h2>
+    <div class="row">
+      <div class="form-group">
+        <label>用途</label>
+        <select id="uploadPurpose">
+          <option value="general">general - 通用</option>
+          <option value="voice_clone">voice_clone - 音色克隆</option>
+          <option value="prompt_audio">prompt_audio - 提示音频</option>
+        </select>
+      </div>
+    </div>
+    <div class="upload-zone" id="dropZone">
+      <div class="icon">📂</div>
+      <p>拖拽文件到此处，或点击选择文件</p>
+      <input type="file" id="fileInput" style="display:none">
+    </div>
+    <div class="status" id="uploadStatus"></div>
+  </div>
+
+  <div class="panel">
+    <h2>📋 文件列表</h2>
+    <div class="row">
+      <div class="form-group">
+        <label>筛选用途</label>
+        <select id="listPurpose" onchange="listFiles()">
+          <option value="general">general</option>
+          <option value="voice_clone">voice_clone</option>
+          <option value="prompt_audio">prompt_audio</option>
+        </select>
+      </div>
+      <button class="btn btn-secondary" onclick="listFiles()">🔄 刷新</button>
+    </div>
+    <div class="status" id="listStatus"></div>
+    <div style="overflow-x:auto;">
+      <table class="file-table">
+        <thead><tr><th>文件名</th><th>类型</th><th>大小</th><th>File ID</th><th>操作</th></tr></thead>
+        <tbody id="fileList"></tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+<script>
+const API = '';
+
+// ── 拖拽上传 ──
+const dropZone = document.getElementById('dropZone');
+const fileInput = document.getElementById('fileInput');
+
+dropZone.onclick = () => fileInput.click();
+dropZone.ondragover = e => { e.preventDefault(); dropZone.classList.add('dragover'); };
+dropZone.ondragleave = () => dropZone.classList.remove('dragover');
+dropZone.ondrop = e => {
+  e.preventDefault();
+  dropZone.classList.remove('dragover');
+  if (e.dataTransfer.files.length > 0) {
+    uploadFile(e.dataTransfer.files[0]);
+  }
+};
+fileInput.onchange = () => {
+  if (fileInput.files.length > 0) uploadFile(fileInput.files[0]);
+};
+
+async function uploadFile(file) {
+  const status = document.getElementById('uploadStatus');
+  const purpose = document.getElementById('uploadPurpose').value;
+  const formData = new FormData();
+  formData.append('file', file);
+  formData.append('purpose', purpose);
+  status.textContent = `⏳ 上传 "${file.name}"...`;
+  try {
+    const resp = await fetch(`${API}/api/v1/files/upload?purpose=${purpose}`, {
+      method: 'POST',
+      body: formData,
+    });
+    const data = await resp.json();
+    const fileId = data.file_id || data.data?.file_id;
+    if (fileId) {
+      status.textContent = `✅ "${file.name}" 上传成功！file_id: ${fileId}`;
+      listFiles();
+    } else {
+      status.textContent = `⚠️ 响应: ${JSON.stringify(data)}`;
+    }
+  } catch (err) {
+    status.textContent = '❌ ' + err.message;
+  }
+}
+
+async function listFiles() {
+  const tbody = document.getElementById('fileList');
+  const status = document.getElementById('listStatus');
+  const purpose = document.getElementById('listPurpose').value;
+  status.textContent = '⏳ 加载中...';
+  try {
+    const resp = await fetch(`${API}/api/v1/files?purpose=${purpose}`);
+    const data = await resp.json();
+    const files = data.files || data.data?.files || [];
+    if (files.length === 0) {
+      tbody.innerHTML = '<tr><td colspan="5" style="text-align:center;color:#999;padding:20px;">暂无文件</td></tr>';
+      status.textContent = `✅ 共 0 个文件`;
+      return;
+    }
+    tbody.innerHTML = files.map(f => {
+      const fileId = f.file_id || f.id || '未知';
+      const name = f.filename || f.name || fileId;
+      const ext = (name.split('.').pop() || '').toLowerCase();
+      const size = f.size ? formatSize(f.size) : '未知';
+      let badge = 'other';
+      if (['mp3','wav','m4a','ogg','flac'].includes(ext)) badge = 'audio';
+      else if (['jpg','jpeg','png','gif','webp'].includes(ext)) badge = 'image';
+      else if (['mp4','mov','avi','webm'].includes(ext)) badge = 'video';
+      const typeName = {audio:'音频',image:'图片',video:'视频',other:'其他'}[badge];
+      return `<tr>
+        <td><strong>${name}</strong></td>
+        <td><span class="badge ${badge}">${typeName}</span></td>
+        <td>${size}</td>
+        <td style="font-family:monospace;font-size:.8rem;color:#666;">${fileId}</td>
+        <td>
+          <button class="btn btn-secondary" style="padding:4px 10px;font-size:.8rem;"
+            onclick="downloadFile('${fileId}')">下载</button>
+          <button class="btn btn-danger" style="padding:4px 10px;font-size:.8rem;"
+            onclick="deleteFile('${fileId}','${purpose}')">删除</button>
+          <button class="btn btn-secondary" style="padding:4px 10px;font-size:.8rem;"
+            onclick="previewFile('${fileId}','${name}')">预览</button>
+        </td>
+      </tr>`;
+    }).join('');
+    status.textContent = `✅ 共 ${files.length} 个文件`;
+  } catch (err) {
+    tbody.innerHTML = `<tr><td colspan="5" style="text-align:center;color:red;">❌ ${err.message}</td></tr>`;
+    status.textContent = '❌ ' + err.message;
+  }
+}
+
+function formatSize(bytes) {
+  if (bytes < 1024) return bytes + ' B';
+  if (bytes < 1024*1024) return (bytes/1024).toFixed(1) + ' KB';
+  return (bytes/(1024*1024)).toFixed(1) + ' MB';
+}
+
+function downloadFile(fileId) {
+  window.open(`${API}/api/v1/files/${fileId}/content`, '_blank');
+}
+
+async function deleteFile(fileId, purpose) {
+  if (!confirm(`确定要删除文件 ${fileId}？`)) return;
+  try {
+    const resp = await fetch(`${API}/api/v1/files/${fileId}?purpose=${purpose}`, { method: 'DELETE' });
+    const data = await resp.json();
+    if (data.status_code === 0 || resp.ok) {
+      listFiles();
+      document.getElementById('listStatus').textContent = `✅ 已删除 ${fileId}`;
+    } else {
+      document.getElementById('listStatus').textContent = `❌ ${JSON.stringify(data)}`;
+    }
+  } catch (err) {
+    document.getElementById('listStatus').textContent = '❌ ' + err.message;
+  }
+}
+
+function previewFile(fileId, name) {
+  const ext = (name.split('.').pop() || '').toLowerCase();
+  const url = `${API}/api/v1/files/${fileId}/content`;
+  const mediaUrl = `${API}/api/v1/media/${fileId}`;
+  const win = window.open('', '_blank', 'width=800,height=600');
+  let content = '';
+  if (['jpg','jpeg','png','gif','webp'].includes(ext)) {
+    content = `<img src="${url}" style="max-width:100%;max-height:90vh;">`;
+  } else if (['mp3','wav','m4a','ogg'].includes(ext)) {
+    content = `<audio controls src="${url}" style="width:100%;"></audio>`;
+  } else if (['mp4','webm'].includes(ext)) {
+    content = `<video controls src="${url}" style="max-width:100%;max-height:80vh;"></video>`;
+  } else {
+    content = `<p>此文件类型无法预览</p><a href="${url}" download>下载文件</a>`;
+  }
+  win.document.write(`<html><head><title>预览: ${name}</title>
+    <style>body{display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0;background:#f5f5f7;}</style>
+    </head><body>${content}</body></html>`);
+}
+
+// 初始加载
+listFiles();
+</script>
+</body>
+</html>

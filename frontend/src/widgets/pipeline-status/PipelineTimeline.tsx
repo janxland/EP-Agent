@@ -13,7 +13,7 @@
  *   - ReplayPanel v2.0：HitRateRing + Token对比表 + 重放历史列表（自动刷新）+ 点击展开 span
  */
 
-import React, { useEffect, useCallback, useRef, useState } from 'react'
+import React, { useEffect, useCallback, useRef, useState, useMemo } from 'react'
 import { useTimelineStore } from '@/features/chat/store/timeline.store'
 import type { SpanDto, TraceDto } from '@/shared/types/trace.types'
 import { DOMAIN_LABEL } from '@/shared/types/trace.types'
@@ -21,6 +21,7 @@ import type { ReplayResponse } from '@/shared/lib/api'
 import { extractWorkflow, deleteSessionTraces, listTraceReplays, getTraceDetail, exportSingleTrace } from '@/shared/lib/api'
 import { downloadBlob } from '@/shared/lib/utils'
 import { WorkflowPanel } from './WorkflowPanel'
+import { useWorkspaceStore } from '@/features/workspace/store/workspace.store'
 
 // ─── 常量 ─────────────────────────────────────────────────────────────────────
 
@@ -31,6 +32,10 @@ const KIND_STYLE: Record<string, { bg: string; text: string; label: string }> = 
   todo_plan: { bg: 'bg-yellow-100', text: 'text-yellow-700', label: 'TODO'  },
   memory:    { bg: 'bg-green-100',  text: 'text-green-700',  label: 'MEM'   },
   chain:     { bg: 'bg-pink-100',   text: 'text-pink-700',   label: 'CHAIN' },
+  // v1.4 新增 span_kind（后端 trace_collector.py 产生）
+  node:      { bg: 'bg-slate-100',  text: 'text-slate-600',  label: 'NODE'  },
+  step:      { bg: 'bg-cyan-100',   text: 'text-cyan-700',   label: 'STEP'  },
+  agent:     { bg: 'bg-indigo-100', text: 'text-indigo-700', label: 'AGENT' },
 }
 
 const STATUS_DOT: Record<string, string> = {
@@ -100,25 +105,45 @@ function SpanTimeline({ spans, selectedIdx, onSelect }: {
         const isErr = span.status === 'error'
         const isSelected = selectedIdx === i
         const barW = Math.max(4, Math.round((span.duration_ms / maxMs) * 100))
+        // thinking span 特殊样式
+        const isThinking = span.span_kind === 'model' && (
+          span.tool_name === 'thinking' ||
+          (span.tool_result_preview ?? '').startsWith('<think>')
+        )
 
         return (
           <div
             key={span.span_id}
             onClick={() => onSelect(i)}
             className={`group flex items-center gap-2 px-2 py-1.5 rounded cursor-pointer transition-all select-none
-              ${isSelected ? 'bg-blue-50 ring-1 ring-blue-300' : 'hover:bg-gray-50'}`}
+              ${isSelected
+                ? (isThinking ? 'bg-violet-50 ring-1 ring-violet-300' : 'bg-blue-50 ring-1 ring-blue-300')
+                : (isThinking ? 'hover:bg-violet-50/60' : 'hover:bg-gray-50')
+              }`}
           >
             <span className="text-[10px] text-gray-400 w-4 text-right shrink-0 font-mono">{i + 1}</span>
             <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${STATUS_DOT[span.status] ?? 'bg-gray-300'}`} />
-            <span className={`text-[9px] px-1 py-0.5 rounded font-bold shrink-0 ${ks.bg} ${ks.text}`}>
-              {ks.label}
-            </span>
-            <span className={`text-xs truncate flex-1 ${isErr ? 'text-red-600' : isSelected ? 'text-blue-700 font-medium' : 'text-gray-700'}`}>
-              {span.tool_name || span.agent_name || `round_${span.round_idx}`}
+            {isThinking ? (
+              <span className="text-[9px] px-1 py-0.5 rounded font-bold shrink-0 bg-violet-100 text-violet-700">
+                THINK
+              </span>
+            ) : (
+              <span className={`text-[9px] px-1 py-0.5 rounded font-bold shrink-0 ${ks.bg} ${ks.text}`}>
+                {ks.label}
+              </span>
+            )}
+            <span className={`text-xs truncate flex-1 ${
+              isErr ? 'text-red-600'
+              : isThinking ? (isSelected ? 'text-violet-700 font-medium' : 'text-violet-600')
+              : isSelected ? 'text-blue-700 font-medium'
+              : 'text-gray-700'
+            }`}>
+              {isThinking ? '🧠 思考过程' : (span.tool_name || span.agent_name || `round_${span.round_idx}`)}
             </span>
             <div className="w-16 shrink-0 flex items-center gap-1">
               <div className="flex-1 h-1 bg-gray-100 rounded-full overflow-hidden">
-                <div className={`h-full rounded-full ${isErr ? 'bg-red-300' : 'bg-blue-300'}`} style={{ width: `${barW}%` }} />
+                <div className={`h-full rounded-full ${isErr ? 'bg-red-300' : isThinking ? 'bg-violet-300' : 'bg-blue-300'}`}
+                  style={{ width: `${barW}%` }} />
               </div>
               <span className="text-[9px] text-gray-400 w-8 text-right font-mono shrink-0">{fmtMs(span.duration_ms)}</span>
             </div>
@@ -129,33 +154,54 @@ function SpanTimeline({ spans, selectedIdx, onSelect }: {
   )
 }
 
-// ─── SpanDetail：右侧 Span 详情卡（v2：增加 LLM 完整内容）────────────────────
+// ─── SpanDetail：右侧 Span 详情卡（v3：思考链专属渲染）─────────────────────────
 
 function SpanDetail({ span }: { span: SpanDto }) {
   const ks = KIND_STYLE[span.span_kind] ?? KIND_STYLE.tool
   const isErr = span.status === 'error'
   const isModel = span.span_kind === 'model'
+  // thinking span：tool_name='thinking' 或 tool_result_preview 以 '<think>' 开头
+  const isThinking = isModel && (
+    span.tool_name === 'thinking' ||
+    (span.tool_result_preview ?? '').startsWith('<think>')
+  )
   const [showFullResult, setShowFullResult] = useState(false)
   const [showFullArgs, setShowFullArgs] = useState(false)
+  // 思考链默认展开（内容较重要）
+  const [thinkExpanded, setThinkExpanded] = useState(true)
 
-  // 解析 tool_result（可能含 LLM 完整输出）
+  // 解析 tool_result（可能含 LLM 完整输出 / 思考链）
+  // 思考链是纯文本，不做 JSON 解析
   let fullResult = ''
   let fullArgs = ''
-  try { fullResult = span.tool_result ? tryJson(span.tool_result) : '' } catch { fullResult = span.tool_result ?? '' }
+  try {
+    fullResult = isThinking
+      ? (span.tool_result ?? '')
+      : (span.tool_result ? tryJson(span.tool_result) : '')
+  } catch { fullResult = span.tool_result ?? '' }
   try { fullArgs = span.tool_args ? tryJson(span.tool_args) : '' } catch { fullArgs = span.tool_args ?? '' }
+
+  // 头部标题：thinking span 显示特殊标签
+  const titleText = isThinking
+    ? '🧠 思考过程'
+    : (span.tool_name || span.agent_name || `round_${span.round_idx}`)
 
   return (
     <div className="h-full flex flex-col overflow-hidden">
       {/* 头部 */}
-      <div className="px-4 py-3 border-b border-gray-100 shrink-0">
+      <div className={`px-4 py-3 border-b shrink-0 ${isThinking ? 'border-violet-100 bg-violet-50/40' : 'border-gray-100'}`}>
         <div className="flex items-center gap-2 mb-1">
-          <span className={`text-[10px] px-1.5 py-0.5 rounded font-bold ${ks.bg} ${ks.text}`}>{ks.label}</span>
+          {isThinking ? (
+            <span className="text-[10px] px-1.5 py-0.5 rounded font-bold bg-violet-100 text-violet-700">THINK</span>
+          ) : (
+            <span className={`text-[10px] px-1.5 py-0.5 rounded font-bold ${ks.bg} ${ks.text}`}>{ks.label}</span>
+          )}
           <span className={`w-2 h-2 rounded-full ${STATUS_DOT[span.status] ?? 'bg-gray-300'}`} />
           <span className={`text-xs font-medium ${isErr ? 'text-red-600' : 'text-gray-500'}`}>{span.status}</span>
           <span className="ml-auto text-xs font-mono text-gray-500">{fmtMs(span.duration_ms)}</span>
         </div>
-        <div className="text-sm font-semibold text-gray-800 truncate">
-          {span.tool_name || span.agent_name || `round_${span.round_idx}`}
+        <div className={`text-sm font-semibold truncate ${isThinking ? 'text-violet-800' : 'text-gray-800'}`}>
+          {titleText}
         </div>
         <div className="text-[10px] text-gray-400 mt-0.5 font-mono">
           {fmtTime(span.started_at)} → {fmtTime(span.ended_at)}
@@ -192,8 +238,40 @@ function SpanDetail({ span }: { span: SpanDto }) {
           </section>
         )}
 
-        {/* 参数 Args（工具调用 / LLM prompt 均显示） */}
-        {fullArgs && fullArgs !== '{}' && (
+        {/* ── 思考链专属渲染区 ── */}
+        {isThinking && fullResult && (
+          <section>
+            <div className="flex items-center justify-between mb-1.5">
+              <div className="flex items-center gap-1.5">
+                <span className="text-[10px] font-bold text-violet-500 uppercase tracking-wider">思考链 Reasoning</span>
+                <span className="text-[9px] text-violet-300 bg-violet-50 px-1.5 py-0.5 rounded-full">
+                  {fullResult.length.toLocaleString()} 字符
+                </span>
+              </div>
+              <button
+                onClick={() => setThinkExpanded(v => !v)}
+                className="text-[10px] text-violet-400 hover:text-violet-600 transition-colors flex items-center gap-1"
+              >
+                <span className={`inline-block transition-transform ${thinkExpanded ? 'rotate-90' : ''}`}>▶</span>
+                {thinkExpanded ? '收起' : '展开'}
+              </button>
+            </div>
+            {thinkExpanded && (
+              <div className="relative">
+                {/* 左侧紫色竖线装饰 */}
+                <div className="absolute left-0 top-0 bottom-0 w-0.5 bg-violet-200 rounded-full" />
+                <pre className="pl-3 bg-violet-50/60 border border-violet-100 rounded-lg p-3 text-[11px]
+                  text-violet-900 whitespace-pre-wrap break-words leading-relaxed font-mono
+                  max-h-[480px] overflow-y-auto">
+                  {fullResult}
+                </pre>
+              </div>
+            )}
+          </section>
+        )}
+
+        {/* 参数 Args（工具调用 / LLM prompt 均显示，思考 span 跳过） */}
+        {!isThinking && fullArgs && fullArgs !== '{}' && (
           <section>
             <div className="flex items-center justify-between mb-1">
               <div className="text-[10px] font-bold text-gray-400 uppercase tracking-wider">
@@ -216,8 +294,8 @@ function SpanDetail({ span }: { span: SpanDto }) {
           </section>
         )}
 
-        {/* 返回值 / LLM 完整输出 */}
-        {(span.tool_result_preview || fullResult) && (
+        {/* 返回值 / LLM 完整输出（思考 span 已在上方专属区域展示，此处跳过） */}
+        {!isThinking && (span.tool_result_preview || fullResult) && (
           <section>
             <div className="flex items-center justify-between mb-1">
               <div className="text-[10px] font-bold text-gray-400 uppercase tracking-wider">
@@ -743,13 +821,100 @@ interface PipelineTimelineProps {
   sessionId: string
 }
 
+// ─── 层级选择器组件 ───────────────────────────────────────────────────────────
+function HierarchyFilter({
+  onFilterChange,
+  currentWsId, currentProjId, currentSessId,
+}: {
+  onFilterChange: (wsId: string, projId: string, sessId: string) => void
+  currentWsId: string
+  currentProjId: string
+  currentSessId: string
+}) {
+  const { workspaces } = useWorkspaceStore()
+
+  // 当前选中工作区的项目列表
+  const projects = useMemo(() => {
+    if (!currentWsId) return []
+    return workspaces.find(w => w.id === currentWsId)?.projects ?? []
+  }, [workspaces, currentWsId])
+
+  // 当前选中项目的 session 列表
+  const sessions = useMemo(() => {
+    if (!currentProjId) {
+      // 未选项目时，显示工作区下所有 session
+      if (!currentWsId) return []
+      const ws = workspaces.find(w => w.id === currentWsId)
+      return ws?.sessions ?? []
+    }
+    return projects.find(p => p.id === currentProjId)?.sessions ?? []
+  }, [workspaces, projects, currentWsId, currentProjId])
+
+  return (
+    <div className="px-2 py-2 border-b border-gray-100 bg-blue-50/40 shrink-0 space-y-1">
+      <div className="text-[9px] font-bold text-gray-400 uppercase tracking-wider px-1 mb-1">层级筛选</div>
+      {/* 工作区 */}
+      <select
+        value={currentWsId}
+        onChange={e => onFilterChange(e.target.value, '', '')}
+        className="w-full text-[11px] border border-gray-200 rounded-md px-2 py-1
+                   focus:outline-none focus:ring-1 focus:ring-blue-300 bg-white text-gray-600"
+      >
+        <option value="">🏢 全部工作区</option>
+        {workspaces.map(ws => (
+          <option key={ws.id} value={ws.id}>{ws.name}</option>
+        ))}
+      </select>
+      {/* 项目（选了工作区才显示） */}
+      {currentWsId && (
+        <select
+          value={currentProjId}
+          onChange={e => onFilterChange(currentWsId, e.target.value, '')}
+          className="w-full text-[11px] border border-gray-200 rounded-md px-2 py-1
+                     focus:outline-none focus:ring-1 focus:ring-blue-300 bg-white text-gray-600"
+        >
+          <option value="">📁 全部项目</option>
+          {projects.map(p => (
+            <option key={p.id} value={p.id}>{p.name}</option>
+          ))}
+        </select>
+      )}
+      {/* 话题/Session（选了工作区才显示） */}
+      {currentWsId && (
+        <select
+          value={currentSessId}
+          onChange={e => onFilterChange(currentWsId, currentProjId, e.target.value)}
+          className="w-full text-[11px] border border-gray-200 rounded-md px-2 py-1
+                     focus:outline-none focus:ring-1 focus:ring-blue-300 bg-white text-gray-600"
+        >
+          <option value="">💬 全部话题</option>
+          {sessions.map(s => (
+            <option key={s.id} value={s.id}>{s.title || '新对话'}</option>
+          ))}
+        </select>
+      )}
+      {/* 清除层级筛选 */}
+      {(currentWsId || currentProjId || currentSessId) && (
+        <button
+          onClick={() => onFilterChange('', '', '')}
+          className="w-full text-[10px] text-blue-400 hover:text-blue-600 py-0.5"
+        >
+          ✕ 清除层级筛选
+        </button>
+      )}
+    </div>
+  )
+}
+
 export function PipelineTimeline({ sessionId }: PipelineTimelineProps) {
   const {
     isOpen, traces, spans, loading, loadingMore, error, hasMore,
     selectedTraceId, panelWidth, stats,
     filterDomain, filterKeyword,
+    filterWorkspaceId, filterProjectId, filterSessionId,
     loadTraces, loadMore, loadStats, selectTrace, clearTrace, closePanel,
     setFilterDomain, setFilterKeyword, setPanelWidth,
+    setHierarchyFilter,
     filteredTraces,
   } = useTimelineStore()
 
@@ -762,8 +927,9 @@ export function PipelineTimeline({ sessionId }: PipelineTimelineProps) {
   const prevTraceId = useRef<string | null>(null)
 
   // ── 面板打开时自动加载（含统计） ────────────────────────────────────────────
+  // 优先使用 store 中的层级筛选，无筛选时用当前 sessionId
   useEffect(() => {
-    if (isOpen && sessionId) {
+    if (isOpen) {
       void loadTraces(sessionId)
       void loadStats(sessionId)
     }
@@ -869,8 +1035,8 @@ export function PipelineTimeline({ sessionId }: PipelineTimelineProps) {
             <button
               onClick={() => { void loadTraces(sessionId); void loadStats(sessionId) }}
               disabled={loading}
+              title={filterWorkspaceId ? `当前筛选: ${filterWorkspaceId.slice(0,6)}…` : '刷新全部'}
               className="text-xs text-gray-500 hover:text-gray-700 px-2 py-1 rounded hover:bg-gray-200 transition-colors disabled:opacity-40"
-              title="刷新"
             >
               <span className={loading ? 'animate-spin inline-block' : ''}>↻</span> 刷新
             </button>
@@ -977,7 +1143,15 @@ export function PipelineTimeline({ sessionId }: PipelineTimelineProps) {
             {/* 左栏：Trace 列表 */}
             <div className="w-[220px] shrink-0 border-r border-gray-100 flex flex-col overflow-hidden">
 
-              {/* 搜索 + 筛选 */}
+              {/* 层级筛选器 */}
+              <HierarchyFilter
+                onFilterChange={(wsId, projId, sessId) => setHierarchyFilter(wsId, projId, sessId)}
+                currentWsId={filterWorkspaceId}
+                currentProjId={filterProjectId}
+                currentSessId={filterSessionId}
+              />
+
+              {/* 搜索 + domain 筛选 */}
               <div className="px-2 py-2 border-b border-gray-100 bg-gray-50 shrink-0 space-y-1.5">
                 {/* 搜索框 */}
                 <div className="relative">
@@ -1037,7 +1211,7 @@ export function PipelineTimeline({ sessionId }: PipelineTimelineProps) {
                 {/* 加载更多 */}
                 {hasMore && !filterKeyword && !filterDomain && (
                   <button
-                    onClick={() => loadMore(sessionId)}
+                    onClick={() => loadMore(filterSessionId || sessionId || undefined)}
                     disabled={loadingMore}
                     className="w-full py-2.5 text-[11px] text-blue-500 hover:text-blue-700 hover:bg-blue-50
                                transition-colors border-t border-gray-50 disabled:opacity-40"

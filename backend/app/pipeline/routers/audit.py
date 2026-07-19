@@ -189,12 +189,31 @@ async def list_trace_spans(trace_id: str):
 
 
 @router.get("/traces/search")
-async def search_traces(session_id: str = "", domain: str = "", status: str = "",
-                        keyword: str = "", limit: int = 50, offset: int = 0):
+async def search_traces(
+    session_id: str = "", workspace_id: str = "", project_id: str = "",
+    domain: str = "", status: str = "",
+    keyword: str = "", limit: int = 50, offset: int = 0,
+):
     try:
-        traces = _db.search_traces(session_id=session_id, domain=domain, status=status,
-                                   keyword=keyword, limit=min(limit, 100), offset=offset)
+        traces = _db.search_traces(
+            session_id=session_id, workspace_id=workspace_id, project_id=project_id,
+            domain=domain, status=status,
+            keyword=keyword, limit=min(limit, 100), offset=offset,
+        )
         return {"ok": True, "traces": traces, "total": len(traces)}
+    except Exception as e:
+        raise HTTPException(500, str(e))
+
+
+@router.get("/traces/stats")
+async def get_global_trace_stats(
+    workspace_id: str = "", project_id: str = "", session_id: str = "",
+):
+    """全局/按层级统计：支持 workspace_id / project_id / session_id 过滤。"""
+    try:
+        return {"ok": True, "stats": _db.get_trace_stats(
+            session_id=session_id, workspace_id=workspace_id, project_id=project_id,
+        )}
     except Exception as e:
         raise HTTPException(500, str(e))
 
@@ -296,6 +315,21 @@ async def replay_trace_stream(trace_id: str, mode: str = "fixture"):
                     result = await engine.replay_rerun(session_id=session_id, publish=publish)
                 else:
                     result = await engine.replay_snapshot(session_id=session_id, publish=publish)
+                # 写入 replays 表，让前端 listTraceReplays 能查到历史
+                try:
+                    from app.pipeline.domain import new_id as _new_id
+                    _db.insert_replay({
+                        "replay_id":       _new_id("rpl"),
+                        "source_trace_id": trace_id,
+                        "replay_trace_id": result.get("rep_session_id", "") or result.get("session_id", ""),
+                        "session_id":      session_id,
+                        "mode":            mode,
+                        "status":          result.get("status", "succeeded"),
+                        "diff_summary":    result.get("diff_summary", "")
+                            or f"快照回放 {result.get('steps', 0)} 步",
+                    })
+                except Exception:
+                    pass
                 await queue.put(("replay.done", result))
             except Exception as exc:
                 await queue.put(("replay.error", {"error": str(exc)}))
@@ -444,6 +478,20 @@ async def replay_session_snapshot(session_id: str):
         async def run():
             try:
                 r = await ReplayEngineV2().replay_snapshot(session_id=session_id, publish=pub)
+                # 写入 replays 表，前端 listTraceReplays 可查到历史
+                try:
+                    from app.pipeline.domain import new_id as _new_id
+                    _db.insert_replay({
+                        "replay_id":       _new_id("rpl"),
+                        "source_trace_id": "",          # snapshot 模式无 trace_id，用空串
+                        "replay_trace_id": r.get("session_id", ""),
+                        "session_id":      session_id,
+                        "mode":            "fixture",
+                        "status":          r.get("status", "succeeded"),
+                        "diff_summary":    f"快照回放 {r.get('steps', 0)} 步",
+                    })
+                except Exception:
+                    pass
                 await q.put(("replay.done", r))
             except Exception as exc:
                 await q.put(("replay.error", {"error": str(exc)}))

@@ -1,0 +1,216 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>MiniMax 任务管理测试</title>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body { font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
+         background:#f5f5f7; color:#1d1d1f; }
+  .header { background:linear-gradient(135deg,#30cfd0,#330867); color:#fff;
+            padding:20px 24px; display:flex; align-items:center; gap:12px; }
+  .header h1 { font-size:1.3rem; }
+  .header a { color:#fff; opacity:.8; text-decoration:none; font-size:.85rem; }
+  .header a:hover { opacity:1; }
+  .container { max-width:900px; margin:0 auto; padding:24px; }
+  .panel { background:#fff; border-radius:16px; padding:24px; margin-bottom:16px;
+           box-shadow:0 2px 12px rgba(0,0,0,.06); }
+  .panel h2 { font-size:1.1rem; margin-bottom:16px; display:flex;align-items:center;gap:8px; }
+  .row { display:flex; gap:12px; margin-bottom:12px; flex-wrap:wrap; }
+  .form-group { flex:1; min-width:200px; }
+  .form-group label { display:block; font-size:.8rem; font-weight:600; color:#555; margin-bottom:4px; }
+  .form-group input,.form-group textarea { width:100%; padding:8px 10px;
+    border:1px solid #d1d1d6; border-radius:8px; font-size:.85rem; outline:none; }
+  .form-group input:focus { border-color:#30cfd0; }
+  .btn { padding:10px 24px; border:none; border-radius:10px; font-size:.9rem; font-weight:600;
+         cursor:pointer; transition:all .15s; }
+  .btn-primary { background:#30cfd0; color:#fff; }
+  .btn-primary:hover { background:#2ab8b9; }
+  .btn-secondary { background:#e8e8ed; color:#555; }
+  .btn-secondary:hover { background:#ddd; }
+  .btn-success { background:#2ed573; color:#fff; }
+  .status { font-size:.85rem; color:#666; margin-top:8px; }
+  .task-card { background:#f8f9fa; border-radius:10px; padding:16px; margin-top:12px; }
+  .task-card pre { background:#f0f0f0; padding:12px; border-radius:8px; font-size:.8rem;
+                   overflow:auto; max-height:300px; }
+  .poll-log { background:#1a1a2e; color:#00ff88; font-family:monospace; font-size:.8rem;
+              padding:12px; border-radius:8px; max-height:250px; overflow-y:auto; margin-top:8px; }
+  .step-panel { background:#f8f9fa; border-radius:12px; padding:16px; margin-bottom:16px; }
+  .step-panel h3 { font-size:.95rem; margin-bottom:8px; display:flex;align-items:center;gap:6px; }
+  .quick-link { display:inline-block; padding:6px 14px; background:#e3f2fd; color:#1565c0;
+                border-radius:8px; font-size:.8rem; text-decoration:none; margin:4px; }
+  .quick-link:hover { background:#bbdefb; }
+</style>
+</head>
+<body>
+<div class="header">
+  <a href="/">← 返回</a>
+  <h1>📋 任务管理</h1>
+</div>
+<div class="container">
+  <div class="panel">
+    <h2>🔗 快速跳转</h2>
+    <p style="font-size:.85rem;color:#666;margin-bottom:8px;">直接在对应测试页创建任务，然后回到此处查询状态：</p>
+    <a href="/test/video.html" class="quick-link">🎬 视频生成</a>
+    <a href="/test/tts.html" class="quick-link">🔊 TTS 长文本</a>
+    <a href="/test/music.html" class="quick-link">🎵 音乐生成</a>
+  </div>
+
+  <div class="panel">
+    <h2>🔍 查询任务状态</h2>
+    <div class="step-panel">
+      <h3>1️⃣ 视频任务查询</h3>
+      <div class="form-group">
+        <label>Task ID</label>
+        <input id="videoTaskId" placeholder="输入视频任务 Task ID">
+      </div>
+      <div class="row">
+        <button class="btn btn-secondary" onclick="queryVideoTask()">查询</button>
+        <button class="btn btn-primary" onclick="pollVideoTask()">开始轮询</button>
+      </div>
+    </div>
+
+    <div class="step-panel">
+      <h3>2️⃣ 长文本 TTS 任务查询</h3>
+      <div class="form-group">
+        <label>Task ID</label>
+        <input id="ttsTaskId" placeholder="输入长文本 TTS Task ID">
+      </div>
+      <button class="btn btn-secondary" onclick="queryTTSTask()">查询状态</button>
+    </div>
+
+    <div class="step-panel">
+      <h3>3️⃣ 通用任务查询</h3>
+      <div class="form-group">
+        <label>Task ID</label>
+        <input id="genericTaskId" placeholder="输入 Task ID（自动识别类型）">
+      </div>
+      <button class="btn btn-secondary" onclick="queryGenericTask()">查询</button>
+    </div>
+  </div>
+
+  <div class="panel" id="resultPanel" style="display:none;">
+    <h2>📊 查询结果</h2>
+    <div class="status" id="resultLabel"></div>
+    <div class="task-card" id="resultContent"></div>
+  </div>
+
+  <div class="panel" id="pollPanel" style="display:none;">
+    <h2>⏳ 轮询日志</h2>
+    <button class="btn btn-danger" onclick="stopPolling()" id="stopPollBtn" style="display:none;">⏹️ 停止轮询</button>
+    <div class="poll-log" id="pollLog"></div>
+  </div>
+</div>
+
+<script>
+const API = '';
+let pollTimer = null;
+let pollActive = true;
+
+async function queryVideoTask() {
+  const taskId = document.getElementById('videoTaskId').value.trim();
+  if (!taskId) { alert('请输入 Task ID'); return; }
+  await queryTask(`/api/v1/videos/query/${taskId}`, '视频任务');
+}
+
+async function queryTTSTask() {
+  const taskId = document.getElementById('ttsTaskId').value.trim();
+  if (!taskId) { alert('请输入 Task ID'); return; }
+  await queryTask(`/api/v1/speech/long-text/${taskId}`, '长文本 TTS');
+}
+
+async function queryGenericTask() {
+  const taskId = document.getElementById('genericTaskId').value.trim();
+  if (!taskId) { alert('请输入 Task ID'); return; }
+  await queryTask(`/api/v1/jobs/${taskId}`, '通用任务');
+}
+
+async function queryTask(url, label) {
+  const panel = document.getElementById('resultPanel');
+  const content = document.getElementById('resultContent');
+  const labelEl = document.getElementById('resultLabel');
+  panel.style.display = 'block';
+  labelEl.textContent = `⏳ 查询 ${label}...`;
+  content.innerHTML = '';
+  try {
+    const resp = await fetch(`${API}${url}`);
+    const data = await resp.json();
+    labelEl.textContent = `✅ ${label} 查询完成`;
+    content.innerHTML = `<pre>${JSON.stringify(data, null, 2)}</pre>`;
+
+    // 检查是否有可播放的媒体
+    const fileId = data.file_id || data.data?.file_id;
+    if (fileId) {
+      content.innerHTML += `
+        <div style="margin-top:12px;padding:12px;background:#e8f5e9;border-radius:8px;">
+          <p><strong>✅ 有结果文件!</strong> file_id: ${fileId}</p>
+          <button class="btn btn-success" onclick="window.open('${API}/api/v1/media/${fileId}','_blank')">▶️ 播放/查看</button>
+          <button class="btn btn-secondary" onclick="window.open('${API}/api/v1/files/${fileId}/content','_blank')">📥 下载</button>
+        </div>`;
+    }
+  } catch (err) {
+    labelEl.textContent = '❌ ' + err.message;
+    content.innerHTML = `<p style="color:red;">${err.message}</p>`;
+  }
+}
+
+async function pollVideoTask() {
+  const taskId = document.getElementById('videoTaskId').value.trim();
+  if (!taskId) { alert('请输入 Task ID'); return; }
+
+  const pollPanel = document.getElementById('pollPanel');
+  const pollLog = document.getElementById('pollLog');
+  const stopBtn = document.getElementById('stopPollBtn');
+  pollPanel.style.display = 'block';
+  pollLog.textContent = '';
+  stopBtn.style.display = 'inline-block';
+  pollActive = true;
+
+  for (let i = 0; i < 60 && pollActive; i++) {
+    pollLog.textContent += `[${i+1}] 查询中...\n`;
+    pollLog.scrollTop = pollLog.scrollHeight;
+    try {
+      const resp = await fetch(`${API}/api/v1/videos/query/${taskId}`);
+      const data = await resp.json();
+      const status = data.status || data.data?.status || 'unknown';
+      pollLog.textContent += `  → 状态: ${status}\n`;
+
+      const fileId = data.file_id || data.data?.file_id;
+      if (fileId) {
+        pollLog.textContent += `  ✅ 完成! file_id: ${fileId}\n`;
+        // 显示结果
+        const resultPanel = document.getElementById('resultPanel');
+        const content = document.getElementById('resultContent');
+        resultPanel.style.display = 'block';
+        document.getElementById('resultLabel').textContent = '✅ 任务完成！';
+        content.innerHTML = `
+          <div style="margin-bottom:12px;">
+            <video controls src="${API}/api/v1/media/${fileId}" style="max-width:100%;border-radius:8px;"></video>
+          </div>
+          <pre>${JSON.stringify(data, null, 2)}</pre>`;
+        stopBtn.style.display = 'none';
+        return;
+      }
+      if (['fail','failed','expired','cancelled','canceled'].includes(status)) {
+        pollLog.textContent += `  ❌ 任务失败\n`;
+        stopBtn.style.display = 'none';
+        return;
+      }
+    } catch(e) {
+      pollLog.textContent += `  ⚠️ ${e.message}\n`;
+    }
+    await new Promise(r => setTimeout(r, 3000));
+  }
+  pollLog.textContent += `⏰ 轮询结束\n`;
+  stopBtn.style.display = 'none';
+}
+
+function stopPolling() {
+  pollActive = false;
+  document.getElementById('stopPollBtn').style.display = 'none';
+  document.getElementById('pollLog').textContent += '⏹️ 已手动停止\n';
+}
+</script>
+</body>
+</html>

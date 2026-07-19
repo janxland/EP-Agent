@@ -294,6 +294,8 @@ class UniversalChatRunner:
             workspace_id=workspace_id,
             audio_chat_fn=audio_chat_fn,
             project_id=project_id,
+            initial_domain=domain,
+            initial_domain_confidence=float(route.get("confidence", 0.8)),
         )
 
     async def _dispatch_v6(
@@ -315,6 +317,8 @@ class UniversalChatRunner:
         workspace_id: str = "",
         audio_chat_fn=None,
         project_id: str = "",
+        initial_domain: str = "",
+        initial_domain_confidence: float = 0.8,
     ) -> dict:
         """
         v6 分发：走真实 langgraph 包图引擎（graph_engine_v2.py）。
@@ -349,6 +353,8 @@ class UniversalChatRunner:
             "workspace_id":              workspace_id,
             "project_id":                project_id,
             "role_id":                   role_id or "",
+            "initial_domain":            initial_domain,
+            "initial_domain_confidence": initial_domain_confidence,
             "message":                   message,
             "attachment_name":           attachment_name,
             "attachment_content":        attachment_content,

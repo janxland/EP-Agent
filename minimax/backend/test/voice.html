@@ -1,0 +1,280 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>MiniMax 音色克隆测试</title>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body { font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
+         background:#f5f5f7; color:#1d1d1f; }
+  .header { background:linear-gradient(135deg,#fa709a,#fee140); color:#fff;
+            padding:20px 24px; display:flex; align-items:center; gap:12px; }
+  .header h1 { font-size:1.3rem; }
+  .header a { color:#fff; opacity:.8; text-decoration:none; font-size:.85rem; }
+  .header a:hover { opacity:1; }
+  .container { max-width:900px; margin:0 auto; padding:24px; }
+  .panel { background:#fff; border-radius:16px; padding:24px; margin-bottom:16px;
+           box-shadow:0 2px 12px rgba(0,0,0,.06); }
+  .panel h2 { font-size:1.1rem; margin-bottom:16px; display:flex;align-items:center;gap:8px; }
+  .row { display:flex; gap:12px; margin-bottom:12px; flex-wrap:wrap; }
+  .form-group { flex:1; min-width:160px; }
+  .form-group label { display:block; font-size:.8rem; font-weight:600; color:#555; margin-bottom:4px; }
+  .form-group input,.form-group select,.form-group textarea { width:100%; padding:8px 10px;
+    border:1px solid #d1d1d6; border-radius:8px; font-size:.85rem; outline:none; }
+  .form-group textarea { resize:vertical; min-height:80px; font-size:.9rem; }
+  .form-group input:focus,.form-group textarea:focus { border-color:#fa709a; }
+  .btn { padding:10px 24px; border:none; border-radius:10px; font-size:.9rem; font-weight:600;
+         cursor:pointer; transition:all .15s; }
+  .btn-primary { background:#fa709a; color:#fff; }
+  .btn-primary:hover { background:#e85f86; }
+  .btn-primary:disabled { opacity:.5; cursor:not-allowed; }
+  .btn-secondary { background:#e8e8ed; color:#555; }
+  .btn-secondary:hover { background:#ddd; }
+  .btn-success { background:#2ed573; color:#fff; }
+  .btn-danger { background:#ff4757; color:#fff; }
+  .step { display:flex;align-items:flex-start;gap:16px;padding:16px;margin-bottom:12px;
+          background:#f8f9fa;border-radius:12px; }
+  .step-num { width:32px;height:32px;background:#fa709a;color:#fff;border-radius:50%;
+              display:flex;align-items:center;justify-content:center;font-weight:700;flex-shrink:0; }
+  .step-content { flex:1; }
+  .step-content h3 { font-size:.95rem;margin-bottom:8px; }
+  .status { font-size:.85rem; color:#666; margin-top:8px; }
+  .result-card { background:#f8f9fa; border-radius:10px; padding:16px; margin-top:12px; }
+  .result-card audio { width:100%; margin-top:8px; }
+  .voice-list { max-height:300px;overflow-y:auto; }
+  .voice-item { padding:10px 12px; border-bottom:1px solid #eee; display:flex;
+                justify-content:space-between; align-items:center; }
+  .voice-item:last-child { border-bottom:none; }
+  .tag { display:inline-block;font-size:.7rem;padding:2px 6px;border-radius:6px;
+         background:#e3f2fd;color:#1565c0;margin-left:6px; }
+</style>
+</head>
+<body>
+<div class="header">
+  <a href="/">← 返回</a>
+  <h1>🎤 音色克隆</h1>
+</div>
+<div class="container">
+  <div class="panel">
+    <h2>📋 可用音色</h2>
+    <button class="btn btn-secondary" onclick="listAllVoices()">🔄 刷新音色列表</button>
+    <div class="voice-list" id="voiceList"></div>
+  </div>
+
+  <div class="panel">
+    <h2>🔊 音色克隆（三步流程）</h2>
+
+    <div class="step">
+      <div class="step-num">1</div>
+      <div class="step-content">
+        <h3>上传音频样本</h3>
+        <p style="font-size:.8rem;color:#666;margin-bottom:8px;">上传 10秒-5分钟的语音样本（.mp3/.wav/.m4a, ≤20MB）</p>
+        <input type="file" id="cloneFile" accept="audio/*">
+        <button class="btn btn-secondary" style="margin-top:8px;" onclick="uploadCloneFile()">📤 上传</button>
+        <div class="status" id="uploadStatus"></div>
+      </div>
+    </div>
+
+    <div class="step">
+      <div class="step-num">2</div>
+      <div class="step-content">
+        <h3>创建音色克隆</h3>
+        <div class="row">
+          <div class="form-group">
+            <label>语音 ID</label>
+            <input id="voiceId" value="my_custom_voice_1" placeholder="自定义 voice_id">
+          </div>
+          <div class="form-group">
+            <label>上传文件 ID</label>
+            <input id="cloneFileId" placeholder="步骤1上传后获取的 file_id">
+          </div>
+        </div>
+        <button class="btn btn-primary" onclick="cloneVoice()">🎤 创建克隆</button>
+        <div class="status" id="cloneStatus"></div>
+      </div>
+    </div>
+
+    <div class="step">
+      <div class="step-num">3</div>
+      <div class="step-content">
+        <h3>试听合成</h3>
+        <div class="form-group">
+          <label>音色 ID</label>
+          <input id="testVoiceId" placeholder="输入要试听的 voice_id">
+        </div>
+        <div class="form-group">
+          <label>测试文本</label>
+          <textarea id="testText" rows="2">你好，我是通过 MiniMax 音色克隆创建的声音。</textarea>
+        </div>
+        <button class="btn btn-success" onclick="testVoice()">🔊 试听</button>
+        <div class="status" id="testStatus"></div>
+        <div class="result-card" id="testPlayer" style="display:none;">
+          <audio id="testAudio" controls></audio>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="panel">
+    <h2>🎨 音色设计</h2>
+    <p style="font-size:.85rem;color:#666;margin-bottom:12px;">通过文字描述来设计全新的 AI 音色。</p>
+    <div class="form-group">
+      <label>音色描述</label>
+      <textarea id="designPrompt" rows="2" placeholder="描述想要的音色...">一个年轻女性的声音，温柔甜美，略带俏皮</textarea>
+    </div>
+    <div class="row">
+      <div class="form-group">
+        <label>预览文本</label>
+        <input id="designPreviewText" value="你好，我是通过 AI 设计的语音助手。" placeholder="预览文本">
+      </div>
+      <div class="form-group">
+        <label>自定义 Voice ID（可选）</label>
+        <input id="designVoiceId" placeholder="留空由系统自动生成">
+      </div>
+    </div>
+    <button class="btn btn-primary" onclick="designVoice()">🎨 设计音色</button>
+    <div class="status" id="designStatus"></div>
+  </div>
+</div>
+
+<script>
+const API = '';
+
+async function listAllVoices() {
+  const list = document.getElementById('voiceList');
+  list.innerHTML = '<p style="color:#999;">加载中...</p>';
+  try {
+    const resp = await fetch(`${API}/api/v1/voices?voice_type=all`);
+    const data = await resp.json();
+    const voices = data.voices || data.data?.voices || [];
+    if (voices.length === 0) {
+      list.innerHTML = '<p style="color:#999;">暂无音色</p>';
+      return;
+    }
+    list.innerHTML = voices.map(v => {
+      const vid = v.voice_id || v.name || '未知';
+      const type = v.type || '';
+      return `<div class="voice-item">
+        <div>
+          <strong>${vid}</strong>
+          ${type ? `<span class="tag">${type}</span>` : ''}
+        </div>
+        <div>
+          <button class="btn btn-secondary" style="padding:4px 12px;font-size:.8rem;" onclick="useVoiceId('${vid}')">使用</button>
+          <button class="btn btn-secondary" style="padding:4px 12px;font-size:.8rem;" onclick="testVoiceId('${vid}')">试听</button>
+        </div>
+      </div>`;
+    }).join('');
+  } catch (err) {
+    list.innerHTML = `<p style="color:red;">❌ ${err.message}</p>`;
+  }
+}
+
+function useVoiceId(id) {
+  document.getElementById('testVoiceId').value = id;
+  document.querySelector('.panel:nth-child(3)').scrollIntoView({ behavior: 'smooth' });
+}
+
+function testVoiceId(id) {
+  document.getElementById('testVoiceId').value = id;
+  testVoice();
+}
+
+async function uploadCloneFile() {
+  const file = document.getElementById('cloneFile').files[0];
+  if (!file) { document.getElementById('uploadStatus').textContent = '⚠️ 请选择音频文件'; return; }
+  document.getElementById('uploadStatus').textContent = '⏳ 上传中...';
+  try {
+    const formData = new FormData();
+    formData.append('file', file);
+    formData.append('purpose', 'voice_clone');
+    const resp = await fetch(`${API}/api/v1/files/upload?purpose=voice_clone`, {
+      method: 'POST',
+      body: formData,
+    });
+    const data = await resp.json();
+    const fileId = data.file_id || data.data?.file_id;
+    if (fileId) {
+      document.getElementById('cloneFileId').value = fileId;
+      document.getElementById('uploadStatus').textContent = `✅ 上传成功！file_id: ${fileId}`;
+    } else {
+      document.getElementById('uploadStatus').textContent = `⚠️ 响应: ${JSON.stringify(data)}`;
+    }
+  } catch (err) {
+    document.getElementById('uploadStatus').textContent = '❌ ' + err.message;
+  }
+}
+
+async function cloneVoice() {
+  const status = document.getElementById('cloneStatus');
+  const voiceId = document.getElementById('voiceId').value.trim();
+  const fileId = document.getElementById('cloneFileId').value.trim();
+  if (!voiceId || !fileId) { status.textContent = '⚠️ 请填写 voice_id 和 file_id'; return; }
+  status.textContent = '⏳ 创建音色克隆...';
+  try {
+    const resp = await fetch(`${API}/api/v1/voice-clones`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ voice_id: voiceId, file_id: fileId }),
+    });
+    const data = await resp.json();
+    status.textContent = data.status_code !== undefined && data.status_code !== 0
+      ? `❌ 错误: ${JSON.stringify(data)}`
+      : `✅ 克隆创建成功！voice_id: ${voiceId}`;
+  } catch (err) {
+    status.textContent = '❌ ' + err.message;
+  }
+}
+
+async function testVoice() {
+  const status = document.getElementById('testStatus');
+  const player = document.getElementById('testPlayer');
+  const audio = document.getElementById('testAudio');
+  const voiceId = document.getElementById('testVoiceId').value.trim() || 'male-qn-tianye';
+  const text = document.getElementById('testText').value.trim() || '你好';
+  status.textContent = '⏳ 合成中...';
+  player.style.display = 'none';
+  try {
+    const resp = await fetch(`${API}/api/v1/speech/synthesize`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model: 'speech-2.8-hd', text, voice_id: voiceId, stream: false }),
+    });
+    const blob = await resp.blob();
+    audio.src = URL.createObjectURL(blob);
+    player.style.display = 'block';
+    audio.play();
+    status.textContent = `✅ 合成完成 (${(blob.size/1024).toFixed(1)} KB)`;
+  } catch (err) {
+    status.textContent = '❌ ' + err.message;
+  }
+}
+
+async function designVoice() {
+  const status = document.getElementById('designStatus');
+  const prompt = document.getElementById('designPrompt').value.trim();
+  if (!prompt) { status.textContent = '⚠️ 请输入音色描述'; return; }
+  status.textContent = '⏳ 设计音色中...';
+  try {
+    const resp = await fetch(`${API}/api/v1/voices/design`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        prompt,
+        preview_text: document.getElementById('designPreviewText').value || '你好',
+        voice_id: document.getElementById('designVoiceId').value.trim() || undefined,
+      }),
+    });
+    const data = await resp.json();
+    status.textContent = `✅ 音色设计完成！响应: ${JSON.stringify(data)}`;
+  } catch (err) {
+    status.textContent = '❌ ' + err.message;
+  }
+}
+
+// 初始加载音色列表
+listAllVoices();
+</script>
+</body>
+</html>

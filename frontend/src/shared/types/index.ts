@@ -105,6 +105,8 @@ export interface AudioTurn {
   model: string
   audio_url: string
   audio_b64: string
+  /** 本地工作区路径（如 audio/xxx.mp3），通过 /api/files/ 可永久访问，优先于 audio_url */
+  workspace_path?: string
   duration_ms: number
   summary: string
   suggestions: string[]

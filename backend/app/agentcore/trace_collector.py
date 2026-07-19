@@ -507,8 +507,12 @@ class TraceCollector:
             finish  = payload.get("finish_reason", "stop")
             model   = payload.get("model", self._current_model) or ""
 
+            # 累积的思考链文本
+            reasoning_text = "".join(self._round_reasoning.get(ri, []))
+
             idx = self._model_span_map.get(ri)
             if idx is not None and idx < len(self.spans):
+                # 正常路径：已有 model span，直接回填
                 span = self.spans[idx]
                 span["ended_at"]      = ended
                 span["duration_ms"]   = _calc_duration_ms(span["started_at"], ended)
@@ -519,11 +523,44 @@ class TraceCollector:
                 if model:
                     span["model"] = model
                 # v1.5：把累积的思考链写入 model span
-                reasoning_text = "".join(self._round_reasoning.get(ri, []))
                 if reasoning_text:
-                    span["tool_result"] = reasoning_text  # v1.5：完整保留思考链，不截断
+                    span["tool_result"] = reasoning_text
                     preview = reasoning_text[:193]
                     span["tool_result_preview"] = "<think>" + preview + ("…" if len(reasoning_text) > 193 else "")
+            elif reasoning_text:
+                # v1.6 兜底：create_agent 等场景未经 pipeline.step(stream_turn_id) 触发
+                # 导致 _model_span_map 为空，但思考链已累积 → 自动补建一个 thinking span
+                # 这样无论哪个 agent 产生了思考内容，审计中都能看到
+                preview = reasoning_text[:193]
+                thinking_span = {
+                    "span_id":            _gen_span_id(),
+                    "trace_id":           self.trace_id,
+                    "parent_span_id":     "",
+                    "agent_name":         payload.get("agent_name", ""),
+                    "span_kind":          "model",
+                    "round_idx":          ri,
+                    "step_idx":           self.step_idx,
+                    "tool_name":          "thinking",   # 特殊标记，前端可识别
+                    "tool_args":          "{}",
+                    "tool_args_hash":     "",
+                    "tool_result":        reasoning_text,   # 完整思考链
+                    "tool_result_preview": "<think>" + preview + ("…" if len(reasoning_text) > 193 else ""),
+                    "attempt":            1,
+                    "model":              model,
+                    "temperature":        0.0,
+                    "input_tokens":       in_tok,
+                    "output_tokens":      out_tok,
+                    "finish_reason":      finish,
+                    "started_at":         self.started_at,  # 兜底用 trace 开始时间
+                    "ended_at":           ended,
+                    "duration_ms":        0,
+                    "status":             "ok",
+                    "error_msg":          "",
+                    "call_id":            f"thinking_{ri}",
+                }
+                self._model_span_map[ri] = len(self.spans)
+                self.spans.append(thinking_span)
+                self.step_idx += 1
 
     # ── 结束 Trace，写入 SQLite ───────────────────────────────────────────────
 

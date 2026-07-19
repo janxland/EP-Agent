@@ -1,0 +1,10 @@
+'use client'
+
+import { Menu, PanelRight, Settings2, ShieldCheck } from 'lucide-react'
+import { useConsoleStore } from '@/state/console-store'
+
+export function ConsoleHeader({ gatewayUrl, onOpenSettings }: { gatewayUrl: string; onOpenSettings: () => void }) {
+  const toggleResource = useConsoleStore((state) => state.toggleResource)
+  const toggleInspector = useConsoleStore((state) => state.toggleInspector)
+  return <header className="console-header flex h-14 items-center justify-between border-b border-zinc-200 bg-white px-3 sm:px-5"><div className="flex min-w-0 items-center gap-3"><button type="button" onClick={toggleResource} className="mobile-only rounded-lg border border-zinc-200 p-2 text-zinc-600" aria-label="打开资源栏"><Menu className="h-4 w-4" /></button><div className="min-w-0"><div className="flex items-center gap-2"><h1 className="truncate text-sm font-bold text-zinc-950 sm:text-base">MiniMax 全模型控制台</h1><span className="hidden rounded-full border border-zinc-200 bg-zinc-50 px-2 py-0.5 text-[10px] font-medium text-zinc-500 sm:inline">Gateway-first</span></div><p className="hidden text-xs text-zinc-400 sm:block">Text · Speech · Voice · Music · Image · Video</p></div></div><div className="flex items-center gap-2"><div className={`hidden items-center gap-1.5 rounded-full px-2.5 py-1 text-xs md:flex ${gatewayUrl ? 'bg-emerald-50 text-emerald-700' : 'bg-orange-50 text-orange-700'}`}><ShieldCheck className="h-3.5 w-3.5" />{gatewayUrl ? '网关已配置' : '需要配置网关'}</div><button type="button" onClick={onOpenSettings} className="inline-flex items-center gap-2 rounded-xl border border-zinc-200 bg-white px-3 py-2 text-xs font-medium text-zinc-700 transition hover:border-orange-200 hover:bg-orange-50 hover:text-orange-700"><Settings2 className="h-4 w-4" /><span className="hidden sm:inline">网关设置</span></button><button type="button" onClick={toggleInspector} className="mobile-only rounded-lg border border-zinc-200 p-2 text-zinc-600" aria-label="打开检查器"><PanelRight className="h-4 w-4" /></button></div></header>
+}

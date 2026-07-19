@@ -1,9 +1,9 @@
 'use client'
 
-import { useState, useCallback, useEffect } from 'react'
+import { useState, useCallback, useEffect, useRef } from 'react'
 import type { AudioTurn, AudioProvider } from '@/shared/types'
-import { AudioDomain } from '@/shared/types'
-import { chatAudio, clearAudioHistory, getAudioHistory } from '@/shared/lib/api'
+import { chatAudioStream, clearAudioHistory, getAudioHistory } from '@/shared/lib/api'
+import type { AudioStreamCallbacks } from '@/shared/lib/api'
 import { useScoreStore } from '@/entities/session/store'
 import { AudioHistoryList } from './AudioHistoryList'
 import { AudioChatInput } from './AudioChatInput'
@@ -26,14 +26,20 @@ const PROVIDER_LABELS: Record<string, string> = {
   suno: 'Suno AI',
 }
 
+// ─── 流式进度步骤 ─────────────────────────────────────────────────────────────
+
+interface StreamStep {
+  id: string
+  text: string
+  status: 'running' | 'succeeded' | 'failed' | ''
+}
+
 // ─── 工具函数 ─────────────────────────────────────────────────────────────────
 
-/** 从 ABC 谱提取标题，无则返回 null */
 function extractTitle(abc: string): string | null {
   return abc.match(/^T:\s*(.+)$/m)?.[1]?.trim() ?? null
 }
 
-/** 判断消息是否为音色克隆意图（粗粒度前端预判，仅用于 UI 提示） */
 function isVoiceCloneIntent(message: string): boolean {
   return /克隆|音色|声音|voice.*clone|clone.*voice/i.test(message)
 }
@@ -41,7 +47,7 @@ function isVoiceCloneIntent(message: string): boolean {
 // ─── 组件 ─────────────────────────────────────────────────────────────────────
 
 export function AudioPanel() {
-  const { sessionId, abcNotation, pipelineLogs } = useScoreStore()
+  const { sessionId, abcNotation } = useScoreStore()
 
   const [history, setHistory] = useState<AudioTurn[]>([])
   const [currentTurn, setCurrentTurn] = useState<number | null>(null)
@@ -49,7 +55,13 @@ export function AudioPanel() {
   const [error, setError] = useState('')
   const [provider, setProvider] = useState<'auto' | 'minimax' | 'suno'>('auto')
 
-  // ── 恢复历史：组件 mount 或 sessionId 切换时从后端拉取音频历史 ──────────────
+  // 流式进度步骤列表
+  const [streamSteps, setStreamSteps] = useState<StreamStep[]>([])
+
+  // 用于取消流式请求
+  const abortCtrlRef = useRef<AbortController | null>(null)
+
+  // ── 恢复历史 ─────────────────────────────────────────────────────────────────
   useEffect(() => {
     if (!sessionId) return
     getAudioHistory(sessionId)
@@ -59,51 +71,95 @@ export function AudioPanel() {
           setCurrentTurn(turns[turns.length - 1].turn)
         }
       })
-      .catch(() => { /* 静默失败：历史拉取失败不影响新建对话 */ })
+      .catch(() => {})
   }, [sessionId])
 
   const lastTurn = history[history.length - 1] ?? null
   const lastSuggestions = lastTurn?.suggestions ?? []
   const isFirstTime = history.length === 0
 
-  // ── 核心发送逻辑 ──────────────────────────────────────────────────────────────
+  // ── 更新/追加步骤 ─────────────────────────────────────────────────────────────
+  const upsertStep = useCallback((id: string, text: string, status: StreamStep['status']) => {
+    setStreamSteps((prev) => {
+      const idx = prev.findIndex((s) => s.id === id)
+      if (idx >= 0) {
+        const next = [...prev]
+        next[idx] = { id, text, status }
+        return next
+      }
+      return [...prev, { id, text, status }]
+    })
+  }, [])
+
+  // ── 核心发送逻辑（流式版）────────────────────────────────────────────────────
   const handleSend = useCallback(async (message: string, attachment?: AudioAttachment) => {
     if (!sessionId) {
-      // 音色克隆不需要谱子，通用提示
       setError('请先创建或加载一个会话')
       return
     }
+
+    // 取消上一次未完成的请求
+    abortCtrlRef.current?.abort()
+    abortCtrlRef.current = null
+
     setIsGenerating(true)
     setError('')
+    setStreamSteps([])
 
-    try {
-      // attachment.b64 透传给后端，Agent 据此判断 voice_clone 意图
-      const audioB64 = attachment?.b64
-      const result = await chatAudio(sessionId, message, provider, audioB64)
+    const audioB64 = attachment?.b64 ?? ''
 
-      const newTurn: AudioTurn = {
-        ...result,
-        turn: history.length + 1,
-        user_message: message,
-      }
-      setHistory((prev) => [...prev, newTurn])
-      setCurrentTurn(newTurn.turn)
-    } catch (e: unknown) {
-      const msg = e instanceof Error ? e.message : '生成失败，请检查 API Key 配置'
-      setError(
-        msg.includes('API_KEY') || msg.includes('未配置')
-          ? 'API Key 未配置，请在后端设置 MINIMAX_API_KEY 或 SUNO_API_KEY 环境变量'
-          : msg
-      )
-    } finally {
-      setIsGenerating(false)
+    const callbacks: AudioStreamCallbacks = {
+      onStep({ step, status, text }) {
+        upsertStep(step, text, status as StreamStep['status'])
+      },
+      onToolCall({ call_id, tool, status, result_preview }) {
+        const label =
+          status === 'running'   ? `调用工具：${tool}` :
+          status === 'succeeded' ? `${tool} 完成${result_preview ? `：${result_preview.slice(0, 40)}` : ''}` :
+                                   `${tool} 失败`
+        upsertStep(
+          `tool_${call_id}`,
+          label,
+          status === 'running' ? 'running' : status === 'succeeded' ? 'succeeded' : 'failed',
+        )
+      },
+      onResult(result) {
+        const newTurn: AudioTurn = {
+          ...result,
+          // 优先用后端权威 turn 值，回退到本地计数（防止 result.turn 为 0 或未定义）
+          turn: result.turn || history.length + 1,
+          user_message: result.user_message || message,
+        }
+        setHistory((prev) => [...prev, newTurn])
+        setCurrentTurn(newTurn.turn)
+        setIsGenerating(false)
+        setStreamSteps([])
+      },
+      onError(errMsg) {
+        const msg = errMsg ?? '生成失败，请检查 API Key 配置'
+        setError(
+          msg.includes('API_KEY') || msg.includes('未配置')
+            ? 'API Key 未配置，请在后端设置 MINIMAX_API_KEY 或 SUNO_API_KEY 环境变量'
+            : msg,
+        )
+        setIsGenerating(false)
+        setStreamSteps([])
+      },
     }
-  }, [sessionId, provider, history.length])
+
+    const ac = chatAudioStream(sessionId, message, provider, audioB64, callbacks)
+    abortCtrlRef.current = ac
+  }, [sessionId, provider, history.length, upsertStep])
+
+  // 组件卸载时取消请求
+  useEffect(() => {
+    return () => { abortCtrlRef.current?.abort() }
+  }, [])
 
   // ── 清空历史 ──────────────────────────────────────────────────────────────────
   const handleClearHistory = useCallback(async () => {
     if (sessionId) {
-      try { await clearAudioHistory(sessionId) } catch { /* 静默失败 */ }
+      try { await clearAudioHistory(sessionId) } catch {}
     }
     setHistory([])
     setCurrentTurn(null)
@@ -125,12 +181,13 @@ export function AudioPanel() {
     handleSend(fullPrompt)
   }, [abcNotation, handleSend])
 
-  // ── 生成中文案：区分音乐生成 vs 音色克隆 ─────────────────────────────────────
-  // 区分音色克隆场景的文案
-  const lastDomain      = history[history.length - 1]?.domain ?? ''
+  // ── 生成中文案 ────────────────────────────────────────────────────────────────
   const isVoiceClone    = isVoiceCloneIntent(history[history.length - 1]?.user_message ?? '')
   const generatingLabel = isVoiceClone ? '正在克隆音色...' : isFirstTime ? 'AI 正在生成音乐...' : 'AI 正在处理...'
   const generatingEta   = isVoiceClone ? '约 10-30 秒' : provider === 'suno' ? '约 1-3 分钟' : '约 30-60 秒'
+
+  // 取最近 5 条步骤展示
+  const visibleSteps = streamSteps.slice(-5)
 
   return (
     <div className="p-4 space-y-4">
@@ -204,30 +261,45 @@ export function AudioPanel() {
           currentTurn={currentTurn}
           onPlayTurn={handlePlayTurn}
           onClearHistory={handleClearHistory}
+          sessionId={sessionId ?? undefined}
         />
       )}
 
-      {/* ── 生成中：实时步骤日志 ── */}
+      {/* ── 生成中：流式实时步骤进度 ── */}
       {isGenerating && (
         <div className="bg-orange-50 border border-orange-100 rounded-xl px-4 py-3 space-y-2">
+          {/* 标题行 */}
           <div className="flex items-center gap-2">
             <span className="w-4 h-4 border-2 border-orange-400 border-t-transparent rounded-full animate-spin shrink-0" />
             <p className="text-xs font-medium text-orange-600">{generatingLabel}</p>
             <span className="text-xs text-orange-400 ml-auto">{generatingEta}</span>
           </div>
-          {pipelineLogs.length > 0 && (
+
+          {/* 流式步骤列表 */}
+          {visibleSteps.length > 0 && (
             <div className="space-y-1 pl-6">
-              {pipelineLogs.slice(-4).map((log) => (
-                <div key={log.id} className="flex items-center gap-1.5 text-xs">
-                  {log.status === 'running'   && <span className="w-2 h-2 border border-orange-400 border-t-transparent rounded-full animate-spin shrink-0" />}
-                  {log.status === 'succeeded' && <span className="text-green-500 shrink-0">✓</span>}
-                  {log.status === 'failed'    && <span className="text-red-400 shrink-0">✗</span>}
-                  {!log.status               && <span className="text-orange-300 shrink-0">·</span>}
+              {visibleSteps.map((step) => (
+                <div key={step.id} className="flex items-start gap-1.5 text-xs">
+                  {step.status === 'running' && (
+                    <span className="w-2 h-2 mt-0.5 border border-orange-400 border-t-transparent rounded-full animate-spin shrink-0" />
+                  )}
+                  {step.status === 'succeeded' && (
+                    <span className="text-green-500 shrink-0 mt-0.5">✓</span>
+                  )}
+                  {step.status === 'failed' && (
+                    <span className="text-red-400 shrink-0 mt-0.5">✗</span>
+                  )}
+                  {step.status === '' && (
+                    <span className="text-orange-300 shrink-0 mt-0.5">·</span>
+                  )}
                   <span className={
-                    log.status === 'running' ? 'text-orange-500' :
-                    log.status === 'failed'  ? 'text-red-400'    :
+                    step.status === 'running'   ? 'text-orange-500' :
+                    step.status === 'failed'    ? 'text-red-400'    :
+                    step.status === 'succeeded' ? 'text-green-600'  :
                     'text-orange-400'
-                  }>{log.text}</span>
+                  }>
+                    {step.text}
+                  </span>
                 </div>
               ))}
             </div>
@@ -242,7 +314,7 @@ export function AudioPanel() {
         </div>
       )}
 
-      {/* ── 对话输入框（始终显示，allowAttachment 开启附件槽） ── */}
+      {/* ── 对话输入框 ── */}
       <AudioChatInput
         disabled={!sessionId}
         isGenerating={isGenerating}

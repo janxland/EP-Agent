@@ -1,0 +1,90 @@
+{
+  "schema_version": "1.0",
+  "project": "minimax",
+  "checked_at": "2026-07-17T19:21:00+08:00",
+  "summary": {
+    "passed": 12,
+    "total": 12,
+    "ok": true,
+    "error_count": 0
+  },
+  "checks": [
+    {
+      "name": "required_files",
+      "ok": true,
+      "detail": "全部关键文件存在",
+      "severity": "error"
+    },
+    {
+      "name": "pyproject_parse",
+      "ok": true,
+      "detail": "package=minimax-api version=0.1.0",
+      "severity": "error"
+    },
+    {
+      "name": "python_ast",
+      "ok": true,
+      "detail": "22 个 Python 文件 AST 解析通过",
+      "severity": "error"
+    },
+    {
+      "name": "python_imports",
+      "ok": true,
+      "detail": "公开客户端与 7 个资源模块导入通过",
+      "severity": "error"
+    },
+    {
+      "name": "direct_minimax_host",
+      "ok": true,
+      "detail": "未发现",
+      "severity": "error"
+    },
+    {
+      "name": "api_key_env_in_frontend",
+      "ok": true,
+      "detail": "未发现",
+      "severity": "error"
+    },
+    {
+      "name": "bearer_header_in_frontend",
+      "ok": true,
+      "detail": "未发现",
+      "severity": "error"
+    },
+    {
+      "name": "html_inline_event_handler",
+      "ok": true,
+      "detail": "未发现",
+      "severity": "error"
+    },
+    {
+      "name": "local_storage_scope",
+      "ok": true,
+      "detail": "仅发现 3 处，限定为网关地址偏好",
+      "severity": "warning"
+    },
+    {
+      "name": "frontend_local_imports",
+      "ok": true,
+      "detail": "本地 @/ 导入均可解析",
+      "severity": "error"
+    },
+    {
+      "name": "gateway_contract_paths",
+      "ok": true,
+      "detail": "网关契约覆盖 Text/Speech/Voice/Media/Files/Jobs",
+      "severity": "error"
+    },
+    {
+      "name": "frontend_domain_modules",
+      "ok": true,
+      "detail": "6 个领域 API 模块存在",
+      "severity": "error"
+    }
+  ],
+  "limitations": [
+    "当前环境未安装 React/Next.js 项目依赖，因此 npm type-check/build 需在 npm install 后复验。",
+    "真实 MiniMax 账号、区域权限、WebSocket TTS、Video Agent 和安全网关联调仍需部署环境验证。",
+    "SDK 的 WAV 时长校验依赖 Python wave 模块；当前运行时若无该模块，会在校验时返回明确错误，不影响 SDK 其他能力导入。"
+  ]
+}

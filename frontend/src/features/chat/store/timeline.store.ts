@@ -1,17 +1,22 @@
 /**
- * Timeline Store — 审计链路状态管理 v2.1
+ * Timeline Store — 审计链路状态管理 v3.0
  *
- * 新增：
- *   - filterDomain / filterKeyword：前端过滤（无需重新请求）
- *   - loadMore：分页加载更多 trace
- *   - autoRefresh：对话完成后自动刷新（监听 window 事件）
- *   - filteredTraces：派生过滤结果（computed-like selector）
- *   - stats: TraceStats 统计摘要
- *   - startReplay 完成后派发 ep:replay-done 事件，ReplayPanel 自动刷新历史
- *   - replayResult 使用完整 ReplayResponse 类型（含 fixture_hit_rate / token_diff 等）
+ * v3.0 新增：
+ *   - 三层层级筛选：filterWorkspaceId / filterProjectId / filterSessionId
+ *   - 全局查询模式：loadTraces 改为调用 searchTracesGlobal，支持跨对话查看历史审计
+ *   - loadStats 改为调用 getGlobalTraceStats，统计摘要随层级筛选变化
+ *   - 切换对话时不再自动清空 traces，保持跨 session 可见
  */
 import { create } from 'zustand'
-import { listSessionTraces, getTraceDetail, replayTrace, replayTraceStream, getSessionTraceStats } from '@/shared/lib/api'
+import {
+  listSessionTraces,
+  searchTracesGlobal,
+  getTraceDetail,
+  replayTrace,
+  replayTraceStream,
+  getSessionTraceStats,
+  getGlobalTraceStats,
+} from '@/shared/lib/api'
 import type { TraceDto, SpanDto } from '@/shared/types/trace.types'
 import type { ReplayResponse, ReplayStepEvent } from '@/shared/lib/api'
 
@@ -43,7 +48,14 @@ interface TimelineState {
   hasMore: boolean
   // ── 统计摘要 ──────────────────────────────────────────────────
   stats: TraceStats | null
-  // ── 过滤 ──────────────────────────────────────────────────────
+  // ── 三层层级筛选 ──────────────────────────────────────────────
+  /** 工作区筛选（'' = 全部） */
+  filterWorkspaceId: string
+  /** 项目筛选（'' = 全部） */
+  filterProjectId: string
+  /** 话题/Session 筛选（'' = 全部） */
+  filterSessionId: string
+  // ── 内容过滤 ──────────────────────────────────────────────────
   filterDomain: string          // '' = 全部
   filterKeyword: string         // 搜索关键词（匹配 user_message）
   // ── 重播状态 ──────────────────────────────────────────────────
@@ -65,14 +77,22 @@ interface TimelineState {
   openPanel: () => void
   closePanel: () => void
   togglePanel: () => void
-  loadTraces: (sessionId: string, merge?: boolean) => Promise<void>
-  loadMore: (sessionId: string) => Promise<void>
-  loadStats: (sessionId: string) => Promise<void>
+  /**
+   * 加载 trace 列表。
+   * - 若设置了层级筛选（workspace/project/session），调用全局搜索接口
+   * - merge=true：增量追加（对话完成后自动刷新用）
+   * - 无任何筛选时也支持全量加载（管理员视角）
+   */
+  loadTraces: (sessionId?: string, merge?: boolean) => Promise<void>
+  loadMore: (sessionId?: string) => Promise<void>
+  loadStats: (sessionId?: string) => Promise<void>
   selectTrace: (traceId: string) => Promise<void>
   clearTrace: () => void
   startReplay: (traceId: string, mode?: 'fixture' | 'live') => void
   clearReplay: () => void
   abortReplay: () => void
+  /** 设置三层层级筛选，自动触发重新加载 */
+  setHierarchyFilter: (wsId: string, projId: string, sessId: string) => void
   setFilterDomain: (domain: string) => void
   setFilterKeyword: (kw: string) => void
   setPanelWidth: (w: number) => void
@@ -89,6 +109,9 @@ export const useTimelineStore = create<TimelineState>((set, get) => ({
   loadedCount: 0,
   hasMore: false,
   stats: null,
+  filterWorkspaceId: '',
+  filterProjectId: '',
+  filterSessionId: '',
   filterDomain: '',
   filterKeyword: '',
   replayingTraceId: null,
@@ -110,6 +133,13 @@ export const useTimelineStore = create<TimelineState>((set, get) => ({
   setFilterDomain: (domain) => set({ filterDomain: domain }),
   setFilterKeyword: (kw) => set({ filterKeyword: kw }),
 
+  /** 设置三层层级筛选，并立即重新加载 */
+  setHierarchyFilter: (wsId, projId, sessId) => {
+    set({ filterWorkspaceId: wsId, filterProjectId: projId, filterSessionId: sessId })
+    void get().loadTraces(sessId || undefined)
+    void get().loadStats(sessId || undefined)
+  },
+
   /** 派生：前端过滤（domain + keyword），避免重复网络请求 */
   filteredTraces: () => {
     const { traces, filterDomain, filterKeyword } = get()
@@ -128,14 +158,34 @@ export const useTimelineStore = create<TimelineState>((set, get) => ({
     return result
   },
 
-  loadTraces: async (sessionId: string, merge = false) => {
+  loadTraces: async (sessionId?: string, merge = false) => {
+    const { filterWorkspaceId, filterProjectId, filterSessionId } = get()
+    // 优先使用 store 中的层级筛选，sessionId 参数作为兜底
+    const effectiveSessionId = filterSessionId || sessionId || ''
+    const effectiveWorkspaceId = filterWorkspaceId
+    const effectiveProjectId = filterProjectId
+
     set({ loading: true, error: null })
     try {
-      const res = await listSessionTraces(sessionId, PAGE_SIZE)
-      const incoming = res.traces ?? []
+      let incoming: TraceDto[]
+
+      if (effectiveWorkspaceId || effectiveProjectId || effectiveSessionId) {
+        // 有层级筛选：调用全局搜索接口
+        const res = await searchTracesGlobal({
+          workspace_id: effectiveWorkspaceId || undefined,
+          project_id:   effectiveProjectId   || undefined,
+          session_id:   effectiveSessionId   || undefined,
+          limit: PAGE_SIZE,
+          offset: 0,
+        })
+        incoming = res.traces ?? []
+      } else {
+        // 无筛选：加载最新 PAGE_SIZE 条（全局视图）
+        const res = await searchTracesGlobal({ limit: PAGE_SIZE, offset: 0 })
+        incoming = res.traces ?? []
+      }
+
       set((s) => {
-        // merge=true（对话完成后自动刷新）：增量合并，已有 trace 保留，新增的追加到头部
-        // merge=false（首次打开/手动刷新）：全量替换
         if (merge && s.traces.length > 0) {
           const existingIds = new Set(s.traces.map(t => t.trace_id))
           const newOnes = incoming.filter(t => !existingIds.has(t.trace_id))
@@ -159,22 +209,34 @@ export const useTimelineStore = create<TimelineState>((set, get) => ({
     }
   },
 
-  loadStats: async (sessionId: string) => {
+  loadStats: async (sessionId?: string) => {
+    const { filterWorkspaceId, filterProjectId, filterSessionId } = get()
+    const effectiveSessionId = filterSessionId || sessionId || ''
     try {
-      const res = await getSessionTraceStats(sessionId)
+      const res = await getGlobalTraceStats({
+        workspace_id: filterWorkspaceId || undefined,
+        project_id:   filterProjectId   || undefined,
+        session_id:   effectiveSessionId || undefined,
+      })
       if (res.ok) set({ stats: res.stats ?? null })
     } catch {
       // 统计失败不影响主流程，静默忽略
     }
   },
 
-  loadMore: async (sessionId: string) => {
-    const { loadedCount, loadingMore } = get()
+  loadMore: async (sessionId?: string) => {
+    const { loadedCount, loadingMore, filterWorkspaceId, filterProjectId, filterSessionId } = get()
     if (loadingMore) return
     set({ loadingMore: true })
+    const effectiveSessionId = filterSessionId || sessionId || ''
     try {
-      // 利用 offset 加载下一页
-      const res = await listSessionTraces(sessionId, PAGE_SIZE, loadedCount)
+      const res = await searchTracesGlobal({
+        workspace_id: filterWorkspaceId || undefined,
+        project_id:   filterProjectId   || undefined,
+        session_id:   effectiveSessionId || undefined,
+        limit: PAGE_SIZE,
+        offset: loadedCount,
+      })
       const newTraces = res.traces ?? []
       set((s) => ({
         traces: [...s.traces, ...newTraces],
@@ -203,15 +265,12 @@ export const useTimelineStore = create<TimelineState>((set, get) => ({
   clearTrace: () => set({ selectedTraceId: null, spans: [] }),
 
   startReplay: (traceId: string, mode: 'fixture' | 'live' = 'fixture') => {
-    // 先中止上一次未完成的重放（如有）
     if (_replayAC) {
       _replayAC.abort()
       _replayAC = null
     }
-    // 清理上次结果，初始化进度
     set({ replayingTraceId: traceId, replayResult: null, replaySteps: [], replayCurrentStep: '初始化重放…', error: null })
 
-    // 保存 AbortController 引用，供 abortReplay() 真正中止网络请求
     _replayAC = replayTraceStream(traceId, mode, {
       onStep: (evt) => {
         set((s) => ({
@@ -222,7 +281,9 @@ export const useTimelineStore = create<TimelineState>((set, get) => ({
       onDone: (result) => {
         _replayAC = null
         set({ replayResult: result, replayingTraceId: null, replayCurrentStep: null })
-        window.dispatchEvent(new CustomEvent('ep:replay-done', { detail: { traceId, replayId: result.replay_id } }))
+        // BUG-FIX: 后端 replay.done 帧无 replay_id 字段，用 session_id 或 trace_id 作为标识
+        const replayId = result.replay_id ?? result.session_id ?? traceId
+        window.dispatchEvent(new CustomEvent('ep:replay-done', { detail: { traceId, replayId } }))
       },
       onError: (error) => {
         _replayAC = null
@@ -234,7 +295,6 @@ export const useTimelineStore = create<TimelineState>((set, get) => ({
   clearReplay: () => set({ replayResult: null, replayingTraceId: null, replaySteps: [], replayCurrentStep: null }),
 
   abortReplay: () => {
-    // 真正中止 SSE 网络请求
     if (_replayAC) {
       _replayAC.abort()
       _replayAC = null
@@ -246,6 +306,7 @@ export const useTimelineStore = create<TimelineState>((set, get) => ({
     traces: [], selectedTraceId: null, spans: [],
     loadedCount: 0, hasMore: false,
     stats: null,
+    filterWorkspaceId: '', filterProjectId: '', filterSessionId: '',
     filterDomain: '', filterKeyword: '',
     replayingTraceId: null, replayResult: null,
     replaySteps: [], replayCurrentStep: null,

@@ -1,0 +1,244 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>MiniMax 流式聊天测试</title>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body { font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
+         background:#f5f5f7; color:#1d1d1f; min-height:100vh; }
+  .header { background:linear-gradient(135deg,#667eea,#764ba2); color:#fff;
+            padding:20px 24px; display:flex; align-items:center; gap:12px; }
+  .header h1 { font-size:1.3rem; }
+  .header a { color:#fff; opacity:.8; text-decoration:none; font-size:.85rem; }
+  .header a:hover { opacity:1; }
+  .container { display:flex; height:calc(100vh - 64px); }
+  .sidebar { width:300px; background:#fff; border-right:1px solid #e5e5e7;
+             padding:16px; overflow-y:auto; display:flex; flex-direction:column; gap:12px; }
+  .sidebar label { font-size:.8rem; font-weight:600; color:#555; }
+  .sidebar select,.sidebar textarea,.sidebar input { width:100%; padding:8px 10px;
+    border:1px solid #d1d1d6; border-radius:8px; font-size:.85rem;
+    background:#fff; outline:none; }
+  .sidebar select:focus,.sidebar textarea:focus,.sidebar input:focus { border-color:#667eea; }
+  .sidebar textarea { resize:vertical; min-height:80px; font-family:monospace; font-size:.8rem; }
+  .sidebar button { padding:10px 16px; border:none; border-radius:8px; font-size:.85rem;
+    cursor:pointer; font-weight:600; transition:all .15s; }
+  .btn-primary { background:#667eea; color:#fff; }
+  .btn-primary:hover { background:#5a6fd6; }
+  .btn-secondary { background:#e8e8ed; color:#555; }
+  .btn-secondary:hover { background:#ddd; }
+  .btn-danger { background:#ff4757; color:#fff; }
+  .btn-danger:hover { background:#e83949; }
+  .btn-row { display:flex; gap:8px; }
+  .btn-row button { flex:1; }
+  .chat-area { flex:1; display:flex; flex-direction:column; padding:0; }
+  .messages { flex:1; overflow-y:auto; padding:20px; display:flex; flex-direction:column; gap:12px; }
+  .msg { max-width:85%; padding:12px 16px; border-radius:14px; line-height:1.6; font-size:.9rem;
+         animation:fadeIn .2s ease; }
+  .msg.user { align-self:flex-end; background:#667eea; color:#fff;
+              border-bottom-right-radius:4px; }
+  .msg.assistant { align-self:flex-start; background:#fff; color:#1d1d1f;
+                   border-bottom-left-radius:4px; box-shadow:0 1px 4px rgba(0,0,0,.06); }
+  .msg.system { align-self:center; background:#f0f0f0; color:#666; font-size:.8rem;
+                border-radius:8px; }
+  .msg .time { font-size:.7rem; opacity:.6; margin-top:4px; }
+  .msg.assistant .time { color:#999; }
+  .input-bar { display:flex; gap:8px; padding:12px 20px; background:#fff;
+               border-top:1px solid #e5e5e7; }
+  .input-bar input { flex:1; padding:10px 14px; border:1px solid #d1d1d6; border-radius:10px;
+                     font-size:.9rem; outline:none; }
+  .input-bar input:focus { border-color:#667eea; }
+  .input-bar button { padding:10px 20px; border:none; border-radius:10px;
+    background:#667eea; color:#fff; font-weight:600; cursor:pointer; font-size:.9rem; }
+  .input-bar button:disabled { opacity:.5; cursor:not-allowed; }
+  .thinking { align-self:flex-start; display:flex; gap:4px; padding:12px 16px; }
+  .dot { width:8px; height:8px; background:#ddd; border-radius:50%; animation:bounce 1.2s infinite; }
+  .dot:nth-child(2) { animation-delay:.2s; }
+  .dot:nth-child(3) { animation-delay:.4s; }
+  @keyframes bounce { 0%,60%,100%{transform:translateY(0)} 30%{transform:translateY(-6px)} }
+  @keyframes fadeIn { from{opacity:0;transform:translateY(6px)} to{opacity:1;transform:translateY(0)} }
+</style>
+</head>
+<body>
+<div class="header">
+  <a href="/">← 返回</a>
+  <h1>💬 流式文本聊天</h1>
+</div>
+<div class="container">
+  <div class="sidebar">
+    <label>模型</label>
+    <select id="model">
+      <option value="MiniMax-M3">MiniMax-M3</option>
+      <option value="MiniMax-M2.5">MiniMax-M2.5</option>
+    </select>
+    <label>System Prompt</label>
+    <textarea id="systemPrompt" placeholder="输入系统提示词...">你是一个有用的AI助手。</textarea>
+    <label>Temperature</label>
+    <input type="range" id="temperature" min="0" max="2" step="0.1" value="0.8">
+    <span id="tempValue">0.8</span>
+    <label>Max Tokens</label>
+    <input type="number" id="maxTokens" value="2048" min="1" max="8192">
+    <div class="btn-row">
+      <button class="btn-secondary" onclick="clearChat()">🗑️ 清空</button>
+      <button class="btn-secondary" onclick="copyChat()">📋 复制</button>
+    </div>
+  </div>
+  <div class="chat-area">
+    <div class="messages" id="messages"></div>
+    <div class="input-bar">
+      <input id="userInput" placeholder="输入消息..." onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();sendMessage()}">
+      <button id="sendBtn" onclick="sendMessage()">发送</button>
+      <button id="stopBtn" onclick="stopStream()" style="display:none;background:#ff4757;">停止</button>
+    </div>
+  </div>
+</div>
+<script>
+const API = '';
+let abortController = null;
+
+document.getElementById('temperature').oninput = function() {
+  document.getElementById('tempValue').textContent = this.value;
+};
+
+function addMessage(role, content, isStreaming = false) {
+  const div = document.createElement('div');
+  div.className = `msg ${role}`;
+  if (isStreaming) div.id = 'streaming-msg';
+  div.innerHTML = content + (role === 'assistant' && !isStreaming ? `<div class="time">${new Date().toLocaleTimeString()}</div>` : '');
+  if (isStreaming) {
+    const existing = document.getElementById('streaming-msg');
+    if (existing) existing.remove();
+  }
+  document.getElementById('messages').appendChild(div);
+  div.scrollIntoView({ behavior: 'smooth' });
+  return div;
+}
+
+function showThinking() {
+  const div = document.createElement('div');
+  div.className = 'thinking';
+  div.id = 'thinking';
+  div.innerHTML = '<div class="dot"></div><div class="dot"></div><div class="dot"></div>';
+  document.getElementById('messages').appendChild(div);
+  div.scrollIntoView({ behavior: 'smooth' });
+}
+
+function hideThinking() {
+  const el = document.getElementById('thinking');
+  if (el) el.remove();
+}
+
+async function sendMessage() {
+  const input = document.getElementById('userInput');
+  const text = input.value.trim();
+  if (!text) return;
+
+  addMessage('user', text);
+  input.value = '';
+  showThinking();
+  document.getElementById('sendBtn').disabled = true;
+  document.getElementById('stopBtn').style.display = 'inline-block';
+
+  const systemPrompt = document.getElementById('systemPrompt').value.trim();
+  const messages = [];
+  if (systemPrompt) messages.push({ role: 'system', content: systemPrompt });
+  // 从聊天历史获取上下文（最后10条）
+  document.querySelectorAll('.msg:not(.system)').forEach(el => {
+    if (el.id === 'thinking') return;
+    const role = el.classList.contains('user') ? 'user' : 'assistant';
+    const content = el.textContent.replace(el.querySelector('.time')?.textContent || '', '').trim();
+    if (content) messages.push({ role, content });
+  });
+
+  abortController = new AbortController();
+
+  try {
+    hideThinking();
+    const msgDiv = addMessage('assistant', '', true);
+
+    const resp = await fetch(`${API}/api/v1/text/chat`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: document.getElementById('model').value,
+        messages,
+        temperature: parseFloat(document.getElementById('temperature').value),
+        max_tokens: parseInt(document.getElementById('maxTokens').value),
+        stream: true,
+      }),
+      signal: abortController.signal,
+    });
+
+    const reader = resp.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    let fullContent = '';
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n');
+      buffer = lines.pop() || '';
+
+      for (const line of lines) {
+        if (!line.startsWith('data: ')) continue;
+        const data = line.slice(6).trim();
+        if (data === '[DONE]') continue;
+        try {
+          const parsed = JSON.parse(data);
+          // 支持多种 delta 格式
+          const delta = parsed.choices?.[0]?.delta?.content
+                     || parsed.choices?.[0]?.delta?.text
+                     || parsed.content
+                     || '';
+          if (delta) {
+            fullContent += delta;
+            msgDiv.textContent = fullContent;
+            msgDiv.scrollIntoView({ behavior: 'smooth' });
+          }
+        } catch(e) { /* 忽略解析错误 */ }
+      }
+    }
+    // 完成后添加时间戳
+    if (msgDiv.textContent) {
+      const time = document.createElement('div');
+      time.className = 'time';
+      time.textContent = new Date().toLocaleTimeString();
+      msgDiv.appendChild(time);
+    }
+  } catch (err) {
+    if (err.name === 'AbortError') {
+      addMessage('system', '⏹️ 已停止生成');
+    } else {
+      addMessage('system', '❌ 错误: ' + err.message);
+    }
+  } finally {
+    document.getElementById('sendBtn').disabled = false;
+    document.getElementById('stopBtn').style.display = 'none';
+    abortController = null;
+  }
+}
+
+function stopStream() {
+  if (abortController) {
+    abortController.abort();
+    abortController = null;
+  }
+}
+
+function clearChat() {
+  document.getElementById('messages').innerHTML = '';
+}
+
+function copyChat() {
+  const texts = Array.from(document.querySelectorAll('.msg:not(.system)')).map(el => {
+    const role = el.classList.contains('user') ? '你' : 'AI';
+    return `${role}: ${el.textContent.replace(el.querySelector('.time')?.textContent || '', '').trim()}`;
+  }).join('\n\n');
+  navigator.clipboard.writeText(texts).then(() => alert('已复制对话内容'));
+}
+</script>
+</body>
+</html>

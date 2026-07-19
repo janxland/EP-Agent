@@ -78,8 +78,9 @@ _AUDIO_AGENT_SYSTEM_TEMPLATE = """你是专业的 AI 音乐生成助手，通过
 工作原则：
 1. 首次生成（audio_generate 域）：
    a. 若有 ABC 谱 → 【一次性同时调用】abc_to_audio_prompt 和 generate_lyrics_minimax（两者完全独立，并行执行节省时间）
-   b. 拿到 prompt 和 lyrics 后，一次调用生成工具（generate_audio_minimax 或 generate_audio_suno）
+   b. 拿到 prompt 和 lyrics 后，一次调用生成工具（generate_audio_minimax 或 generate_audio_suno），【必须】把 generate_lyrics_minimax 返回的 lyrics 字段传入 lyrics 参数，不能遗漏！
    c. 生成完成，输出 JSON 结果。全程最多 3 次 LLM 推理轮次。
+   d. 若无 ABC 谱 → 先调用 generate_lyrics_minimax 生成歌词，再把歌词传给 generate_audio_minimax（lyrics 参数必填）
 2. 迭代改进（audio_iterate 域）：【一次性同时调用】evolve_audio_prompt，拿到结果后调用生成工具
 3. 翻唱（audio_cover 域）：直接调用 generate_cover_minimax
 4. 音色克隆（voice_clone 域）：
@@ -205,6 +206,9 @@ class AudioChatRunner:
         _audio_logger = _log.getLogger("ep_agent.audio_runner")
 
         latest_result: dict = {}
+        # 工具间数据传递缓存（防止 LLM 遗漏传参）
+        _cached_lyrics: str = ""        # generate_lyrics_minimax 的输出，自动注入给 generate_audio_minimax
+        _cached_abc_prompt: str = ""    # abc_to_audio_prompt 的输出 prompt，自动注入给生成工具
 
         for _round in range(MAX_TOOL_ROUNDS):
             response = await complete_with_tools(messages, tools, temperature=0.3)
@@ -249,11 +253,26 @@ class AudioChatRunner:
             # 用 asyncio.gather 并发执行，消除串行等待。
             async def _exec_one_tool(tc: dict) -> tuple[dict, str, str | None]:
                 """执行单个工具调用，返回 (tc, result_str, error_msg)"""
+                nonlocal _cached_lyrics, _cached_abc_prompt
                 tool_name = tc["function"]["name"]
                 try:
                     arguments = json.loads(tc["function"]["arguments"])
                 except json.JSONDecodeError:
                     arguments = {}
+
+                # ── 工具层强制参数注入（防止 LLM 遗漏传参）────────────────
+                # 1. abc_to_audio_prompt 缺 abc 参数时自动补入
+                if tool_name == "abc_to_audio_prompt" and not arguments.get("abc") and current_abc:
+                    arguments["abc"] = current_abc
+                    _audio_logger.info("[AudioRunner] 自动注入 abc_to_audio_prompt.abc（LLM遗漏）")
+                # 2. generate_audio_minimax 缺 lyrics 时，用缓存的歌词自动补入
+                if tool_name == "generate_audio_minimax" and not arguments.get("lyrics") and _cached_lyrics:
+                    arguments["lyrics"] = _cached_lyrics
+                    _audio_logger.info("[AudioRunner] 自动注入 generate_audio_minimax.lyrics（LLM遗漏）")
+                # 3. generate_audio_minimax 缺 prompt 时，用 abc_to_audio_prompt 结果补入
+                if tool_name == "generate_audio_minimax" and not arguments.get("prompt") and _cached_abc_prompt:
+                    arguments["prompt"] = _cached_abc_prompt
+                    _audio_logger.info("[AudioRunner] 自动注入 generate_audio_minimax.prompt（LLM遗漏）")
 
                 await publish("tool.call", {
                     "call_id": tc["id"],
@@ -310,6 +329,18 @@ class AudioChatRunner:
                                 session_id, tool_name, _e
                             )
                     continue
+
+                # 捕获工具结果到缓存（供后续工具自动注入）
+                if tool_name == "generate_lyrics_minimax" and isinstance(result, dict):
+                    _lyrics = result.get("lyrics", "")
+                    if _lyrics:
+                        _cached_lyrics = _lyrics
+                        _audio_logger.info("[AudioRunner] 缓存歌词 %d 字符", len(_lyrics))
+                if tool_name == "abc_to_audio_prompt" and isinstance(result, dict):
+                    _abc_prompt = result.get("prompt", "")
+                    if _abc_prompt:
+                        _cached_abc_prompt = _abc_prompt
+                        _audio_logger.info("[AudioRunner] 缓存 abc_prompt: %s", _abc_prompt[:60])
 
                 # 捕获生成结果
                 if tool_name in ("generate_audio_minimax", "generate_audio_suno",
@@ -388,6 +419,7 @@ class AudioChatRunner:
             "suggestions":  latest_result.get("suggestions", []),
             # voice_clone 域专属字段
             "voice_id":     latest_result.get("voice_id", ""),
+            "demo_audio":   latest_result.get("demo_audio", ""),
         }
 
         # 计算 diff（迭代时）

@@ -1,0 +1,268 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>MiniMax 视频生成测试</title>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body { font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
+         background:#f5f5f7; color:#1d1d1f; }
+  .header { background:linear-gradient(135deg,#4facfe,#00f2fe); color:#fff;
+            padding:20px 24px; display:flex; align-items:center; gap:12px; }
+  .header h1 { font-size:1.3rem; }
+  .header a { color:#fff; opacity:.8; text-decoration:none; font-size:.85rem; }
+  .header a:hover { opacity:1; }
+  .container { max-width:900px; margin:0 auto; padding:24px; }
+  .panel { background:#fff; border-radius:16px; padding:24px; margin-bottom:16px;
+           box-shadow:0 2px 12px rgba(0,0,0,.06); }
+  .panel h2 { font-size:1.1rem; margin-bottom:16px; display:flex;align-items:center;gap:8px; }
+  .row { display:flex; gap:12px; margin-bottom:12px; flex-wrap:wrap; }
+  .form-group { flex:1; min-width:160px; }
+  .form-group label { display:block; font-size:.8rem; font-weight:600; color:#555; margin-bottom:4px; }
+  .form-group input,.form-group select,.form-group textarea { width:100%; padding:8px 10px;
+    border:1px solid #d1d1d6; border-radius:8px; font-size:.85rem; outline:none; }
+  .form-group textarea { resize:vertical; min-height:80px; font-size:.9rem; }
+  .form-group textarea:focus { border-color:#4facfe; }
+  .btn { padding:10px 24px; border:none; border-radius:10px; font-size:.9rem; font-weight:600;
+         cursor:pointer; transition:all .15s; }
+  .btn-primary { background:#4facfe; color:#fff; }
+  .btn-primary:hover { background:#3e9ae8; }
+  .btn-primary:disabled { opacity:.5; cursor:not-allowed; }
+  .btn-secondary { background:#e8e8ed; color:#555; }
+  .btn-success { background:#2ed573; color:#fff; }
+  .tab-bar { display:flex; gap:4px; margin-bottom:16px; }
+  .tab { padding:8px 16px; border-radius:8px 8px 0 0; cursor:pointer; font-size:.85rem;
+         background:#e8e8ed; color:#666; border:none; font-weight:500; }
+  .tab.active { background:#fff; color:#4facfe; font-weight:600; }
+  .result-card { background:#f8f9fa; border-radius:10px; padding:16px; margin-top:12px; }
+  .result-card video { width:100%; border-radius:8px; }
+  .result-card .info { padding:8px 0; font-size:.85rem; color:#666; }
+  .status { font-size:.85rem; color:#666; margin-top:8px; }
+  .loading { display:flex;align-items:center;gap:8px;padding:12px; }
+  .spinner { width:20px;height:20px;border:2px solid #f0f0f0;border-top-color:#4facfe;
+             border-radius:50%;animation:spin .8s linear infinite; }
+  @keyframes spin { to{transform:rotate(360deg)} }
+  .poll-log { background:#1a1a2e; color:#00ff88; font-family:monospace; font-size:.8rem;
+              padding:12px; border-radius:8px; max-height:200px; overflow-y:auto; margin-top:8px; }
+</style>
+</head>
+<body>
+<div class="header">
+  <a href="/">← 返回</a>
+  <h1>🎬 视频生成</h1>
+</div>
+<div class="container">
+  <div class="tab-bar">
+    <button class="tab active" onclick="switchTab('text2vid',this)">文生视频</button>
+    <button class="tab" onclick="switchTab('img2vid',this)">图生视频</button>
+  </div>
+
+  <div class="panel" id="tabText2Vid">
+    <h2>📝 文生视频</h2>
+    <div class="row">
+      <div class="form-group">
+        <label>模型</label>
+        <select id="t2vModel">
+          <option value="MiniMax-Hailuo-2.3">MiniMax-Hailuo-2.3</option>
+          <option value="MiniMax-Hailuo-02">MiniMax-Hailuo-02</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label>分辨率</label>
+        <select id="t2vResolution">
+          <option value="">默认</option>
+          <option value="720p">720p</option>
+          <option value="1080p">1080p</option>
+        </select>
+      </div>
+    </div>
+    <div class="form-group">
+      <label>提示词</label>
+      <textarea id="t2vPrompt" rows="3" placeholder="描述想要的视频内容...">一只白色的小狗在春天的草地上奔跑，阳光明媚，花朵盛开，电影级画质</textarea>
+    </div>
+    <button class="btn btn-primary" onclick="textToVideo()">🎬 生成视频</button>
+    <div class="status" id="t2vStatus"></div>
+    <div id="t2vResult"></div>
+  </div>
+
+  <div class="panel" id="tabImg2Vid" style="display:none;">
+    <h2>🖼️→🎬 图生视频</h2>
+    <div class="form-group">
+      <label>参考图像 URL</label>
+      <input id="i2vImageUrl" placeholder="输入图片 URL">
+    </div>
+    <div class="form-group">
+      <label>或上传图像</label>
+      <input type="file" id="i2vFile" accept="image/*">
+    </div>
+    <div class="form-group">
+      <label>动作描述</label>
+      <textarea id="i2vPrompt" rows="3" placeholder="描述图像应该产生的动作...">海浪轻轻拍打海岸，云朵缓慢移动</textarea>
+    </div>
+    <button class="btn btn-primary" onclick="imageToVideo()">🎬 生成视频</button>
+    <div class="status" id="i2vStatus"></div>
+    <div id="i2vResult"></div>
+  </div>
+
+  <div class="panel">
+    <h2>🔍 查询视频任务</h2>
+    <div class="form-group">
+      <label>Task ID</label>
+      <input id="queryTaskId" placeholder="输入 Task ID">
+    </div>
+    <button class="btn btn-secondary" onclick="queryVideo()">查询状态</button>
+    <button class="btn btn-secondary" onclick="startPoll()">开始轮询</button>
+    <div class="status" id="queryStatus"></div>
+    <div id="queryResult"></div>
+  </div>
+</div>
+
+<script>
+const API = '';
+
+function switchTab(tab, btn) {
+  document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+  btn.classList.add('active');
+  document.getElementById('tabText2Vid').style.display = tab === 'text2vid' ? 'block' : 'none';
+  document.getElementById('tabImg2Vid').style.display = tab === 'img2vid' ? 'block' : 'none';
+}
+
+async function textToVideo() {
+  const status = document.getElementById('t2vStatus');
+  const result = document.getElementById('t2vResult');
+  status.innerHTML = '<div class="loading"><div class="spinner"></div>🎬 提交视频生成任务...</div>';
+  result.innerHTML = '';
+  try {
+    const resp = await fetch(`${API}/api/v1/videos/generations`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: document.getElementById('t2vModel').value,
+        prompt: document.getElementById('t2vPrompt').value.trim(),
+        resolution: document.getElementById('t2vResolution').value || undefined,
+      }),
+    });
+    const data = await resp.json();
+    const taskId = data.task_id || data.id;
+    if (taskId) {
+      status.textContent = `✅ 任务已提交！Task ID: ${taskId}`;
+      result.innerHTML = `<div class="result-card"><p>任务已提交，开始轮询...</p></div>`;
+      pollVideoTask(taskId, status, result);
+    } else {
+      result.innerHTML = `<pre style="font-size:.8rem;">${JSON.stringify(data, null, 2)}</pre>`;
+      status.textContent = '⚠️ 未获取到 task_id';
+    }
+  } catch (err) {
+    status.textContent = '❌ ' + err.message;
+  }
+}
+
+async function imageToVideo() {
+  const status = document.getElementById('i2vStatus');
+  const result = document.getElementById('i2vResult');
+  status.innerHTML = '<div class="loading"><div class="spinner"></div>🎬 提交图生视频任务...</div>';
+  result.innerHTML = '';
+  try {
+    let imageUrl = document.getElementById('i2vImageUrl').value.trim();
+    const file = document.getElementById('i2vFile').files[0];
+    if (file && !imageUrl) {
+      const formData = new FormData();
+      formData.append('file', file);
+      formData.append('purpose', 'general');
+      const uploadResp = await fetch(`${API}/api/v1/files/upload?purpose=general`, { method: 'POST', body: formData });
+      const uploadData = await uploadResp.json();
+      imageUrl = uploadData.file_id;
+    }
+    const resp = await fetch(`${API}/api/v1/videos/generations`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: document.getElementById('t2vModel').value,
+        prompt: document.getElementById('i2vPrompt').value.trim(),
+        first_frame_image: imageUrl || undefined,
+      }),
+    });
+    const data = await resp.json();
+    const taskId = data.task_id || data.id;
+    if (taskId) {
+      status.textContent = `✅ 任务已提交！Task ID: ${taskId}`;
+      pollVideoTask(taskId, status, result);
+    } else {
+      result.innerHTML = `<pre style="font-size:.8rem;">${JSON.stringify(data, null, 2)}</pre>`;
+      status.textContent = '⚠️ 未获取到 task_id';
+    }
+  } catch (err) {
+    status.textContent = '❌ ' + err.message;
+  }
+}
+
+async function pollVideoTask(taskId, status, resultDiv) {
+  const log = document.createElement('div');
+  log.className = 'poll-log';
+  resultDiv.innerHTML = '';
+  resultDiv.appendChild(log);
+
+  for (let i = 0; i < 60; i++) {
+    log.textContent += `[${i+1}] 查询中...\n`;
+    log.scrollTop = log.scrollHeight;
+    await new Promise(r => setTimeout(r, 3000));
+    try {
+      const resp = await fetch(`${API}/api/v1/videos/query/${taskId}`);
+      const data = await resp.json();
+      const statusStr = data.status || data.data?.status || 'unknown';
+      log.textContent += `  → 状态: ${statusStr}\n`;
+
+      const fileId = data.file_id || data.data?.file_id;
+      if (fileId) {
+        const videoUrl = `${API}/api/v1/media/${fileId}`;
+        log.textContent += `  ✅ 完成! file_id: ${fileId}\n`;
+        const card = document.createElement('div');
+        card.className = 'result-card';
+        card.innerHTML = `<video controls src="${videoUrl}"></video>
+          <div class="info">
+            <p>✅ 视频生成完成</p>
+            <p>file_id: ${fileId}</p>
+            <p><a href="${videoUrl}" download>下载视频</a></p>
+          </div>`;
+        resultDiv.appendChild(card);
+        status.textContent = '✅ 视频生成完成！';
+        return;
+      }
+      if (['fail','failed','expired','cancelled'].includes(statusStr)) {
+        log.textContent += `  ❌ 任务失败: ${statusStr}\n`;
+        status.textContent = `❌ 任务失败: ${statusStr}`;
+        return;
+      }
+    } catch(e) {
+      log.textContent += `  ⚠️ 查询异常: ${e.message}\n`;
+    }
+  }
+  log.textContent += `⏰ 轮询超时\n`;
+  status.textContent = '⏰ 轮询超时';
+}
+
+async function queryVideo() {
+  const taskId = document.getElementById('queryTaskId').value.trim();
+  if (!taskId) { alert('请输入 Task ID'); return; }
+  document.getElementById('queryStatus').textContent = '⏳ 查询中...';
+  try {
+    const resp = await fetch(`${API}/api/v1/videos/query/${taskId}`);
+    const data = await resp.json();
+    document.getElementById('queryResult').innerHTML = `<pre style="font-size:.8rem;background:#f0f0f0;padding:12px;border-radius:8px;overflow:auto;">${JSON.stringify(data, null, 2)}</pre>`;
+    document.getElementById('queryStatus').textContent = '✅ 查询完成';
+  } catch (err) {
+    document.getElementById('queryStatus').textContent = '❌ ' + err.message;
+  }
+}
+
+function startPoll() {
+  const taskId = document.getElementById('queryTaskId').value.trim();
+  if (!taskId) { alert('请输入 Task ID'); return; }
+  pollVideoTask(taskId,
+    document.getElementById('queryStatus'),
+    document.getElementById('queryResult'));
+}
+</script>
+</body>
+</html>

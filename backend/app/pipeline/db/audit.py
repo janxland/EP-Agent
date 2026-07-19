@@ -55,17 +55,23 @@ def get_traces_by_session(session_id: str, limit: int = 20, offset: int = 0) -> 
 
 def search_traces(
     session_id: str = "",
+    workspace_id: str = "",
+    project_id: str = "",
     domain: str = "",
     status: str = "",
     keyword: str = "",
     limit: int = 50,
     offset: int = 0,
 ) -> list[dict]:
-    """跨 session 全局搜索 trace（支持 domain / status / keyword 过滤）。"""
+    """跨 session 全局搜索 trace（支持 workspace_id / project_id / domain / status / keyword 过滤）。"""
     db = get_db()
     conditions, params = [], []
     if session_id:
         conditions.append("session_id=?"); params.append(session_id)
+    if workspace_id:
+        conditions.append("workspace_id=?"); params.append(workspace_id)
+    if project_id:
+        conditions.append("project_id=?"); params.append(project_id)
     if domain:
         conditions.append("domain=?"); params.append(domain)
     if status:
@@ -81,11 +87,21 @@ def search_traces(
     return [dict(r) for r in rows]
 
 
-def get_trace_stats(session_id: str = "") -> dict:
-    """统计摘要：总数、各状态计数、token 消耗、平均耗时。"""
+def get_trace_stats(
+    session_id: str = "",
+    workspace_id: str = "",
+    project_id: str = "",
+) -> dict:
+    """统计摘要：总数、各状态计数、token 消耗、平均耗时。支持按 workspace/project/session 过滤。"""
     db = get_db()
-    where  = "WHERE session_id=?" if session_id else ""
-    params = [session_id] if session_id else []
+    conditions, params = [], []
+    if session_id:
+        conditions.append("session_id=?"); params.append(session_id)
+    if workspace_id:
+        conditions.append("workspace_id=?"); params.append(workspace_id)
+    if project_id:
+        conditions.append("project_id=?"); params.append(project_id)
+    where  = ("WHERE " + " AND ".join(conditions)) if conditions else ""
     row = db.execute(f"""
         SELECT COUNT(*) AS total,
             SUM(CASE WHEN status='succeeded' THEN 1 ELSE 0 END) AS succeeded,

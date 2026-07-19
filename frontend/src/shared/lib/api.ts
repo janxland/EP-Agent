@@ -428,7 +428,7 @@ export async function generateLyricsMinimax(prompt: string): Promise<{ lyrics: s
 import type { AudioChatRequest, AudioChatResponse, AudioTurn } from '@/shared/types'
 
 /**
- * 对话式音频生成 - 核心 API
+ * 对话式音频生成 - 核心 API（同步版，兼容旧版）
  * 首次调用生成新音频，后续调用在上次基础上迭代（"再欢快一点"式交互）
  */
 export async function chatAudio(
@@ -448,6 +448,136 @@ export async function chatAudio(
     throw new Error(err.detail ?? res.statusText)
   }
   return res.json()
+}
+
+// ─── SSE 流式音频生成事件类型 ─────────────────────────────────────────────────
+
+export interface AudioStreamEvent {
+  id: string
+  type:
+    | 'audio.connected'   // 连接建立
+    | 'pipeline.step'     // 阶段进度（路由识别、Agent 处理等）
+    | 'tool.call'         // 工具调用进度
+    | 'audio.result'      // 最终生成结果
+    | 'audio.error'       // 出错
+    | string              // 其他扩展事件
+  session_id: string
+  display: boolean
+  sequence: number
+  timestamp: string
+  payload: Record<string, unknown>
+}
+
+export interface AudioStreamCallbacks {
+  /** 阶段进度（pipeline.step） */
+  onStep?: (step: { step: string; status: string; text: string }) => void
+  /** 工具调用进度（tool.call） */
+  onToolCall?: (call: { call_id: string; tool: string; status: string; result_preview?: string }) => void
+  /** 生成完成，返回完整结果 */
+  onResult?: (result: AudioChatResponse) => void
+  /** 出错 */
+  onError?: (error: string) => void
+  /** 任意原始事件（供调试或扩展） */
+  onRawEvent?: (event: AudioStreamEvent) => void
+}
+
+/**
+ * 对话式音频生成 — SSE 流式版（推荐）
+ *
+ * 通过 fetch + ReadableStream 实时读取后端推送的进度事件，
+ * 无需等待完整响应，用户可看到「路由识别 → 工具调用 → 生成完成」全过程。
+ *
+ * 返回 AbortController，可调用 .abort() 取消请求。
+ */
+export function chatAudioStream(
+  sessionId: string,
+  message: string,
+  provider: 'auto' | 'minimax' | 'suno' = 'auto',
+  audioB64: string = '',
+  callbacks: AudioStreamCallbacks = {},
+): AbortController {
+  const ac = new AbortController()
+
+  ;(async () => {
+    try {
+      const body: AudioChatRequest = {
+        message,
+        provider,
+        ...(audioB64 ? { audio_b64: audioB64 } : {}),
+      }
+      const res = await fetch(
+        `${BASE_URL}/api/sessions/${sessionId}/audio/chat/stream`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+          signal: ac.signal,
+        },
+      )
+
+      if (!res.ok || !res.body) {
+        const errText = await res.text().catch(() => res.statusText)
+        callbacks.onError?.(errText)
+        return
+      }
+
+      const reader = res.body.getReader()
+      const decoder = new TextDecoder()
+      let buf = ''
+
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
+        buf += decoder.decode(value, { stream: true })
+
+        // 按 SSE 行协议切割：每条事件以 \n\n 结尾
+        const parts = buf.split('\n\n')
+        buf = parts.pop() ?? ''
+
+        for (const part of parts) {
+          // 跳过心跳注释行（": keepalive"）和流结束标记
+          const dataLine = part.split('\n').find((l) => l.startsWith('data: '))
+          if (!dataLine) continue
+          const raw = dataLine.slice(6).trim()
+          if (!raw || raw === '[DONE]') continue
+
+          let evt: AudioStreamEvent
+          try {
+            evt = JSON.parse(raw) as AudioStreamEvent
+          } catch {
+            continue
+          }
+
+          callbacks.onRawEvent?.(evt)
+
+          switch (evt.type) {
+            case 'pipeline.step':
+              callbacks.onStep?.(evt.payload as { step: string; status: string; text: string })
+              break
+            case 'tool.call':
+              callbacks.onToolCall?.(
+                evt.payload as { call_id: string; tool: string; status: string; result_preview?: string },
+              )
+              break
+            case 'audio.result':
+              callbacks.onResult?.(evt.payload as unknown as AudioChatResponse)
+              break
+            case 'audio.error':
+              callbacks.onError?.((evt.payload as { error?: string }).error ?? '生成失败')
+              break
+            default:
+              break
+          }
+        }
+      }
+    } catch (e: unknown) {
+      if ((e as Error)?.name !== 'AbortError') {
+        callbacks.onError?.(String(e))
+      }
+    }
+  })()
+
+  return ac
 }
 
 /**
@@ -620,8 +750,11 @@ export async function listTraceFixtures(traceId: string): Promise<ListFixturesRe
 /** 一键重播指定 trace（Phase 2） */
 export interface ReplayResponse {
   ok: boolean
-  replay_id: string
+  /** fixture/live 重播时由后端写入 replays 表后返回（snapshot 模式可能为空） */
+  replay_id?: string
   session_id: string
+  /** 重播产生的新 session_id（rerun 模式为 rep_session_id，snapshot 模式为 session_id） */
+  rep_session_id?: string
   trace_id: string
   diff_summary: string
   diff_details: Array<{
@@ -741,7 +874,9 @@ export function replayTraceStream(
             if (evt.type === 'replay.step') {
               callbacks.onStep?.(evt as unknown as ReplayStepEvent)
             } else if (evt.type === 'replay.done') {
-              callbacks.onDone?.((evt as unknown as { result: ReplayResponse }).result)
+              // BUG-FIX: 后端直接把摘要字段平铺在 evt 上，没有嵌套 result 字段
+              // evt 本身就是 ReplayResponse（去掉 type 字段）
+              callbacks.onDone?.(evt as unknown as ReplayResponse)
             } else if (evt.type === 'replay.error') {
               callbacks.onError?.((evt as unknown as { error: string }).error)
             }
@@ -765,6 +900,46 @@ export async function getSessionTraceStats(sessionId: string): Promise<{
   stats: import('@/features/chat/store/timeline.store').TraceStats
 }> {
   const res = await fetch(`${BASE_URL}/api/sessions/${sessionId}/traces/stats`)
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
+}
+
+/** 全局/按层级查询 trace 列表（支持 workspace_id / project_id / session_id 过滤） */
+export async function searchTracesGlobal(params: {
+  workspace_id?: string
+  project_id?: string
+  session_id?: string
+  domain?: string
+  status?: string
+  keyword?: string
+  limit?: number
+  offset?: number
+}): Promise<{ ok: boolean; traces: import('@/shared/types/trace.types').TraceDto[]; total: number }> {
+  const q = new URLSearchParams()
+  if (params.workspace_id) q.set('workspace_id', params.workspace_id)
+  if (params.project_id)   q.set('project_id',   params.project_id)
+  if (params.session_id)   q.set('session_id',   params.session_id)
+  if (params.domain)       q.set('domain',       params.domain)
+  if (params.status)       q.set('status',       params.status)
+  if (params.keyword)      q.set('keyword',      params.keyword)
+  if (params.limit  != null) q.set('limit',  String(params.limit))
+  if (params.offset != null) q.set('offset', String(params.offset))
+  const res = await fetch(`${BASE_URL}/api/traces/search?${q.toString()}`)
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
+}
+
+/** 全局/按层级审计统计（支持 workspace_id / project_id / session_id 过滤） */
+export async function getGlobalTraceStats(params: {
+  workspace_id?: string
+  project_id?: string
+  session_id?: string
+}): Promise<{ ok: boolean; stats: import('@/features/chat/store/timeline.store').TraceStats }> {
+  const q = new URLSearchParams()
+  if (params.workspace_id) q.set('workspace_id', params.workspace_id)
+  if (params.project_id)   q.set('project_id',   params.project_id)
+  if (params.session_id)   q.set('session_id',   params.session_id)
+  const res = await fetch(`${BASE_URL}/api/traces/stats?${q.toString()}`)
   if (!res.ok) throw new Error(await res.text())
   return res.json()
 }

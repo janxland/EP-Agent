@@ -1,0 +1,322 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>MiniMax 音乐生成测试</title>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body { font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
+         background:#f5f5f7; color:#1d1d1f; }
+  .header { background:linear-gradient(135deg,#f093fb,#f5576c); color:#fff;
+            padding:20px 24px; display:flex; align-items:center; gap:12px; }
+  .header h1 { font-size:1.3rem; }
+  .header a { color:#fff; opacity:.8; text-decoration:none; font-size:.85rem; }
+  .header a:hover { opacity:1; }
+  .container { max-width:900px; margin:0 auto; padding:24px; }
+  .panel { background:#fff; border-radius:16px; padding:24px; margin-bottom:16px;
+           box-shadow:0 2px 12px rgba(0,0,0,.06); }
+  .panel h2 { font-size:1.1rem; margin-bottom:16px; display:flex;align-items:center;gap:8px; }
+  .row { display:flex; gap:12px; margin-bottom:12px; flex-wrap:wrap; }
+  .form-group { flex:1; min-width:160px; }
+  .form-group label { display:block; font-size:.8rem; font-weight:600; color:#555; margin-bottom:4px; }
+  .form-group input,.form-group select,.form-group textarea { width:100%; padding:8px 10px;
+    border:1px solid #d1d1d6; border-radius:8px; font-size:.85rem; outline:none; }
+  .form-group textarea { resize:vertical; min-height:80px; font-size:.9rem; }
+  .form-group textarea:focus { border-color:#f5576c; }
+  .btn { padding:10px 24px; border:none; border-radius:10px; font-size:.9rem; font-weight:600;
+         cursor:pointer; transition:all .15s; }
+  .btn-primary { background:#f5576c; color:#fff; }
+  .btn-primary:hover { background:#e04a5e; }
+  .btn-primary:disabled { opacity:.5; cursor:not-allowed; }
+  .btn-secondary { background:#e8e8ed; color:#555; }
+  .btn-secondary:hover { background:#ddd; }
+  .btn-success { background:#2ed573; color:#fff; }
+  .tab-bar { display:flex; gap:4px; margin-bottom:16px; }
+  .tab { padding:8px 16px; border-radius:8px 8px 0 0; cursor:pointer; font-size:.85rem;
+         background:#e8e8ed; color:#666; border:none; font-weight:500; }
+  .tab.active { background:#fff; color:#f5576c; font-weight:600; }
+  .result-card { background:#f8f9fa; border-radius:10px; padding:16px; margin-top:12px; }
+  .result-card audio { width:100%; margin-top:8px; }
+  .lyrics-box { white-space:pre-wrap; background:#f0f0f0; padding:12px; border-radius:8px;
+                font-size:.85rem; line-height:1.6; margin-top:8px; max-height:300px; overflow-y:auto; }
+  .loading { display:flex; align-items:center; gap:8px; padding:12px; }
+  .spinner { width:20px; height:20px; border:2px solid #f0f0f0; border-top-color:#f5576c;
+             border-radius:50%; animation:spin .8s linear infinite; }
+  @keyframes spin { to{transform:rotate(360deg)} }
+  .status { font-size:.85rem; color:#666; margin-top:8px; }
+</style>
+</head>
+<body>
+<div class="header">
+  <a href="/">← 返回</a>
+  <h1>🎵 音乐生成</h1>
+</div>
+<div class="container">
+  <div class="tab-bar">
+    <button class="tab active" onclick="switchTab('generate',this)">生成音乐</button>
+    <button class="tab" onclick="switchTab('lyrics',this)">生成歌词</button>
+    <button class="tab" onclick="switchTab('cover',this)">音乐翻唱</button>
+  </div>
+
+  <!-- 音乐生成 -->
+  <div class="panel" id="tabGenerate">
+    <h2>🎼 音乐生成参数</h2>
+    <div class="row">
+      <div class="form-group">
+        <label>模型</label>
+        <select id="musicModel">
+          <option value="music-3.0">music-3.0</option>
+          <option value="music-2.0">music-2.0</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label>时长（秒）</label>
+        <select id="duration">
+          <option value="">默认</option>
+          <option value="30">30秒</option>
+          <option value="60">60秒</option>
+          <option value="90">90秒</option>
+          <option value="120">120秒</option>
+        </select>
+      </div>
+    </div>
+    <div class="form-group">
+      <label>描述提示词</label>
+      <textarea id="musicPrompt" rows="3" placeholder="描述想要的音乐风格、情感...">一首轻快的流行歌曲，节奏明快，充满阳光气息</textarea>
+    </div>
+    <div class="form-group">
+      <label>歌词（可选）</label>
+      <textarea id="musicLyrics" rows="5" placeholder="输入歌词，或留空由 AI 生成"></textarea>
+    </div>
+    <button class="btn btn-primary" id="genMusicBtn" onclick="generateMusic()">🎵 生成音乐</button>
+    <div class="status" id="musicStatus"></div>
+    <div id="musicResult"></div>
+  </div>
+
+  <!-- 歌词生成 -->
+  <div class="panel" id="tabLyrics" style="display:none;">
+    <h2>📝 歌词生成</h2>
+    <div class="form-group">
+      <label>模式</label>
+      <select id="lyricsMode">
+        <option value="write_full_song">完整创作</option>
+        <option value="edit">编辑修改</option>
+      </select>
+    </div>
+    <div class="form-group">
+      <label>主题/提示词</label>
+      <textarea id="lyricsPrompt" rows="3" placeholder="描述歌曲主题、风格...">写一首关于夏天的歌，有海滩、阳光和冰激凌</textarea>
+    </div>
+    <div class="form-group">
+      <label>标题（可选）</label>
+      <input id="lyricsTitle" placeholder="歌曲标题">
+    </div>
+    <div class="form-group" id="editLyricsGroup" style="display:none;">
+      <label>现有歌词（编辑模式）</label>
+      <textarea id="editLyrics" rows="5" placeholder="输入要编辑的歌词"></textarea>
+    </div>
+    <button class="btn btn-primary" onclick="generateLyrics()">📝 生成歌词</button>
+    <div class="status" id="lyricsStatus"></div>
+    <div id="lyricsResult"></div>
+  </div>
+
+  <!-- 音乐翻唱 -->
+  <div class="panel" id="tabCover" style="display:none;">
+    <h2>🎤 音乐翻唱</h2>
+    <p style="font-size:.85rem;color:#666;margin-bottom:12px;">上传一段音频或提供音频 URL，AI 将翻唱该歌曲。</p>
+    <div class="form-group">
+      <label>翻唱风格描述</label>
+      <textarea id="coverPrompt" rows="3" placeholder="描述想要的翻唱风格...">用摇滚风格翻唱这首歌</textarea>
+    </div>
+    <div class="form-group">
+      <label>音频 URL</label>
+      <input id="coverUrl" placeholder="输入音频 URL">
+    </div>
+    <div class="form-group">
+      <label>或上传音频文件</label>
+      <input type="file" id="coverFile" accept="audio/*">
+    </div>
+    <div class="form-group">
+      <label>歌词（可选）</label>
+      <textarea id="coverLyrics" rows="4" placeholder="输入翻唱歌词"></textarea>
+    </div>
+    <button class="btn btn-primary" onclick="musicCover()">🎤 开始翻唱</button>
+    <div class="status" id="coverStatus"></div>
+    <div id="coverResult"></div>
+  </div>
+</div>
+
+<script>
+const API = '';
+
+function switchTab(tab, btn) {
+  document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+  btn.classList.add('active');
+  document.getElementById('tabGenerate').style.display = tab === 'generate' ? 'block' : 'none';
+  document.getElementById('tabLyrics').style.display = tab === 'lyrics' ? 'block' : 'none';
+  document.getElementById('tabCover').style.display = tab === 'cover' ? 'block' : 'none';
+}
+
+document.getElementById('lyricsMode').onchange = function() {
+  document.getElementById('editLyricsGroup').style.display = this.value === 'edit' ? 'block' : 'none';
+};
+
+async function generateMusic() {
+  const btn = document.getElementById('genMusicBtn');
+  const status = document.getElementById('musicStatus');
+  const resultDiv = document.getElementById('musicResult');
+  btn.disabled = true;
+  status.innerHTML = '<div class="loading"><div class="spinner"></div>🎵 正在生成音乐...</div>';
+  resultDiv.innerHTML = '';
+
+  const payload = {
+    model: document.getElementById('musicModel').value,
+    prompt: document.getElementById('musicPrompt').value.trim() || undefined,
+    lyrics: document.getElementById('musicLyrics').value.trim() || undefined,
+  };
+  const d = document.getElementById('duration').value;
+  if (d) payload.duration = parseInt(d);
+
+  try {
+    const resp = await fetch(`${API}/api/v1/music/generations`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    const data = await resp.json();
+    const fileId = data.file_id || data.data?.file_id;
+    const taskId = data.task_id || data.id;
+    if (fileId) {
+      const audioUrl = `${API}/api/v1/media/${fileId}`;
+      resultDiv.innerHTML = `
+        <div class="result-card">
+          <p><strong>✅ 生成成功</strong> (file_id: ${fileId})</p>
+          <audio controls src="${audioUrl}"></audio>
+          <p style="font-size:.8rem;color:#666;margin-top:4px;">
+            <a href="${audioUrl}" download>下载音频</a>
+          </p>
+        </div>`;
+      status.textContent = '✅ 音乐生成完成！';
+    } else if (taskId) {
+      status.textContent = `⏳ 任务 ${taskId} 已提交，正在轮询...`;
+      pollMusicTask(taskId, status, resultDiv);
+    } else {
+      resultDiv.innerHTML = `<div class="result-card"><pre style="font-size:.8rem;">${JSON.stringify(data, null, 2)}</pre></div>`;
+      status.textContent = '⚠️ 未识别到 file_id/task_id';
+    }
+  } catch (err) {
+    status.textContent = '❌ ' + err.message;
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+async function pollMusicTask(taskId, status, resultDiv) {
+  for (let i = 0; i < 30; i++) {
+    await new Promise(r => setTimeout(r, 2000));
+    try {
+      const resp = await fetch(`${API}/api/v1/jobs/${taskId}`);
+      const data = await resp.json();
+      const fileId = data.file_id || data.data?.file_id;
+      if (fileId) {
+        const audioUrl = `${API}/api/v1/media/${fileId}`;
+        resultDiv.innerHTML = `
+          <div class="result-card">
+            <p><strong>✅ 生成成功</strong> (file_id: ${fileId})</p>
+            <audio controls src="${audioUrl}"></audio>
+          </div>`;
+        status.textContent = '✅ 完成！';
+        return;
+      }
+      const s = data.status || data.data?.status || '';
+      status.textContent = `⏳ 第 ${i+1} 次轮询... (${s})`;
+    } catch(e) {
+      status.textContent = `⏳ 第 ${i+1} 次轮询...`;
+    }
+  }
+  status.textContent = '⏰ 轮询超时';
+}
+
+async function generateLyrics() {
+  const status = document.getElementById('lyricsStatus');
+  const resultDiv = document.getElementById('lyricsResult');
+  status.textContent = '⏳ 生成歌词...';
+  resultDiv.innerHTML = '';
+  try {
+    const payload = {
+      mode: document.getElementById('lyricsMode').value,
+      prompt: document.getElementById('lyricsPrompt').value.trim() || undefined,
+      title: document.getElementById('lyricsTitle').value.trim() || undefined,
+    };
+    if (payload.mode === 'edit') {
+      payload.lyrics = document.getElementById('editLyrics').value.trim() || undefined;
+    }
+    const resp = await fetch(`${API}/api/v1/music/lyrics`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    const data = await resp.json();
+    const lyrics = data.lyrics || data.data?.lyrics || JSON.stringify(data, null, 2);
+    resultDiv.innerHTML = `<div class="result-card"><h3>${document.getElementById('lyricsTitle').value || '歌词'}</h3><div class="lyrics-box">${lyrics}</div></div>`;
+    status.textContent = '✅ 歌词生成完成！';
+  } catch (err) {
+    status.textContent = '❌ ' + err.message;
+  }
+}
+
+async function musicCover() {
+  const status = document.getElementById('coverStatus');
+  const resultDiv = document.getElementById('coverResult');
+  status.textContent = '⏳ 处理翻唱...';
+  resultDiv.innerHTML = '';
+  try {
+    const prompt = document.getElementById('coverPrompt').value.trim() || '翻唱这首歌';
+    const coverUrl = document.getElementById('coverUrl').value.trim();
+    const coverFile = document.getElementById('coverFile').files[0];
+    const lyrics = document.getElementById('coverLyrics').value.trim() || undefined;
+
+    let payload;
+    if (coverUrl) {
+      payload = { model: 'music-cover', prompt, audio_url: coverUrl, lyrics };
+    } else if (coverFile) {
+      // 上传文件
+      const formData = new FormData();
+      formData.append('file', coverFile);
+      formData.append('purpose', 'general');
+      const uploadResp = await fetch(`${API}/api/v1/files/upload?purpose=general`, {
+        method: 'POST',
+        body: formData,
+      });
+      const uploadData = await uploadResp.json();
+      const fileId = uploadData.file_id || uploadData.data?.file_id;
+      if (!fileId) throw new Error('文件上传失败');
+      // 预处理
+      const preResp = await fetch(`${API}/api/v1/request`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ method:'POST', path:'/music_cover_preprocess', json:{ model:'music-cover', audio_url:`file://${fileId}` } }),
+      });
+      // 简化为直接使用上传的 file
+      payload = { model: 'music-cover', prompt, audio_url: fileId, lyrics };
+    } else {
+      status.textContent = '⚠️ 请提供音频 URL 或上传文件';
+      return;
+    }
+
+    const resp = await fetch(`${API}/api/v1/music/generations`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    const data = await resp.json();
+    resultDiv.innerHTML = `<div class="result-card"><pre style="font-size:.8rem;">${JSON.stringify(data, null, 2)}</pre></div>`;
+    status.textContent = '✅ 翻唱请求已提交！';
+  } catch (err) {
+    status.textContent = '❌ ' + err.message;
+  }
+}
+</script>
+</body>
+</html>

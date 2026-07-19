@@ -24,6 +24,9 @@ export interface TraceDto {
 // ─── Span（单个工具调用 / 推理步骤）─────────────────────────────────
 
 export type SpanKind = 'model' | 'tool' | 'routing' | 'todo_plan' | 'memory' | 'chain'
+  | 'node'   // LangGraph 节点（graph.node_enter/exit）
+  | 'step'   // pipeline.step 流程步骤
+  | 'agent'  // SubAgent 调用层级（agent.call）
 export type SpanStatus = 'running' | 'ok' | 'error' | 'timeout' | 'skipped'
 
 export interface SpanDto {
@@ -117,6 +120,9 @@ export const SPAN_KIND_COLOR: Record<SpanKind, string> = {
   todo_plan: 'bg-yellow-100 text-yellow-700',
   memory:    'bg-green-100 text-green-700',
   chain:     'bg-pink-100 text-pink-700',
+  node:      'bg-slate-100 text-slate-600',
+  step:      'bg-cyan-100 text-cyan-700',
+  agent:     'bg-indigo-100 text-indigo-700',
 }
 
 /** span status 对应的图标 */
